@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · Pattern Brain{% endblock %}
+{% block content %}
+<section class="panel">
+    <div class="panel-head">
+        <h3>Pattern Brain</h3>
+        <span>Structure Recognition</span>
+    </div>
+    {% if pattern_errors %}<p class="error">{{ pattern_errors|join(' | ') }}</p>{% endif %}
+    <div class="price-map-list">
+        {% for row in pattern_rows %}
+        <article class="price-map-card">
+            <div class="price-map-head"><h4>{{ row.ticker }}</h4><span>{{ row.last_updated }}</span></div>
+            <div class="price-map-grid">
+                {% for pattern in row.patterns[:8] %}
+                <div><small>{{ pattern.pattern }}</small><b>{{ (pattern.confidence * 100)|round|int }}%</b></div>
+                {% endfor %}
+            </div>
+        </article>
+        {% else %}
+        <article class="future-platform-card">
+            <h4>No Pattern Signals</h4>
+            <p>Waiting for market data.</p>
+            <span>Standby</span>
+        </article>
+        {% endfor %}
+    </div>
+</section>
+{% endblock %}

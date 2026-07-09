@@ -1,0 +1,380 @@
+.hero {
+    display: grid;
+    grid-template-columns: 1.2fr 0.8fr;
+    gap: 16px;
+    align-items: center;
+    padding: 24px;
+    margin-bottom: 16px;
+}
+
+.eyebrow {
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    opacity: 0.72;
+    font-size: 12px;
+}
+
+.hero h2 {
+    margin: 8px 0 6px;
+    font-family: "Orbitron", sans-serif;
+    font-size: clamp(32px, 4vw, 52px);
+    background: linear-gradient(120deg, #fff, #b9e8ff);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+}
+
+.hero p {
+    margin: 0 0 18px;
+    color: rgba(255, 255, 255, 0.76);
+}
+
+.mission-wrap { max-width: 420px; }
+
+.mission-labels {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    font-size: 13px;
+}
+
+.mission-bar {
+    height: 11px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.09);
+    overflow: hidden;
+}
+
+.mission-progress {
+    width: 72%;
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--purple), var(--accent), var(--neon));
+}
+
+.hero-planet-wrap {
+    position: relative;
+    width: 260px;
+    height: 260px;
+    margin: 0 auto;
+}
+
+.pluto-planet {
+    width: 210px;
+    height: 210px;
+    border-radius: 50%;
+    margin: 25px auto 0;
+    background: radial-gradient(circle at 30% 25%, #9d79ff 0%, #7b2cff 36%, #340083 75%, #140024 100%);
+    box-shadow: 0 0 40px rgba(123, 44, 255, 0.7), inset 0 0 25px rgba(255, 255, 255, 0.25);
+}
+
+.planet-ring {
+    position: absolute;
+    inset: 45% auto auto 50%;
+    width: 260px;
+    height: 82px;
+    border: 2px solid rgba(0, 234, 255, 0.38);
+    border-radius: 50%;
+    transform: translate(-50%, -50%) rotate(-10deg);
+}
+
+.pulse-planet {
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--accent);
+    top: 22px;
+    right: 28px;
+}
+
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(140px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.metric-card {
+    padding: 14px;
+    border-radius: 16px;
+}
+
+.metric-card h3 {
+    margin: 0;
+    font-size: 12px;
+    opacity: 0.74;
+    text-transform: uppercase;
+}
+
+.metric-value {
+    margin: 10px 0 0;
+    font-size: 26px;
+    font-weight: 700;
+    font-family: "Orbitron", sans-serif;
+}
+
+.command-grid {
+    display: grid;
+    grid-template-columns: 1.4fr 0.8fr;
+    gap: 12px;
+}
+
+.center-panel {
+    padding: 18px;
+}
+
+.right-panel {
+    display: grid;
+    gap: 12px;
+}
+
+.panel {
+    padding: 14px;
+}
+
+.panel h3 {
+    margin-top: 0;
+}
+
+.radar-core {
+    width: 180px;
+    height: 180px;
+    margin: 12px auto 6px;
+    border-radius: 50%;
+    border: 1px solid rgba(0, 234, 255, 0.45);
+    background:
+        radial-gradient(circle at center, rgba(0, 255, 153, 0.18), rgba(0, 255, 153, 0.02) 65%, transparent 68%),
+        repeating-radial-gradient(circle, transparent, transparent 17px, rgba(0, 234, 255, 0.12) 18px, rgba(0, 234, 255, 0.12) 19px);
+    position: relative;
+    overflow: hidden;
+}
+
+.radar-sweep {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: conic-gradient(from 0deg, rgba(0, 255, 153, 0), rgba(0, 255, 153, 0.42), rgba(0, 255, 153, 0));
+}
+
+.stack-list,
+.feed-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 8px;
+}
+
+.stack-list li,
+.feed-list li {
+    background: rgba(4, 18, 34, 0.45);
+    border: 1px solid rgba(0, 234, 255, 0.18);
+    border-radius: 12px;
+    padding: 8px 10px;
+}
+
+.stack-list li {
+    display: flex;
+    justify-content: space-between;
+}
+
+.integration-hooks {
+    margin-top: 16px;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(160px, 1fr));
+    gap: 12px;
+}
+
+.hook-card {
+    padding: 15px;
+}
+
+.hook-card h3 {
+    margin-top: 0;
+    font-size: 16px;
+}
+
+.hook-card p {
+    margin-bottom: 0;
+    color: rgba(255, 255, 255, 0.72);
+    font-size: 13px;
+}
+
+.opportunities-panel {
+    padding: 16px;
+    margin-bottom: 12px;
+}
+
+.panel-subtext {
+    margin: 6px 0 0;
+    color: rgba(255, 255, 255, 0.72);
+    font-size: 12px;
+}
+
+.opportunities-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.opportunity-card {
+    padding: 14px;
+    border-radius: 16px;
+}
+
+.high-conviction {
+    border: 1px solid rgba(0, 255, 153, 0.48);
+    box-shadow: 0 0 24px rgba(0, 255, 153, 0.16), 0 16px 32px rgba(0, 0, 0, 0.32);
+}
+
+.opportunity-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    align-items: flex-start;
+}
+
+.opportunity-header h4 {
+    margin: 0;
+    font-size: 20px;
+    font-family: "Orbitron", sans-serif;
+}
+
+.opportunity-header p {
+    margin: 4px 0 0;
+    opacity: 0.8;
+    font-size: 12px;
+}
+
+.opportunity-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: flex-end;
+}
+
+.opportunity-metrics {
+    margin-top: 10px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px 10px;
+    font-size: 13px;
+}
+
+.opportunity-metrics p,
+.price-watch-grid p,
+.options-card p {
+    margin: 4px 0;
+}
+
+.price-watch-grid {
+    margin-top: 12px;
+    padding: 10px;
+    border-radius: 12px;
+    background: rgba(4, 18, 34, 0.38);
+    border: 1px solid rgba(0, 234, 255, 0.14);
+}
+
+.price-watch-grid h5,
+.thesis-block h5,
+.case-grid h5,
+.options-research-block h5 {
+    margin: 0 0 8px;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    opacity: 0.86;
+}
+
+.thesis-block {
+    margin-top: 12px;
+}
+
+.thesis-block p {
+    margin: 0;
+    color: rgba(255, 255, 255, 0.78);
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.case-grid {
+    margin-top: 12px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.options-research-block {
+    margin-top: 12px;
+}
+
+.options-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.options-card {
+    padding: 10px;
+    border-radius: 12px;
+}
+
+.options-card h6 {
+    margin: 0 0 6px;
+    font-size: 13px;
+    font-family: "Orbitron", sans-serif;
+}
+
+.option-language {
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 12px;
+}
+
+.opportunity-side-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.timeline-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.timeline-bucket h4 {
+    margin: 0 0 8px;
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    opacity: 0.86;
+}
+
+@media (max-width: 1240px) {
+    .app-shell { grid-template-columns: 220px 1fr; }
+    .stats-grid { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
+    .command-grid { grid-template-columns: 1fr; }
+    .integration-hooks { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
+    .opportunities-grid { grid-template-columns: 1fr; }
+    .options-grid { grid-template-columns: 1fr; }
+    .opportunity-side-grid { grid-template-columns: 1fr; }
+    .timeline-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 960px) {
+    .app-shell { grid-template-columns: 1fr; }
+    .left-nav { display: none; }
+    .hero { grid-template-columns: 1fr; }
+    .watchlist-form {
+        grid-template-columns: 1fr;
+    }
+    .drawer-form {
+        grid-template-columns: 1fr;
+    }
+    .opportunity-metrics,
+    .case-grid {
+        grid-template-columns: 1fr;
+    }
+}

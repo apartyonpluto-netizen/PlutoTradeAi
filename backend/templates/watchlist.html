@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · Watchlist{% endblock %}
+{% block content %}
+<section class="panel">
+    <div class="panel-head"><h3>Watchlist Management</h3><span>data/watchlist.csv</span></div>
+    <form id="watchlistForm" class="grid-form">
+        <input type="text" name="ticker" placeholder="Ticker" required>
+        <input type="text" name="category" placeholder="Category" value="Priority">
+        <input type="text" name="status" placeholder="Status" value="Active">
+        <input type="number" name="ai_score" placeholder="AI Score" min="0" max="99">
+        <input type="text" name="notes" placeholder="Notes">
+        <button type="submit">Add Ticker</button>
+    </form>
+</section>
+
+<section class="panel">
+    <div class="panel-head"><h3>Search · Sort · Filter</h3><span>Real-time watchlist tools</span></div>
+    <form id="watchlistControls" class="grid-form">
+        <input type="search" name="q" placeholder="Search ticker or notes">
+        <input type="text" name="category" placeholder="Filter category">
+        <input type="text" name="status" placeholder="Filter status">
+        <select name="sort_by">
+            <option value="ticker">Sort: Ticker</option>
+            <option value="ai_score">Sort: AI Score</option>
+            <option value="category">Sort: Category</option>
+            <option value="status">Sort: Status</option>
+        </select>
+        <select name="direction">
+            <option value="asc">Ascending</option>
+            <option value="desc">Descending</option>
+        </select>
+        <button type="button" id="applyWatchlistFilters">Apply</button>
+    </form>
+</section>
+
+<section class="panel panel-table">
+    <div class="panel-head"><h3>Editable Watchlist</h3><span id="watchlistCount">{{ watchlist|length }} entries</span></div>
+    <table id="watchlistTable">
+        <thead><tr><th>Ticker</th><th>Category</th><th>Status</th><th>AI Score</th><th>Notes</th><th>Actions</th></tr></thead>
+        <tbody>
+        {% for item in watchlist %}
+        <tr data-ticker="{{ item.ticker }}">
+            <td>{{ item.ticker }}</td>
+            <td><input type="text" value="{{ item.category }}" data-field="category"></td>
+            <td><input type="text" value="{{ item.status }}" data-field="status"></td>
+            <td><input type="number" value="{{ item.ai_score }}" data-field="ai_score"></td>
+            <td><input type="text" value="{{ item.notes }}" data-field="notes"></td>
+            <td class="action-row">
+                <button class="save-watchlist" type="button">Save</button>
+                <button class="delete-watchlist ghost-button" type="button">Delete</button>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<section class="panel">
+    <div class="panel-head"><h3>AI Suggestions</h3><span>Scanner score ≥ 65 and not on watchlist</span></div>
+    <div id="suggestionsList">
+        {% for suggestion in suggestions %}
+        <div class="alert-row" data-suggestion-ticker="{{ suggestion.ticker }}">
+            <div>
+                <b>{{ suggestion.ticker }} · Score {{ suggestion.scanner_score }}</b>
+                <p>${{ suggestion.current_price }} · {{ suggestion.percent_change }}% · {{ suggestion.relative_volume }}x RVOL</p>
+                <p>{{ suggestion.reason }}</p>
+            </div>
+            <div class="action-row">
+                <button type="button" class="add-suggestion-to-watchlist">Add to Watchlist</button>
+                <button type="button" class="ghost-button dismiss-suggestion">Dismiss</button>
+            </div>
+        </div>
+        {% else %}
+        <p class="muted">No scanner suggestions currently.</p>
+        {% endfor %}
+    </div>
+</section>
+
+<section class="panel">
+    <div class="panel-head"><h3>AI Chart Marks</h3><span>Auto-detected levels from OHLCV + intraday structure</span></div>
+    <p class="muted">For research only. Draw and confirm levels manually before acting.</p>
+    <div
+        id="aiChartMarksList"
+        class="ai-chart-marks-list"
+        data-ai-chart-marks="true"
+        data-tickers="{{ watchlist | map(attribute='ticker') | join(',') }}"
+    >
+        <p class="muted">Loading AI chart marks...</p>
+    </div>
+</section>
+
+<section class="panel">
+    <div class="panel-head"><h3>AI Options Suggestions</h3><span>Uses live yfinance options chain when available</span></div>
+    <p class="muted">For research only. Not financial advice.</p>
+    <div
+        class="options-suggestions-list"
+        data-options-suggestions="true"
+        data-tickers="{{ watchlist | map(attribute='ticker') | join(',') }}"
+    >
+        <p class="muted">Loading options suggestions...</p>
+    </div>
+</section>
+{% endblock %}

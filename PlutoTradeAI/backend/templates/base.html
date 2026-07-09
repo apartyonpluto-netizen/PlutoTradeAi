@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PlutoTrade AI | Galaxy Cockpit</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/galaxy.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/components.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/animations.css') }}">
+</head>
+<body>
+    <div class="space-backdrop">
+        <canvas id="starfield"></canvas>
+        <div class="nebula nebula-a"></div>
+        <div class="nebula nebula-b"></div>
+        <div class="warp-layer" id="warpLayer"></div>
+    </div>
+
+    <div class="app-shell fade-in-up">
+        <aside class="left-nav glass-panel">
+            <div class="brand">
+                <div class="brand-orb"></div>
+                <div>
+                    <h1>PlutoTrade AI</h1>
+                    <p>Galaxy Command</p>
+                </div>
+            </div>
+            <nav class="menu">
+                <a href="{{ url_for('mission_briefing') }}" class="menu-item {{ 'active' if request.path == '/' else '' }}">Mission Brief</a>
+                <a href="{{ url_for('dashboard') }}" class="menu-item {{ 'active' if request.path == '/dashboard' else '' }}">Dashboard</a>
+                <a href="/mission-control" class="menu-item {{ 'active' if request.path == '/mission-control' else '' }}">Mission Control</a>
+                <a href="{{ url_for('watchlist_page') }}" class="menu-item {{ 'active' if request.path == '/watchlist' else '' }}">Watchlist</a>
+                <a href="{{ url_for('scanner_page') }}" class="menu-item {{ 'active' if request.path == '/scanner' else '' }}">Market Scanner</a>
+                <a href="/volume-scanner" class="menu-item {{ 'active' if request.path == '/volume-scanner' else '' }}">Volume Scanner</a>
+                <a href="{{ url_for('support_resistance_page') }}" class="menu-item {{ 'active' if request.path == '/support-resistance' else '' }}">Support / Resistance</a>
+                <a href="{{ url_for('candle_brain_page') }}" class="menu-item {{ 'active' if request.path == '/candle-brain' else '' }}">Candle Brain</a>
+                <a href="{{ url_for('pattern_brain_page') }}" class="menu-item {{ 'active' if request.path == '/pattern-brain' else '' }}">Pattern Brain</a>
+                <a href="{{ url_for('news_intelligence_page') }}" class="menu-item {{ 'active' if request.path == '/news-intelligence' else '' }}">News Intelligence</a>
+                <a href="{{ url_for('notifications_page') }}" class="menu-item {{ 'active' if request.path == '/notifications' else '' }}">Notifications</a>
+                <a href="{{ url_for('account_hub_page') }}" class="menu-item {{ 'active' if request.path == '/account-hub' else '' }}">Account Hub</a>
+                <a href="{{ url_for('trade_journal_page') }}" class="menu-item {{ 'active' if request.path == '/trade-journal' else '' }}">Trade Journal</a>
+                <a href="{{ url_for('neural_engine_page') }}" class="menu-item {{ 'active' if request.path == '/neural-engine' else '' }}">Neural Engine</a>
+                <a href="{{ url_for('settings_page') }}" class="menu-item {{ 'active' if request.path == '/settings' else '' }}">Settings</a>
+            </nav>
+        </aside>
+
+        <div class="main-shell">
+            <header class="top-nav glass-panel">
+                <div class="search-wrap">
+                    <input id="globalSearch" class="search-input" type="text" placeholder="Search ticker, signal, or module...">
+                </div>
+                <div class="top-status">
+                    <span class="status-pill"><i class="dot live"></i>Market: <strong id="marketStatus">Checking...</strong></span>
+                    <span class="status-pill"><i class="dot ai"></i>AI: <strong id="aiStatus">Online</strong></span>
+                    <button class="status-pill notification-toggle" id="notificationDrawerToggle">Notifications: <strong id="notificationCount">{{ alerts|length if alerts is defined else 0 }}</strong></button>
+                    <span class="status-pill">Time: <strong id="liveClock">--:--:--</strong></span>
+                    <span class="profile-chip">CS</span>
+                </div>
+            </header>
+            <main class="page-content">
+                {% block content %}{% endblock %}
+            </main>
+        </div>
+    </div>
+
+    <aside class="notification-drawer glass-panel" id="notificationDrawer">
+        <div class="panel-header">
+            <h3>Notification Center</h3>
+            <div class="drawer-actions">
+                <button type="button" class="btn-neutral" id="notificationMarkAll">Mark All Read</button>
+                <button type="button" class="btn-neutral" id="notificationDrawerClose">Close</button>
+            </div>
+        </div>
+        <form id="manualAlertForm" class="drawer-form">
+            <input type="text" name="ticker" placeholder="Ticker (optional)">
+            <input type="text" name="message" placeholder="Add notification message" required>
+            <button type="submit" class="btn-gradient">Add</button>
+        </form>
+        <div id="notificationList">
+            {% if alerts is defined %}
+                {% for alert in alerts %}
+                <div class="alert-item" data-alert-id="{{ alert.id }}">
+                    <div>
+                        <b>{{ alert.type }}</b>
+                        <p>{{ alert.ticker }} {{ alert.message }}</p>
+                    </div>
+                    <button type="button" class="btn-neutral dismiss-alert" data-alert-id="{{ alert.id }}">Dismiss</button>
+                </div>
+                {% endfor %}
+            {% endif %}
+        </div>
+    </aside>
+
+    <script src="{{ url_for('static', filename='js/galaxy.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/animations.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+</body>
+</html>

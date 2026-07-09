@@ -1,0 +1,8 @@
+ticker,category,status,ai_score,notes
+TSLA,Priority,Active,0,Tesla main watch
+NVDA,Priority,Active,0,Nvidia main watch
+AAPL,Priority,Active,0,Apple main watch
+AMD,Priority,Active,0,AMD semiconductor watch
+SPY,Market,Active,0,S&P 500 market direction
+QQQ,Market,Active,0,Nasdaq market direction
+PLTR,Priority,Active,78,AI detected strong volume and breakout setup

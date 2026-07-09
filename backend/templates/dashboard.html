@@ -1,0 +1,395 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · Mission Control{% endblock %}
+{% block body_class %}mission-control-page{% endblock %}
+
+{% block content %}
+<section class="mission-control-layout">
+    <section class="center-command">
+        <section class="glass-panel orbital-command-stage">
+            <div class="orbital-command-grid">
+                <article class="float-module module-nw">
+                    <small>Neural Link</small>
+                    <h4>{{ status_summary.ai_status }}</h4>
+                    <p>Core confidence {{ status_summary.ai_confidence }}</p>
+                </article>
+                <article class="float-module module-w">
+                    <small>Risk Envelope</small>
+                    <h4>{{ status_summary.risk_level }}</h4>
+                    <p>{{ status_summary.market_sentiment }} sentiment stream</p>
+                </article>
+                <article class="float-module module-sw">
+                    <small>Scanner Pulse</small>
+                    <h4>{{ status_summary.scanner_status }}</h4>
+                    <p>{{ scanner_rows|length }} symbols in orbital tracking</p>
+                </article>
+                <article class="float-module module-ne">
+                    <small>Opportunity Queue</small>
+                    <h4>{{ status_summary.opportunity_count }}</h4>
+                    <p>high probability setups detected</p>
+                </article>
+                <article class="float-module module-e">
+                    <small>Market Session</small>
+                    <h4>{{ status_summary.market_status }}</h4>
+                    <p>{{ status_summary.current_time }} ET mission time</p>
+                </article>
+                <article class="float-module module-se">
+                    <small>Paper Trader</small>
+                    <h4>{{ "Connected" if status_summary.paper_connected else "Offline" }}</h4>
+                    <p>{{ status_summary.account_status }} account stack</p>
+                </article>
+
+                <div class="orbital-core-cinematic" aria-hidden="true">
+                    <span class="core-atmosphere"></span>
+                    <span class="core-ring ring-a"></span>
+                    <span class="core-ring ring-b"></span>
+                    <span class="core-ring ring-c"></span>
+                    <span class="core-satellite sat-a"></span>
+                    <span class="core-satellite sat-b"></span>
+                    <span class="core-satellite sat-c"></span>
+                    <div class="planetary-core">
+                        <small>Orbital Core</small>
+                        <h3>{{ status_summary.ai_confidence }}</h3>
+                        <p>trade confidence lock</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <article class="glass-panel mission-hero">
+            <div class="hero-space" aria-hidden="true">
+                <span class="planet planet-lg"></span>
+                <span class="planet planet-sm"></span>
+                <span class="warp-trail"></span>
+            </div>
+            <div class="hero-copy-wrap">
+                <p class="eyebrow">Current Destination</p>
+                <h2>Financial Freedom</h2>
+                <p class="hero-copy">Neural systems are synchronized. Real-time scanners, confidence engines, and risk protocols are active.</p>
+                <div class="mission-progress-wrap">
+                    <div class="progress"><div style="width: {{ status_summary.mission_progress }}%;"></div></div>
+                    <span>Distance: {{ status_summary.mission_progress }}%</span>
+                </div>
+            </div>
+            <div class="hero-radar" aria-hidden="true">
+                <span></span><span></span><span></span>
+                <i></i>
+            </div>
+        </article>
+
+        <section class="metric-cards">
+            <article class="glass-panel metric-card">
+                <p>Portfolio Confidence</p>
+                <h3 data-count-to="{{ status_summary.ai_confidence|replace('%', '')|int }}">0%</h3>
+                <div class="progress"><div style="width: {{ status_summary.ai_confidence|replace('%', '')|int }}%;"></div></div>
+            </article>
+            <article class="glass-panel metric-card">
+                <p>Today's Opportunities</p>
+                <h3 data-count-to="{{ status_summary.opportunity_count|int }}">0</h3>
+                <small>{{ status_summary.opportunity_count }} high quality setups</small>
+            </article>
+            <article class="glass-panel metric-card">
+                <p>Risk Level</p>
+                <h3>{{ status_summary.risk_level }}</h3>
+                <small>{{ status_summary.market_status }} market regime</small>
+            </article>
+        </section>
+
+        <article class="glass-panel movers-panel">
+            <div class="panel-head">
+                <h3>Top Market Movers</h3>
+                <span>{{ scanner_last_updated or "Awaiting scan" }}</span>
+            </div>
+            {% if scanner_errors %}
+            <p class="error">{{ scanner_errors|join(" · ") }}</p>
+            {% endif %}
+            <table>
+                <thead>
+                    <tr><th>Ticker</th><th>Price</th><th>Daily %</th><th>Relative Volume</th><th>AI Score</th><th>Status</th></tr>
+                </thead>
+                <tbody>
+                {% for row in scanner_rows[:8] %}
+                    {% set score = row.scanner_score|float %}
+                    {% set change = row.percent_change|float %}
+                    {% set status = "WATCH" %}
+                    {% if score >= 90 %}
+                        {% set status = "HOT" %}
+                    {% elif score >= 82 %}
+                        {% set status = "BUY" %}
+                    {% elif change <= -1.25 %}
+                        {% set status = "REVERSAL" %}
+                    {% elif score >= 70 %}
+                        {% set status = "ACCUMULATION" %}
+                    {% elif change < 0 %}
+                        {% set status = "SELL" %}
+                    {% endif %}
+                    <tr>
+                        <td>{{ row.ticker }}</td>
+                        <td>${{ row.price }}</td>
+                        <td class="{{ 'tone-positive' if change >= 0 else 'tone-caution' }}">{{ "%+.2f"|format(change) }}%</td>
+                        <td>{{ "%.2f"|format(row.relative_volume|float) }}x</td>
+                        <td>{{ score|round|int }}</td>
+                        <td><span class="status-pill status-{{ status|lower }}">{{ status }}</span></td>
+                    </tr>
+                {% else %}
+                    <tr><td colspan="6" class="muted">No market movers available.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </article>
+
+        <section class="lower-center-grid">
+            <article class="glass-panel mini-panel">
+                <div class="panel-head"><h3>Upcoming Events</h3><span>Today</span></div>
+                <div class="event-list">
+                    <div><time>10:30</time><span>CPI Data Release</span></div>
+                    <div><time>11:00</time><span>Fed Speaker</span></div>
+                    <div><time>14:00</time><span>FOMC Minutes</span></div>
+                    <div><time>16:00</time><span>Market Close</span></div>
+                </div>
+            </article>
+            <article class="glass-panel mini-panel">
+                <div class="panel-head"><h3>Market Overview Chart</h3><span>Intraday</span></div>
+                <div class="chart-line" aria-hidden="true"><span></span></div>
+                <ul class="chart-labels">
+                    <li>9:30</li><li>11:00</li><li>1:00</li><li>3:30</li>
+                </ul>
+            </article>
+            <article class="glass-panel mini-panel">
+                <div class="panel-head"><h3>Portfolio Allocation</h3><span>Live</span></div>
+                <div class="donut-wrap">
+                    <div class="donut" aria-hidden="true"></div>
+                    <ul>
+                        <li><b>Stocks</b><span>65%</span></li>
+                        <li><b>Cash</b><span>20%</span></li>
+                        <li><b>Options</b><span>10%</span></li>
+                        <li><b>Other</b><span>5%</span></li>
+                    </ul>
+                </div>
+            </article>
+        </section>
+
+        <div class="ticker-stream glass-panel">
+            <div class="ticker-track">
+                {% for row in scanner_rows[:8] %}
+                <span>{{ row.ticker }} <b class="{{ 'tone-positive' if row.percent_change|float >= 0 else 'tone-caution' }}">{{ "%+.2f"|format(row.percent_change|float) }}%</b></span>
+                {% endfor %}
+                {% for row in scanner_rows[:8] %}
+                <span>{{ row.ticker }} <b class="{{ 'tone-positive' if row.percent_change|float >= 0 else 'tone-caution' }}">{{ "%+.2f"|format(row.percent_change|float) }}%</b></span>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
+
+    <aside class="right-systems">
+        <article class="glass-panel orbital-panel">
+            <div class="panel-head"><h3>AI Trade Navigation</h3><span>Orbital Core</span></div>
+            <div class="orbit-viz" aria-hidden="true">
+                <span class="orbit-ring ring-1"></span>
+                <span class="orbit-ring ring-2"></span>
+                <span class="orbit-ring ring-3"></span>
+                <span class="orbit-core"></span>
+                <span class="orbit-node n-top">Idea</span>
+                <span class="orbit-node n-right">Analyze</span>
+                <span class="orbit-node n-bottom">Confirm</span>
+                <span class="orbit-node n-left">Execute</span>
+            </div>
+            <p class="muted center-text">Our mission: high probability trades</p>
+        </article>
+
+        <article class="glass-panel live-data-status-card">
+            <div class="panel-head">
+                <h3>Live Data Status</h3>
+                <button class="ghost-button" type="button" id="liveDataRefreshButton">Refresh</button>
+            </div>
+            <div class="live-data-status-grid">
+                <div><span>Market Data Provider</span><b id="liveDataProvider">Yahoo Finance</b></div>
+                <div><span>Connection Status</span><b id="liveDataConnectionStatus">--</b></div>
+                <div><span>Last Update Time</span><b id="liveDataLastUpdate">--</b></div>
+                <div><span>API Latency</span><b id="liveDataApiLatency">--</b></div>
+                <div><span>Symbols Loaded</span><b id="liveDataSymbolsLoaded">--</b></div>
+                <div><span>Market Open / Closed</span><b id="liveDataMarketSession">--</b></div>
+            </div>
+        </article>
+
+        <article class="glass-panel">
+            <div class="panel-head"><h3>Watchlist Overview</h3><a class="view-link" href="/watchlist">View All</a></div>
+            <table>
+                <tbody>
+                {% for row in watchlist[:6] %}
+                    <tr>
+                        <td>{{ row.ticker }}</td>
+                        <td class="{{ 'tone-positive' if row.ai_score|int >= 70 else 'tone-caution' }}">{{ row.ai_score }}</td>
+                        <td>{{ row.status }}</td>
+                    </tr>
+                {% else %}
+                    <tr><td colspan="3" class="muted">No watchlist symbols.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </article>
+
+        <article class="glass-panel mission-feed-panel">
+            <div class="panel-head"><h3>Mission Feed</h3><a class="view-link" href="/notifications">View All</a></div>
+            <div class="mission-feed-list">
+                {% for alert in alerts[:8] %}
+                <div class="feed-item">
+                    <time>{{ alert.timestamp[11:16] if alert.timestamp else "--:--" }}</time>
+                    <p>{{ alert.ticker }} {{ alert.message }}</p>
+                </div>
+                {% else %}
+                <p class="muted">No active mission alerts.</p>
+                {% endfor %}
+            </div>
+        </article>
+    </aside>
+</section>
+
+{% set top_setup = upcoming_opportunities[0] if upcoming_opportunities else None %}
+<section class="module-grid">
+    <article class="glass-panel module-card"><h4>Daily Mission Brief</h4><p>Auto-opens once each trading day, then mission alerts drive intraday updates.</p></article>
+    <article class="glass-panel module-card"><h4>Upcoming Opportunities</h4><p>{{ upcoming_opportunities|length }} strategy + chart-level setups currently queued.</p></article>
+    <article class="glass-panel module-card">
+        <h4>AI Trade Thesis</h4>
+        <p>
+            {% if top_setup %}
+                {{ top_setup.ticker }}: {{ top_setup.strategy }} ({{ top_setup.confidence }}% · {{ top_setup.bias }})
+            {% else %}
+                Neural status: {{ status_summary.neural_status.final_decision }}
+            {% endif %}
+        </p>
+    </article>
+    <article class="glass-panel module-card">
+        <h4>Options Suggestions</h4>
+        {% if top_setup %}
+            <p>{{ top_setup.ticker }} key levels → breakout {{ top_setup.breakout_level }} / breakdown {{ top_setup.breakdown_level }}</p>
+        {% else %}
+            <p>Top options ticker: {{ options_tickers[0] if options_tickers else "N/A" }}</p>
+        {% endif %}
+    </article>
+    <article class="glass-panel module-card"><h4>Early Trend Radar</h4><p>{{ trend_rows|length }} symbols under trend surveillance.</p></article>
+    <article class="glass-panel module-card"><h4>Support / Resistance</h4><p>{{ reversal_rows|length }} active level maps.</p></article>
+    <article class="glass-panel module-card"><h4>Risk Score</h4><p>{{ status_summary.risk_level }} with confidence {{ status_summary.ai_confidence }}.</p></article>
+    <article class="glass-panel module-card"><h4>News Sentiment</h4><p>{{ status_summary.market_sentiment }} bias from live stream intelligence.</p></article>
+    <article class="glass-panel module-card"><h4>Market Heat</h4><p>{{ scanner_rows|length }} instruments currently monitored.</p></article>
+    <article class="glass-panel module-card">
+        <h4>Mission Queue</h4>
+        {% if mission_queue %}
+            <p>{{ mission_queue[0].priority }} · {{ mission_queue[0].ticker }}: {{ mission_queue[0].reason }}</p>
+        {% else %}
+            <p>Mission queue will populate when strategy/chart confidence is high enough.</p>
+        {% endif %}
+    </article>
+    <article class="glass-panel module-card"><h4>Connected Accounts</h4><p>{{ status_summary.account_status }} across broker modules.</p></article>
+    <article class="glass-panel module-card"><h4>Paper Trading Status</h4><p>{{ "Connected" if status_summary.paper_connected else "Disconnected" }} in simulation stack.</p></article>
+    <article class="glass-panel module-card"><h4>Neural Core Status</h4><p>{{ status_summary.ai_status }} · {{ status_summary.ai_confidence }} confidence.</p></article>
+</section>
+
+<section class="panel">
+    <div class="panel-head">
+        <h3>Upcoming Opportunities</h3>
+        <span>CALL / PUT / WAIT with thesis + risk context</span>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>Ticker</th><th>Rec.</th><th>Confidence</th><th>Trade Quality</th><th>Entry</th><th>Support</th><th>Resistance</th><th>Target</th><th>Stop</th><th>Hold</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for item in upcoming_opportunities[:5] %}
+            <tr>
+                <td>{{ item.ticker }}</td>
+                <td>{{ item.recommendation }}</td>
+                <td>{{ item.confidence }}%</td>
+                <td>{{ item.trade_quality }}</td>
+                <td>{{ item.ideal_entry }}</td>
+                <td>{{ item.support }}</td>
+                <td>{{ item.resistance }}</td>
+                <td>{{ item.target }}</td>
+                <td>{{ item.stop }}</td>
+                <td>{{ item.expected_hold_time }}</td>
+            </tr>
+        {% else %}
+            <tr><td colspan="10" class="muted">No qualified opportunities yet.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<section class="panel">
+    <div class="panel-head"><h3>Mission Queue Priorities</h3><span>Auto-ranked</span></div>
+    <div class="brief-list">
+        {% for row in mission_queue %}
+        <div>
+            <span>{{ row.priority }}</span>
+            <b>{{ row.ticker }} · {{ row.strategy }}</b>
+            <p class="muted">Waiting {{ row.waiting_price }} · {{ row.confidence }}% · {{ row.reason }}</p>
+        </div>
+        {% else %}
+        <p class="muted">Mission queue is waiting for high-confidence setups.</p>
+        {% endfor %}
+    </div>
+</section>
+
+<section class="panel">
+    <div class="panel-head"><h3>Autonomous Mode Status</h3><span>Control center</span></div>
+    <div class="price-map-grid">
+        <div><small>Current Mode</small><b>{{ autonomy_status.current_mode if autonomy_status else 'OFF' }}</b></div>
+        <div><small>Live Trading Locked</small><b>{{ 'Yes' if autonomy_status and autonomy_status.live_trading_locked else 'Yes' }}</b></div>
+        <div><small>Paper Trading Active</small><b>{{ 'Yes' if autonomy_status and autonomy_status.paper_trading_active else 'No' }}</b></div>
+        <div><small>Approval Required</small><b>{{ 'Yes' if autonomy_status and autonomy_status.approval_required_status else 'No' }}</b></div>
+    </div>
+    <div class="inline-actions" style="margin-top: 12px;">
+        <a class="primary-link-button" href="/account-hub">Open Autonomy Controls</a>
+        <a class="ghost-button button-link" href="/mission-brief?show_brief=1">Open Mission Brief</a>
+    </div>
+</section>
+
+<div class="mission-brief-overlay {% if not mission_brief_should_show %}dismissed{% endif %}" id="missionBriefOverlay">
+    <article class="mission-brief-card">
+        <div class="panel-head">
+            <h3>Good {% if status_summary.current_time and status_summary.current_time[:2]|int < 12 %}Morning{% elif status_summary.current_time and status_summary.current_time[:2]|int < 18 %}Afternoon{% else %}Evening{% endif %}, Captain Curtis.</h3>
+            <button class="ghost-button" type="button" id="closeMissionBrief">Enter Mission</button>
+        </div>
+        <p class="eyebrow">Daily Mission Brief</p>
+        <div class="brief-list">
+            <div><span>Market Status</span><b>{{ status_summary.market_status }}</b></div>
+            <div><span>Premarket / Market / After Hours</span><b>{{ status_summary.market_phase }}</b></div>
+            <div><span>Neural Core</span><b>{{ status_summary.ai_status }}</b></div>
+            <div><span>AI Confidence</span><b>{{ status_summary.ai_confidence }}</b></div>
+            <div><span>System Health</span><b>{{ status_summary.system_health }}</b></div>
+            <div><span>Scanner</span><b>{{ status_summary.scanner_status }}</b></div>
+            <div><span>High-Priority Opportunities</span><b>{{ status_summary.opportunity_count }}</b></div>
+            <div><span>Reversal Candidates</span><b>{{ status_summary.reversal_count }}</b></div>
+            <div><span>Paper Trading</span><b>{{ "Connected" if status_summary.paper_connected else "Disconnected" }}</b></div>
+            <div><span>E*TRADE</span><b>{{ status_summary.broker_statuses.etrade.status }} (Approval Mode)</b></div>
+            <div><span>Mission Queue</span><b>{{ mission_queue|length }} priorities</b></div>
+            <div><span>Market Sentiment</span><b>{{ status_summary.market_sentiment }}</b></div>
+            <div><span>Trade Thesis of Day</span><b>{{ upcoming_opportunities[0].trade_thesis if upcoming_opportunities else 'No thesis yet' }}</b></div>
+            <div><span>Highest Risk Opportunity</span><b>{{ upcoming_opportunities[0].ticker if upcoming_opportunities else 'n/a' }}</b></div>
+            <div><span>Highest Confidence Opportunity</span><b>{{ upcoming_opportunities[0].ticker if upcoming_opportunities else 'n/a' }}</b></div>
+            <div><span>Support / Resistance</span><b>{{ upcoming_opportunities[0].support if upcoming_opportunities else 'n/a' }} / {{ upcoming_opportunities[0].resistance if upcoming_opportunities else 'n/a' }}</b></div>
+            <div><span>Upcoming Breakout Levels</span><b>{{ upcoming_opportunities[0].breakout_level if upcoming_opportunities else 'n/a' }}</b></div>
+            <div><span>Gap Watch</span><b>{{ upcoming_opportunities[0].extended_hours.gap_percent if upcoming_opportunities else 'n/a' }}%</b></div>
+            <div><span>Extended Hours Summary</span><b>{{ upcoming_opportunities[0].extended_hours.extended_hours_trend if upcoming_opportunities else 'n/a' }}</b></div>
+        </div>
+    </article>
+</div>
+{% endblock %}
+
+{% block page_scripts %}
+<script>
+(() => {
+    const overlay = document.getElementById("missionBriefOverlay");
+    const closeBtn = document.getElementById("closeMissionBrief");
+    if (overlay && closeBtn) {
+        closeBtn.addEventListener("click", async () => {
+            overlay.classList.add("dismissed");
+            try {
+                await fetch("/api/mission-brief/dismiss", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
+            } catch (_) {}
+        });
+    }
+})();
+</script>
+{% endblock %}

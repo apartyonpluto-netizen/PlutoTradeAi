@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · Notifications{% endblock %}
+{% block content %}
+<section class="panel">
+    <div class="panel-head">
+        <h3>Notification Center</h3>
+        <span>Black Ops Feed</span>
+    </div>
+    <div class="inline-actions" style="margin-bottom: 12px;">
+        <button type="button" id="notificationsMarkAllRead">Mark All Read</button>
+        <span class="muted">{{ unread_alert_count }} unread</span>
+    </div>
+    <div id="notificationsAlertList">
+        {% for alert in alerts %}
+        <div class="alert-row {{ 'alert-read' if alert.read else '' }}" data-alert-id="{{ alert.id }}">
+            <div>
+                <b>{{ alert.category }}</b>
+                <p>{{ alert.ticker }} {{ alert.message }}</p>
+            </div>
+            <div class="action-row">
+                {% if not alert.read %}
+                <button class="ghost-button mark-read-alert" type="button" data-alert-id="{{ alert.id }}">Read</button>
+                {% endif %}
+                <button class="ghost-button dismiss-alert" type="button" data-alert-id="{{ alert.id }}">Dismiss</button>
+            </div>
+        </div>
+        {% else %}
+        <p class="muted">No active alerts.</p>
+        {% endfor %}
+    </div>
+</section>
+{% endblock %}

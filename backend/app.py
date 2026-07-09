@@ -1,0 +1,1402 @@
+from __future__ import annotations
+
+from functools import wraps
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Sequence, Tuple
+from zoneinfo import ZoneInfo
+
+from flask import Flask, jsonify, render_template, request
+
+if __package__:
+    from .autonomy.autonomous_controller import (
+        emergency_stop,
+        get_autonomy_status,
+        reset_emergency_stop,
+        set_mode,
+    )
+    from .account_hub import (
+        connect_account,
+        disconnect_account,
+        ensure_tradingview_webhook,
+        get_accounts,
+        record_tradingview_signal,
+        test_account,
+        update_trading_enabled,
+    )
+    from .alerts import (
+        add_manual_alert,
+        build_system_alerts,
+        dismiss_alert,
+        get_alerts_snapshot,
+        mark_alert_read,
+        mark_all_read,
+        unread_count,
+    )
+    from .analytics import build_reversal_and_trend_payload
+    from .candle_brain import analyze_candles
+    from .core.errors import PlutoTradeError, ValidationError
+    from .core.logger import get_logger, setup_logging
+    from .brokers.etrade_broker import ETradeBroker
+    from .brokers.webull_broker import WebullBroker
+    from .brains.charting_brain import build_chart_levels
+    from .brains.extended_hours_brain import build_extended_hours_intelligence
+    from .brains.strategy_brain import build_strategy_intelligence
+    from .integrations.tradingview import get_tradingview_status, save_alert
+    from .market_scanner import scan_market
+    from .news.future_news import get_future_news_roadmap
+    from .news.news_service import fetch_news_bundle
+    from .news.x_news import (
+        add_trusted_account,
+        fetch_x_news_for_watchlist,
+        get_trusted_accounts,
+        remove_trusted_account,
+    )
+    from .neural.neural_engine import build_neural_status
+    from .options.options_brain import build_options_research, to_legacy_options_payload
+    from .pattern_brain import analyze_patterns
+    from .settings_store import available_themes, get_settings, update_settings
+    from .watchlist import (
+        add_stock,
+        build_watchlist_suggestions,
+        delete_stock,
+        get_watchlist,
+        get_watchlist_tickers,
+        search_watchlist,
+        sort_watchlist,
+        update_stock,
+    )
+else:
+    from autonomy.autonomous_controller import emergency_stop, get_autonomy_status, reset_emergency_stop, set_mode
+    from account_hub import (
+        connect_account,
+        disconnect_account,
+        ensure_tradingview_webhook,
+        get_accounts,
+        record_tradingview_signal,
+        test_account,
+        update_trading_enabled,
+    )
+    from alerts import (
+        add_manual_alert,
+        build_system_alerts,
+        dismiss_alert,
+        get_alerts_snapshot,
+        mark_alert_read,
+        mark_all_read,
+        unread_count,
+    )
+    from analytics import build_reversal_and_trend_payload
+    from candle_brain import analyze_candles
+    from core.errors import PlutoTradeError, ValidationError
+    from core.logger import get_logger, setup_logging
+    from brokers.etrade_broker import ETradeBroker
+    from brokers.webull_broker import WebullBroker
+    from brains.charting_brain import build_chart_levels
+    from brains.extended_hours_brain import build_extended_hours_intelligence
+    from brains.strategy_brain import build_strategy_intelligence
+    from integrations.tradingview import get_tradingview_status, save_alert
+    from market_scanner import scan_market
+    from news.future_news import get_future_news_roadmap
+    from news.news_service import fetch_news_bundle
+    from news.x_news import (
+        add_trusted_account,
+        fetch_x_news_for_watchlist,
+        get_trusted_accounts,
+        remove_trusted_account,
+    )
+    from neural.neural_engine import build_neural_status
+    from options.options_brain import build_options_research, to_legacy_options_payload
+    from pattern_brain import analyze_patterns
+    from settings_store import available_themes, get_settings, update_settings
+    from watchlist import (
+        add_stock,
+        build_watchlist_suggestions,
+        delete_stock,
+        get_watchlist,
+        get_watchlist_tickers,
+        search_watchlist,
+        sort_watchlist,
+        update_stock,
+    )
+
+app = Flask(__name__)
+setup_logging()
+logger = get_logger("app")
+
+CORE_SCAN_UNIVERSE = ["TSLA", "NVDA", "AMD", "PLTR", "AAPL", "META", "MSFT", "SPY", "QQQ"]
+MARKET_CACHE: Dict[str, object] = {"rows": [], "errors": [], "last_updated": "", "expires_at": None}
+ANALYTICS_CACHE: Dict[str, object] = {
+    "ticker_key": (),
+    "reversal_rows": [],
+    "trend_rows": [],
+    "errors": [],
+    "expires_at": None,
+}
+NEWS_CACHE: Dict[str, object] = {"ticker_key": (), "rows": [], "errors": [], "expires_at": None}
+CANDLE_CACHE: Dict[str, object] = {"ticker_key": (), "rows": [], "errors": [], "expires_at": None}
+PATTERN_CACHE: Dict[str, object] = {"ticker_key": (), "rows": [], "errors": [], "expires_at": None}
+OPTIONS_CACHE: Dict[str, Dict[str, object]] = {}
+STRATEGY_CACHE: Dict[str, Dict[str, object]] = {}
+CHART_LEVEL_CACHE: Dict[str, Dict[str, object]] = {}
+CACHE_SECONDS = 45
+ANALYTICS_CACHE_SECONDS = 180
+NEWS_CACHE_SECONDS = 120
+PATTERN_CACHE_SECONDS = 180
+OPTIONS_CACHE_SECONDS = 150
+STRATEGY_CACHE_SECONDS = 120
+CHART_LEVEL_CACHE_SECONDS = 120
+
+NAV_ITEMS = [
+    {"label": "Mission Briefing", "path": "/"},
+    {"label": "Dashboard", "path": "/dashboard"},
+    {"label": "Watchlist", "path": "/watchlist"},
+    {"label": "Market Scanner", "path": "/market-scanner"},
+    {"label": "Mission Control", "path": "/mission-control"},
+    {"label": "Account Hub", "path": "/account-hub"},
+    {"label": "Notifications", "path": "/notifications"},
+    {"label": "Trade Journal", "path": "/trade-journal"},
+    {"label": "Settings", "path": "/settings"},
+    {"label": "Candle Brain", "path": "/candle-brain"},
+    {"label": "Pattern Brain", "path": "/pattern-brain"},
+    {"label": "Support & Resistance", "path": "/support-resistance"},
+    {"label": "Volume Scanner", "path": "/volume-scanner"},
+    {"label": "News Intelligence", "path": "/news-intelligence"},
+    {"label": "AI Options", "path": "/options"},
+    {"label": "Neural Engine", "path": "/neural-engine"},
+]
+
+
+def _api_timestamp() -> str:
+    return _now_utc().isoformat()
+
+
+def _api_success(data: Any, status_code: int = 200, **legacy_fields: Any):
+    payload: Dict[str, Any] = {
+        "success": True,
+        "data": data,
+        "error": None,
+        "timestamp": _api_timestamp(),
+    }
+    payload.update(legacy_fields)
+    return jsonify(payload), status_code
+
+
+def _api_failure(message: str, status_code: int = 400, error_code: str = "request_error", **legacy_fields: Any):
+    payload: Dict[str, Any] = {
+        "success": False,
+        "data": None,
+        "error": {"message": message, "code": error_code},
+        "timestamp": _api_timestamp(),
+    }
+    payload.update(legacy_fields)
+    return jsonify(payload), status_code
+
+
+def _handle_api_exception(error: Exception):
+    if isinstance(error, PlutoTradeError):
+        logger.warning("API error: %s", error.message, extra={"code": error.error_code, "details": error.details})
+        return _api_failure(error.message, status_code=error.status_code, error_code=error.error_code, ok=False)
+    logger.exception("Unhandled API exception")
+    return _api_failure(
+        "Unexpected server error. Please retry or review logs.",
+        status_code=500,
+        error_code="internal_error",
+        ok=False,
+    )
+
+
+def api_guard(handler):
+    @wraps(handler)
+    def wrapped(*args, **kwargs):
+        try:
+            return handler(*args, **kwargs)
+        except Exception as error:  # centralized API safety wrapper
+            return _handle_api_exception(error)
+
+    return wrapped
+
+
+@app.before_request
+def _log_request() -> None:
+    logger.info("Request: %s %s", request.method, request.path)
+
+
+@app.after_request
+def _log_response(response):
+    logger.info("Response: %s %s -> %s", request.method, request.path, response.status_code)
+    return response
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _market_session(now_utc: datetime | None = None) -> str:
+    eastern = (now_utc or _now_utc()).astimezone(ZoneInfo("America/New_York"))
+    if eastern.weekday() >= 5:
+        return "Closed"
+    current_minutes = eastern.hour * 60 + eastern.minute
+    return "Open" if 570 <= current_minutes < 960 else "Closed"
+
+
+def _market_phase(now_utc: datetime | None = None) -> str:
+    eastern = (now_utc or _now_utc()).astimezone(ZoneInfo("America/New_York"))
+    if eastern.weekday() >= 5:
+        return "Closed"
+    current_minutes = eastern.hour * 60 + eastern.minute
+    if 240 <= current_minutes < 570:
+        return "Premarket"
+    if 570 <= current_minutes < 960:
+        return "Market"
+    if 960 <= current_minutes < 1200:
+        return "After Hours"
+    return "Closed"
+
+
+def _trading_day_key(now_utc: datetime | None = None) -> str:
+    eastern = (now_utc or _now_utc()).astimezone(ZoneInfo("America/New_York"))
+    return eastern.strftime("%Y-%m-%d")
+
+
+def _mission_brief_should_show(settings: Dict[str, object]) -> bool:
+    trading_day = _trading_day_key()
+    last_viewed = str(settings.get("mission_brief_last_viewed_date", "") or "")
+    force_show = bool(settings.get("show_mission_brief_again", False))
+    return force_show or last_viewed != trading_day
+
+
+def _dismiss_mission_brief() -> Dict[str, object]:
+    return update_settings(
+        {
+            "mission_brief_last_viewed_date": _trading_day_key(),
+            "show_mission_brief_again": False,
+        }
+    )
+
+
+def _reset_mission_brief() -> Dict[str, object]:
+    return update_settings(
+        {
+            "mission_brief_last_viewed_date": "",
+            "show_mission_brief_again": True,
+        }
+    )
+
+
+def _cache_is_fresh(cache: Dict[str, object]) -> bool:
+    cache_expiry = cache.get("expires_at")
+    return isinstance(cache_expiry, datetime) and cache_expiry > _now_utc()
+
+
+def _ticker_key(tickers: List[str]) -> Tuple[str, ...]:
+    return tuple(sorted({ticker.strip().upper() for ticker in tickers if ticker}))
+
+
+def get_market_data(force_refresh: bool = False) -> Tuple[List[Dict[str, object]], List[str], str]:
+    if not force_refresh and MARKET_CACHE.get("rows") and _cache_is_fresh(MARKET_CACHE):
+        return MARKET_CACHE["rows"], MARKET_CACHE["errors"], MARKET_CACHE["last_updated"]
+
+    watchlist_tickers = get_watchlist_tickers()
+    scan_universe = list(CORE_SCAN_UNIVERSE)
+    rows, errors, last_updated = scan_market(tickers=scan_universe, watchlist_tickers=watchlist_tickers)
+    if not rows and MARKET_CACHE.get("rows"):
+        stale_errors = list(MARKET_CACHE.get("errors", [])) + errors
+        MARKET_CACHE.update(
+            {
+                "errors": stale_errors[:8],
+                "expires_at": _now_utc() + timedelta(seconds=15),
+            }
+        )
+        return MARKET_CACHE["rows"], MARKET_CACHE["errors"], MARKET_CACHE["last_updated"]
+
+    MARKET_CACHE.update(
+        {
+            "rows": rows,
+            "errors": errors,
+            "last_updated": last_updated,
+            "expires_at": _now_utc() + timedelta(seconds=CACHE_SECONDS),
+        }
+    )
+    return rows, errors, last_updated
+
+
+def get_reversal_and_trend_data(
+    scanner_rows: List[Dict[str, object]], watchlist_tickers: List[str], force_refresh: bool = False
+) -> Tuple[List[Dict[str, object]], List[Dict[str, object]], List[str]]:
+    analysis_tickers = [ticker for ticker in watchlist_tickers if ticker in CORE_SCAN_UNIVERSE] or [
+        row["ticker"] for row in scanner_rows[:8]
+    ]
+    ticker_key = _ticker_key(analysis_tickers)
+    if (
+        not force_refresh
+        and ticker_key == ANALYTICS_CACHE.get("ticker_key")
+        and ANALYTICS_CACHE.get("reversal_rows")
+        and _cache_is_fresh(ANALYTICS_CACHE)
+    ):
+        return ANALYTICS_CACHE["reversal_rows"], ANALYTICS_CACHE["trend_rows"], ANALYTICS_CACHE["errors"]
+
+    reversal_rows, trend_rows, errors = build_reversal_and_trend_payload(tickers=analysis_tickers, scanner_rows=scanner_rows)
+    ANALYTICS_CACHE.update(
+        {
+            "ticker_key": ticker_key,
+            "reversal_rows": reversal_rows,
+            "trend_rows": trend_rows,
+            "errors": errors,
+            "expires_at": _now_utc() + timedelta(seconds=ANALYTICS_CACHE_SECONDS),
+        }
+    )
+    return reversal_rows, trend_rows, errors
+
+
+def get_news_data(watchlist_tickers: List[str], force_refresh: bool = False) -> Tuple[List[Dict[str, object]], List[str]]:
+    ticker_key = _ticker_key(watchlist_tickers)
+    if (
+        not force_refresh
+        and ticker_key == NEWS_CACHE.get("ticker_key")
+        and NEWS_CACHE.get("rows")
+        and _cache_is_fresh(NEWS_CACHE)
+    ):
+        return NEWS_CACHE["rows"], NEWS_CACHE["errors"]
+
+    bundle = fetch_news_bundle(tickers=watchlist_tickers, limit=30)
+    rows = bundle.get("items", [])
+    errors = bundle.get("errors", [])
+    NEWS_CACHE.update(
+        {
+            "ticker_key": ticker_key,
+            "rows": rows,
+            "errors": errors,
+            "expires_at": _now_utc() + timedelta(seconds=NEWS_CACHE_SECONDS),
+        }
+    )
+    return rows, errors
+
+
+def get_options_data_for_ticker(ticker: str, force_refresh: bool = False) -> Dict[str, object]:
+    normalized_ticker = ticker.strip().upper()
+    if not normalized_ticker:
+        raise ValueError("Ticker is required.")
+
+    cached_item = OPTIONS_CACHE.get(normalized_ticker)
+    if (
+        not force_refresh
+        and isinstance(cached_item, dict)
+        and isinstance(cached_item.get("expires_at"), datetime)
+        and cached_item["expires_at"] > _now_utc()
+    ):
+        return cached_item["payload"]
+
+    payload = build_options_research(normalized_ticker)
+    OPTIONS_CACHE[normalized_ticker] = {
+        "payload": payload,
+        "expires_at": _now_utc() + timedelta(seconds=OPTIONS_CACHE_SECONDS),
+    }
+    return payload
+
+
+def get_strategy_data_for_ticker(
+    ticker: str, force_refresh: bool = False, extended_hours: Dict[str, object] | None = None
+) -> Dict[str, object]:
+    normalized_ticker = ticker.strip().upper()
+    if not normalized_ticker:
+        raise ValueError("Ticker is required.")
+
+    cached_item = STRATEGY_CACHE.get(normalized_ticker)
+    if (
+        not force_refresh
+        and isinstance(cached_item, dict)
+        and isinstance(cached_item.get("expires_at"), datetime)
+        and cached_item["expires_at"] > _now_utc()
+    ):
+        return cached_item["payload"]
+
+    payload = build_strategy_intelligence(normalized_ticker, extended_hours=extended_hours)
+    STRATEGY_CACHE[normalized_ticker] = {
+        "payload": payload,
+        "expires_at": _now_utc() + timedelta(seconds=STRATEGY_CACHE_SECONDS),
+    }
+    return payload
+
+
+def get_chart_levels_for_ticker(
+    ticker: str, force_refresh: bool = False, extended_hours: Dict[str, object] | None = None
+) -> Dict[str, object]:
+    normalized_ticker = ticker.strip().upper()
+    if not normalized_ticker:
+        raise ValueError("Ticker is required.")
+
+    cached_item = CHART_LEVEL_CACHE.get(normalized_ticker)
+    if (
+        not force_refresh
+        and isinstance(cached_item, dict)
+        and isinstance(cached_item.get("expires_at"), datetime)
+        and cached_item["expires_at"] > _now_utc()
+    ):
+        return cached_item["payload"]
+
+    payload = build_chart_levels(normalized_ticker, extended_hours=extended_hours)
+    CHART_LEVEL_CACHE[normalized_ticker] = {
+        "payload": payload,
+        "expires_at": _now_utc() + timedelta(seconds=CHART_LEVEL_CACHE_SECONDS),
+    }
+    return payload
+
+
+def _resolve_analysis_tickers(watchlist_tickers: Sequence[str], scanner_rows: Sequence[Dict[str, object]], limit: int = 6) -> List[str]:
+    from_watchlist = [ticker.strip().upper() for ticker in watchlist_tickers if ticker]
+    from_scanner = [str(row.get("ticker", "")).strip().upper() for row in scanner_rows if row.get("ticker")]
+    ordered: List[str] = []
+    for ticker in from_watchlist + from_scanner:
+        if ticker and ticker not in ordered:
+            ordered.append(ticker)
+        if len(ordered) >= limit:
+            break
+    return ordered
+
+
+def _broker_framework_status() -> Dict[str, object]:
+    etrade = ETradeBroker()
+    webull = WebullBroker()
+    return {
+        "etrade": etrade.get_account_status(),
+        "webull": webull.get_account_status(),
+        "safety_defaults": {
+            "live_trading_enabled": False,
+            "options_execution_enabled": False,
+            "etrade_execution_enabled": False,
+            "webull_paper_mode_only": True,
+            "approval_required": True,
+            "emergency_kill_switch_placeholder": True,
+        },
+    }
+
+
+def _build_neural_snapshot(
+    *,
+    scanner_rows: List[Dict[str, object]],
+    watchlist_rows: List[Dict[str, str]],
+    news_rows: List[Dict[str, object]],
+) -> Dict[str, object]:
+    option_inputs: List[Dict[str, object]] = []
+    for ticker in [row.get("ticker", "") for row in scanner_rows[:3]]:
+        normalized = str(ticker).strip().upper()
+        if not normalized:
+            continue
+        try:
+            option_inputs.append(get_options_data_for_ticker(normalized))
+        except ValueError:
+            continue
+    return build_neural_status(
+        scanner_rows=scanner_rows,
+        watchlist_rows=watchlist_rows,
+        news_items=news_rows,
+        options_payloads=option_inputs,
+    )
+
+
+def _compute_status(scanner_rows: List[Dict[str, object]], scanner_errors: List[str]) -> Dict[str, object]:
+    settings = get_settings()
+    accounts = get_accounts()
+    top_tickers = [row["ticker"] for row in scanner_rows[:3]]
+    confidence = sum(int(row.get("scanner_score", 0)) for row in scanner_rows[:5]) / max(1, len(scanner_rows[:5]))
+    reversal_candidates = sum(1 for row in ANALYTICS_CACHE.get("trend_rows", []) if row.get("trend_reversal"))
+    hot_count = sum(1 for row in scanner_rows if int(row.get("scanner_score", 0)) >= 75)
+
+    sentiment = "Neutral"
+    if scanner_rows:
+        avg_change = sum(float(row.get("percent_change", 0)) for row in scanner_rows) / len(scanner_rows)
+        if avg_change > 0.75:
+            sentiment = "Bullish"
+        elif avg_change < -0.75:
+            sentiment = "Bearish"
+
+    paper_connected = any(item.get("platform") == "webull" and item.get("status") != "Not Connected" for item in accounts)
+    tradingview_status = get_tradingview_status()
+    broker_statuses = _broker_framework_status()
+    neural_status = _build_neural_snapshot(
+        scanner_rows=scanner_rows,
+        watchlist_rows=get_watchlist(),
+        news_rows=[],
+    )
+
+    phase = _market_phase()
+    return {
+        "market_status": phase if scanner_rows else "Monitoring",
+        "ai_status": "Online",
+        "current_time": datetime.now().strftime("%I:%M:%S %p"),
+        "scanner_status": "Running" if not scanner_errors else "Degraded",
+        "watchlist_status": "Synced",
+        "account_status": "Connected" if any(a.get("status") != "Not Connected" for a in accounts) else "Not Connected",
+        "market_sentiment": sentiment,
+        "ai_confidence": f"{round(confidence)}%",
+        "risk_level": "Moderate" if confidence >= 68 else "Elevated",
+        "opportunity_count": hot_count,
+        "reversal_count": reversal_candidates,
+        "watch_today": top_tickers,
+        "news_impact": "Moderate",
+        "paper_connected": paper_connected,
+        "live_trading_enabled": False,
+        "mission_progress": 75,
+        "settings": settings,
+        "latest_alerts": [],
+        "api_status": "Operational",
+        "system_health": "Healthy" if not scanner_errors else "Degraded",
+        "market_phase": phase,
+        "broker_statuses": broker_statuses,
+        "tradingview_status": tradingview_status,
+        "tradingview_latest_alert": tradingview_status.get("latest_alert", {}),
+        "neural_status": neural_status,
+    }
+
+
+def _build_page_context(
+    *,
+    include_suggestions: bool = False,
+    include_reversal: bool = False,
+    include_trend: bool = False,
+    include_news: bool = False,
+    include_trusted_accounts: bool = False,
+    include_patterns: bool = False,
+    force_refresh: bool = False,
+) -> Dict[str, object]:
+    watchlist = get_watchlist()
+    watchlist_tickers = [row["ticker"] for row in watchlist]
+    scanner_rows, scanner_errors, scanner_last_updated = get_market_data(force_refresh=force_refresh)
+    suggestions = (
+        build_watchlist_suggestions(scanner_rows=scanner_rows, watchlist_tickers=watchlist_tickers, limit=8)
+        if include_suggestions
+        else []
+    )
+
+    reversal_rows: List[Dict[str, object]] = []
+    trend_rows: List[Dict[str, object]] = []
+    trend_errors: List[str] = []
+    if include_reversal or include_trend:
+        reversal_rows, trend_rows, trend_errors = get_reversal_and_trend_data(
+            scanner_rows=scanner_rows,
+            watchlist_tickers=watchlist_tickers,
+            force_refresh=force_refresh,
+        )
+
+    news_rows: List[Dict[str, object]] = []
+    news_errors: List[str] = []
+    if include_news:
+        news_rows, news_errors = get_news_data(watchlist_tickers=watchlist_tickers, force_refresh=force_refresh)
+
+    candle_rows: List[Dict[str, object]] = []
+    pattern_rows: List[Dict[str, object]] = []
+    pattern_errors: List[str] = []
+    if include_patterns:
+        analysis_tickers = watchlist_tickers[:6] or CORE_SCAN_UNIVERSE[:6]
+        ticker_key = _ticker_key(analysis_tickers)
+        if (
+            not force_refresh
+            and ticker_key == CANDLE_CACHE.get("ticker_key")
+            and _cache_is_fresh(CANDLE_CACHE)
+            and _cache_is_fresh(PATTERN_CACHE)
+        ):
+            candle_rows = CANDLE_CACHE["rows"]
+            pattern_rows = PATTERN_CACHE["rows"]
+            pattern_errors = list(CANDLE_CACHE.get("errors", [])) + list(PATTERN_CACHE.get("errors", []))
+        else:
+            candle_errors = []
+            candle_rows = []
+            pattern_rows = []
+            for ticker in analysis_tickers:
+                try:
+                    candle_rows.append(analyze_candles(ticker))
+                except Exception as error:
+                    candle_errors.append(f"{ticker} candle: {error}")
+                try:
+                    pattern_rows.append(analyze_patterns(ticker))
+                except Exception as error:
+                    candle_errors.append(f"{ticker} pattern: {error}")
+            CANDLE_CACHE.update(
+                {
+                    "ticker_key": ticker_key,
+                    "rows": candle_rows,
+                    "errors": candle_errors,
+                    "expires_at": _now_utc() + timedelta(seconds=PATTERN_CACHE_SECONDS),
+                }
+            )
+            PATTERN_CACHE.update(
+                {
+                    "ticker_key": ticker_key,
+                    "rows": pattern_rows,
+                    "errors": candle_errors,
+                    "expires_at": _now_utc() + timedelta(seconds=PATTERN_CACHE_SECONDS),
+                }
+            )
+            pattern_errors = candle_errors
+
+    settings_payload = get_settings()
+    cached_reversal = reversal_rows or (ANALYTICS_CACHE.get("reversal_rows", []) if _cache_is_fresh(ANALYTICS_CACHE) else [])
+    cached_trend = trend_rows or (ANALYTICS_CACHE.get("trend_rows", []) if _cache_is_fresh(ANALYTICS_CACHE) else [])
+    cached_news = news_rows or (NEWS_CACHE.get("rows", []) if _cache_is_fresh(NEWS_CACHE) else [])
+
+    intelligence_tickers = _resolve_analysis_tickers(watchlist_tickers, scanner_rows, limit=6)
+    scanner_map = {str(row.get("ticker", "")).upper(): row for row in scanner_rows}
+    extended_hours_map: Dict[str, Dict[str, object]] = {}
+    strategy_map: Dict[str, Dict[str, object]] = {}
+    chart_levels_map: Dict[str, Dict[str, object]] = {}
+    for ticker in intelligence_tickers:
+        extended_hours_map[ticker] = build_extended_hours_intelligence(ticker)
+        strategy_map[ticker] = get_strategy_data_for_ticker(
+            ticker=ticker, force_refresh=force_refresh, extended_hours=extended_hours_map[ticker]
+        )
+        chart_levels_map[ticker] = get_chart_levels_for_ticker(
+            ticker=ticker, force_refresh=force_refresh, extended_hours=extended_hours_map[ticker]
+        )
+
+    upcoming_opportunities: List[Dict[str, object]] = []
+    mission_queue: List[Dict[str, object]] = []
+    for ticker in intelligence_tickers:
+        strategy = strategy_map.get(ticker, {})
+        chart = chart_levels_map.get(ticker, {})
+        extended_hours = extended_hours_map.get(ticker, {})
+        options_payload = get_options_data_for_ticker(ticker, force_refresh=force_refresh)
+        scanner_row = scanner_map.get(ticker, {})
+        if strategy.get("insufficient_data") or chart.get("insufficient_data"):
+            continue
+        confidence = int(strategy.get("strategy_confidence", 0) or 0)
+        if confidence < 55:
+            continue
+        breakout_level = float(chart.get("breakout_level", 0) or 0)
+        breakdown_level = float(chart.get("breakdown_level", 0) or 0)
+        bias = str(strategy.get("recommendation", strategy.get("bias", "WAIT"))).upper()
+        support = (chart.get("major_support_levels") or [breakdown_level])[0]
+        resistance = (chart.get("major_resistance_levels") or [breakout_level])[0]
+        current_price = float(scanner_row.get("price", strategy.get("market_context", {}).get("current_price", 0)) or 0)
+        target = round(breakout_level * 1.02, 2) if bias == "CALL" else round(breakdown_level * 0.98, 2)
+        stop = round(breakdown_level * 0.997, 2) if bias == "CALL" else round(breakout_level * 1.003, 2)
+        trade_quality = "A" if confidence >= 85 else "B" if confidence >= 72 else "C"
+        expiration_suggestions = options_payload.get("expiration_suggestions", ["Data unavailable"] * 3)
+        upcoming_opportunities.append(
+            {
+                "ticker": ticker,
+                "current_price": current_price,
+                "recommendation": bias,
+                "confidence": confidence,
+                "trade_quality": trade_quality,
+                "ideal_entry": round(breakout_level * 1.001, 2) if bias == "CALL" else round(breakdown_level * 0.999, 2),
+                "support": support,
+                "resistance": resistance,
+                "breakout_level": breakout_level,
+                "breakdown_level": breakdown_level,
+                "target": target,
+                "stop": stop,
+                "expected_hold_time": strategy.get("expected_hold_time", "Unknown"),
+                "expected_move": options_payload.get("expected_move", "Data unavailable"),
+                "strategy": strategy.get("best_strategy", strategy.get("recommended_strategy", "Unknown")),
+                "trade_thesis": strategy.get("why_this_strategy_fits", "Data unavailable"),
+                "bull_case": f"Holds above support {support} and clears breakout {breakout_level}.",
+                "bear_case": f"Fails below support {support} and invalidates at {strategy.get('what_invalidates_trade', strategy.get('invalidation_rule', 'n/a'))}.",
+                "options_expirations": {
+                    "aggressive": expiration_suggestions[0] if len(expiration_suggestions) > 0 else "Data unavailable",
+                    "balanced": expiration_suggestions[1] if len(expiration_suggestions) > 1 else "Data unavailable",
+                    "conservative": expiration_suggestions[2] if len(expiration_suggestions) > 2 else "Data unavailable",
+                },
+                "invalidation_rule": strategy.get("invalidation_rule", "Data unavailable"),
+                "why_ai_likes_it": strategy.get("why_ai_likes_it", strategy.get("why_this_strategy_fits", "Data unavailable")),
+                "risk_warning": strategy.get("risk_warning", "Data unavailable"),
+                "risk_level": strategy.get("risk_level", "unknown"),
+                "what_invalidates_trade": strategy.get("what_invalidates_trade", strategy.get("invalidation_rule", "n/a")),
+                "why_support_matters": strategy.get("why_support_matters", "Data unavailable"),
+                "why_resistance_matters": strategy.get("why_resistance_matters", "Data unavailable"),
+                "why_volume_matters": strategy.get("why_volume_matters", "Data unavailable"),
+                "why_trend_matters": strategy.get("why_trend_matters", "Data unavailable"),
+                "why_news_matters": strategy.get("why_news_matters", "Data unavailable"),
+                "data_source": strategy.get("data_source", "Data unavailable"),
+                "data_quality": strategy.get("data_quality", "Data unavailable"),
+                "last_updated": strategy.get("last_updated", strategy.get("generated_at", _now_iso())),
+                "live_or_delayed": strategy.get("live_or_delayed", "Delayed"),
+                "research_only": strategy.get("research_only", True),
+                "disclaimer": strategy.get("disclaimer", "For research only."),
+                "extended_hours": extended_hours,
+            }
+        )
+        mission_queue.append(
+            {
+                "ticker": ticker,
+                "waiting_price": round(breakout_level if bias == "CALL" else breakdown_level, 2),
+                "strategy": strategy.get("best_strategy", strategy.get("recommended_strategy", "Unknown")),
+                "confidence": confidence,
+                "reason": strategy.get("why_this_strategy_fits", "Data unavailable"),
+                "recommendation": bias,
+            }
+        )
+    upcoming_opportunities.sort(key=lambda item: int(item.get("confidence", 0)), reverse=True)
+    mission_queue.sort(key=lambda item: int(item.get("confidence", 0)), reverse=True)
+    for idx, queue_item in enumerate(mission_queue[:3], start=1):
+        queue_item["priority"] = f"Priority {idx}"
+
+    system_alerts = build_system_alerts(
+        suggestions=suggestions,
+        scanner_rows=scanner_rows,
+        reversal_rows=cached_reversal,
+        trend_rows=cached_trend,
+        news_rows=cached_news,
+        opportunities=upcoming_opportunities,
+        market_phase=_market_phase(),
+        tradingview_alert=get_tradingview_status().get("latest_alert", {}),
+    )
+    alerts = get_alerts_snapshot(system_alerts)
+
+    status_summary = _compute_status(scanner_rows, scanner_errors)
+    status_summary["latest_alerts"] = alerts[:6]
+    status_summary["neural_status"] = _build_neural_snapshot(
+        scanner_rows=scanner_rows,
+        watchlist_rows=watchlist,
+        news_rows=cached_news,
+    )
+    status_summary["tradingview_status"] = get_tradingview_status()
+    status_summary["tradingview_latest_alert"] = status_summary["tradingview_status"].get("latest_alert", {})
+    status_summary["broker_statuses"] = _broker_framework_status()
+    status_summary["autonomy_status"] = get_autonomy_status()
+    status_summary["mission_brief_should_show"] = _mission_brief_should_show(settings_payload)
+    status_summary["mission_brief_last_viewed_date"] = settings_payload.get("mission_brief_last_viewed_date", "")
+    status_summary["mission_brief_today"] = _trading_day_key()
+
+    context = {
+        "watchlist": watchlist,
+        "scanner_rows": scanner_rows,
+        "scanner_errors": scanner_errors,
+        "scanner_last_updated": scanner_last_updated,
+        "suggestions": suggestions,
+        "reversal_rows": reversal_rows,
+        "trend_rows": trend_rows,
+        "trend_errors": trend_errors,
+        "news_rows": news_rows,
+        "news_errors": news_errors,
+        "alerts": alerts,
+        "unread_alert_count": unread_count(alerts),
+        "trusted_accounts": [],
+        "status_summary": status_summary,
+        "candle_rows": candle_rows,
+        "pattern_rows": pattern_rows,
+        "pattern_errors": pattern_errors,
+        "settings_payload": settings_payload,
+        "settings_themes": available_themes(),
+        "future_news_roadmap": get_future_news_roadmap(),
+        "options_tickers": sorted(set(watchlist_tickers + [row["ticker"] for row in scanner_rows])),
+        "strategy_map": strategy_map,
+        "chart_levels_map": chart_levels_map,
+        "extended_hours_map": extended_hours_map,
+        "upcoming_opportunities": upcoming_opportunities,
+        "mission_queue": mission_queue[:3],
+        "mission_brief_should_show": status_summary["mission_brief_should_show"],
+        "autonomy_status": status_summary["autonomy_status"],
+    }
+    if include_trusted_accounts:
+        context["trusted_accounts"] = get_trusted_accounts()
+    return context
+
+
+@app.context_processor
+def inject_nav():
+    return {"nav_items": NAV_ITEMS}
+
+
+@app.route("/")
+def mission_briefing_page() -> str:
+    context = _build_page_context(
+        include_suggestions=True,
+        include_reversal=True,
+        include_trend=True,
+        include_news=True,
+        include_trusted_accounts=True,
+    )
+    if not context.get("mission_brief_should_show") and request.args.get("show_brief") != "1":
+        return render_template("dashboard.html", **context)
+    return render_template("mission_briefing.html", **context)
+
+
+@app.route("/mission-brief")
+def mission_brief_manual_page() -> str:
+    context = _build_page_context(include_suggestions=True, include_reversal=True, include_trend=True, include_news=True)
+    return render_template("mission_briefing.html", **context)
+
+
+@app.route("/dashboard")
+@app.route("/mission-control")
+def dashboard_page() -> str:
+    return render_template(
+        "dashboard.html",
+        **_build_page_context(
+            include_suggestions=True,
+            include_reversal=True,
+            include_trend=True,
+            include_news=True,
+            include_trusted_accounts=True,
+        ),
+    )
+
+
+@app.route("/watchlist")
+def watchlist_page() -> str:
+    return render_template("watchlist.html", **_build_page_context(include_suggestions=True))
+
+
+@app.route("/market-scanner")
+@app.route("/scanner")
+def scanner_page() -> str:
+    return render_template("scanner.html", **_build_page_context())
+
+
+@app.route("/reversal-map")
+@app.route("/support-resistance")
+def reversal_map_page() -> str:
+    return render_template("reversal_map.html", **_build_page_context(include_reversal=True, include_trend=True))
+
+
+@app.route("/trend-detection")
+@app.route("/volume-scanner")
+def trend_detection_page() -> str:
+    return render_template("trend_detection.html", **_build_page_context(include_reversal=True, include_trend=True))
+
+
+@app.route("/options")
+def options_page() -> str:
+    return render_template("options.html", **_build_page_context())
+
+
+@app.route("/news-intelligence")
+def news_intelligence_page() -> str:
+    return render_template("news_intelligence.html", **_build_page_context(include_news=True))
+
+
+@app.route("/settings")
+def settings_page() -> str:
+    return render_template("settings.html", **_build_page_context(include_trusted_accounts=True))
+
+
+@app.route("/account-hub")
+def account_hub_page() -> str:
+    context = _build_page_context()
+    context["accounts"] = get_accounts()
+    return render_template("account_hub.html", **context)
+
+
+@app.route("/notifications")
+def notifications_page() -> str:
+    return render_template("notifications.html", **_build_page_context(include_suggestions=True, include_news=True))
+
+
+@app.route("/trade-journal")
+def trade_journal_page() -> str:
+    return render_template("trade_journal.html", **_build_page_context(include_reversal=True, include_trend=True))
+
+
+@app.route("/candle-brain")
+def candle_brain_page() -> str:
+    return render_template("candle_brain.html", **_build_page_context(include_patterns=True))
+
+
+@app.route("/pattern-brain")
+def pattern_brain_page() -> str:
+    return render_template("pattern_brain.html", **_build_page_context(include_patterns=True))
+
+
+@app.route("/neural-engine")
+def neural_engine_page() -> str:
+    return render_template("neural_engine.html", **_build_page_context())
+
+
+@app.route("/api/watchlist", methods=["GET"])
+@api_guard
+def api_watchlist():
+    rows = get_watchlist()
+    try:
+        rows = search_watchlist(
+            rows=rows,
+            query=request.args.get("q", ""),
+            category=request.args.get("category", ""),
+            status=request.args.get("status", ""),
+            min_score=request.args.get("min_score", ""),
+            max_score=request.args.get("max_score", ""),
+        )
+        rows = sort_watchlist(
+            rows=rows,
+            sort_by=request.args.get("sort_by", "ticker"),
+            direction=request.args.get("direction", "asc"),
+        )
+    except ValueError as error:
+        raise ValidationError(str(error)) from error
+    return _api_success({"watchlist": rows, "count": len(rows)}, watchlist=rows, count=len(rows), ok=True)
+
+
+@app.route("/api/watchlist/add", methods=["POST"])
+def api_watchlist_add():
+    payload = request.get_json(silent=True) or {}
+    try:
+        row = add_stock(payload)
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    return jsonify({"ok": True, "item": row})
+
+
+@app.route("/api/watchlist/update", methods=["POST"])
+def api_watchlist_update():
+    payload = request.get_json(silent=True) or {}
+    ticker = payload.get("ticker", "")
+    try:
+        row = update_stock(ticker=ticker, payload=payload)
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    return jsonify({"ok": True, "item": row})
+
+
+@app.route("/api/watchlist/delete", methods=["POST"])
+def api_watchlist_delete():
+    payload = request.get_json(silent=True) or {}
+    ticker = payload.get("ticker", "")
+    try:
+        delete_stock(ticker=ticker)
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    return jsonify({"ok": True})
+
+
+@app.route("/api/suggestions", methods=["GET"])
+def api_suggestions():
+    context = _build_page_context(include_suggestions=True)
+    return jsonify({"suggestions": context["suggestions"], "scanner_errors": context["scanner_errors"]})
+
+
+@app.route("/api/news/x", methods=["GET"])
+def api_news_x():
+    context = _build_page_context(include_news=True, include_trusted_accounts=True)
+    return jsonify(
+        {
+            "news": context["news_rows"],
+            "errors": context["news_errors"],
+            "trusted_accounts": context["trusted_accounts"],
+            "never_auto_trade": True,
+            "guardrail": "X data can support context but cannot be used as a standalone auto-trade trigger.",
+        }
+    )
+
+
+@app.route("/api/alerts", methods=["GET", "POST"])
+@api_guard
+def api_alerts():
+    context = _build_page_context(include_suggestions=True, include_news=True, include_reversal=True, include_trend=True)
+    alerts = context["alerts"]
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        action = payload.get("action", "add")
+        if action == "dismiss":
+            try:
+                dismiss_alert(payload.get("id", ""))
+            except ValueError as error:
+                raise ValidationError(str(error)) from error
+            context = _build_page_context(include_suggestions=True, include_news=True)
+            return _api_success(
+                {"alerts": context["alerts"], "unread_count": context["unread_alert_count"]},
+                alerts=context["alerts"],
+                unread_count=context["unread_alert_count"],
+                ok=True,
+            )
+        if action == "mark_read":
+            try:
+                mark_alert_read(payload.get("id", ""))
+            except ValueError as error:
+                raise ValidationError(str(error)) from error
+            context = _build_page_context(include_suggestions=True, include_news=True)
+            return _api_success(
+                {"alerts": context["alerts"], "unread_count": context["unread_alert_count"]},
+                alerts=context["alerts"],
+                unread_count=context["unread_alert_count"],
+                ok=True,
+            )
+        if action == "mark_all_read":
+            mark_all_read(alerts)
+            context = _build_page_context(include_suggestions=True, include_news=True)
+            return _api_success(
+                {"alerts": context["alerts"], "unread_count": context["unread_alert_count"]},
+                alerts=context["alerts"],
+                unread_count=context["unread_alert_count"],
+                ok=True,
+            )
+        try:
+            alert = add_manual_alert(payload)
+        except ValueError as error:
+            raise ValidationError(str(error)) from error
+        context = _build_page_context(include_suggestions=True, include_news=True)
+        return _api_success(
+            {"alert": alert, "alerts": context["alerts"], "unread_count": context["unread_alert_count"]},
+            alert=alert,
+            alerts=context["alerts"],
+            unread_count=context["unread_alert_count"],
+            ok=True,
+        )
+    return _api_success(
+        {"alerts": alerts, "unread_count": context["unread_alert_count"]},
+        alerts=alerts,
+        unread_count=context["unread_alert_count"],
+        ok=True,
+    )
+
+
+@app.route("/api/scanner", methods=["GET"])
+@api_guard
+def api_scanner():
+    force_refresh = request.args.get("refresh", "false").lower() == "true"
+    scanner_rows, scanner_errors, last_updated = get_market_data(force_refresh=force_refresh)
+    return _api_success(
+        {"rows": scanner_rows, "errors": scanner_errors, "last_updated": last_updated},
+        rows=scanner_rows,
+        errors=scanner_errors,
+        last_updated=last_updated,
+        ok=True,
+    )
+
+
+@app.route("/api/live-data-status", methods=["GET"])
+@api_guard
+def api_live_data_status():
+    force_refresh = request.args.get("refresh", "false").lower() == "true"
+    scanner_rows, scanner_errors, last_updated = get_market_data(force_refresh=force_refresh)
+    connected = bool(scanner_rows)
+    payload = {
+        "provider": "Yahoo Finance",
+        "connection_status": "🟢 Connected" if connected else "🔴 Offline",
+        "last_update_time": last_updated or "Never",
+        "symbols_loaded": len(scanner_rows),
+        "market_session": _market_session(),
+        "errors": scanner_errors,
+    }
+    return _api_success(
+        payload,
+        provider=payload["provider"],
+        connection_status=payload["connection_status"],
+        last_update_time=payload["last_update_time"],
+        symbols_loaded=payload["symbols_loaded"],
+        market_session=payload["market_session"],
+        errors=payload["errors"],
+        ok=True,
+    )
+
+
+@app.route("/api/options/<ticker>", methods=["GET"])
+@api_guard
+def api_options_ticker(ticker: str):
+    force_refresh = request.args.get("refresh", "false").lower() == "true"
+    try:
+        research_payload = get_options_data_for_ticker(ticker=ticker, force_refresh=force_refresh)
+    except ValueError as error:
+        raise ValidationError(str(error)) from error
+    legacy_payload = to_legacy_options_payload(research_payload)
+    return _api_success(
+        research_payload,
+        options=legacy_payload,
+        strategy_intelligence=get_strategy_data_for_ticker(ticker=ticker, force_refresh=force_refresh),
+        chart_levels=get_chart_levels_for_ticker(ticker=ticker, force_refresh=force_refresh),
+        ok=True,
+    )
+
+
+@app.route("/api/strategy/<ticker>", methods=["GET"])
+@api_guard
+def api_strategy_ticker(ticker: str):
+    force_refresh = request.args.get("refresh", "false").lower() == "true"
+    payload = get_strategy_data_for_ticker(ticker=ticker, force_refresh=force_refresh)
+    return _api_success(payload, strategy=payload, ok=True)
+
+
+@app.route("/api/chart-levels/watchlist", methods=["GET"])
+@api_guard
+def api_chart_levels_watchlist():
+    force_refresh = request.args.get("refresh", "false").lower() == "true"
+    query_tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
+    tickers = query_tickers or get_watchlist_tickers() or [row["ticker"] for row in get_market_data(force_refresh=False)[0][:6]]
+    rows = [get_chart_levels_for_ticker(ticker=ticker, force_refresh=force_refresh) for ticker in tickers]
+    return _api_success({"rows": rows, "count": len(rows)}, rows=rows, count=len(rows), ok=True)
+
+
+@app.route("/api/chart-levels/<ticker>", methods=["GET"])
+@api_guard
+def api_chart_levels_ticker(ticker: str):
+    force_refresh = request.args.get("refresh", "false").lower() == "true"
+    payload = get_chart_levels_for_ticker(ticker=ticker, force_refresh=force_refresh)
+    return _api_success(payload, chart_levels=payload, ok=True)
+
+
+@app.route("/api/reversal-map", methods=["GET"])
+def api_reversal_map():
+    context = _build_page_context(include_reversal=True, include_trend=True)
+    return jsonify({"rows": context["reversal_rows"], "errors": context["trend_errors"]})
+
+
+@app.route("/api/trend-detection", methods=["GET"])
+def api_trend_detection():
+    context = _build_page_context(include_reversal=True, include_trend=True)
+    return jsonify({"rows": context["trend_rows"], "errors": context["trend_errors"]})
+
+
+@app.route("/api/patterns", methods=["GET"])
+def api_patterns():
+    context = _build_page_context(include_patterns=True)
+    return jsonify({"candles": context["candle_rows"], "patterns": context["pattern_rows"], "errors": context["pattern_errors"]})
+
+
+@app.route("/api/trusted-accounts", methods=["GET", "POST", "DELETE"])
+def api_trusted_accounts():
+    if request.method == "GET":
+        return jsonify({"accounts": get_trusted_accounts()})
+
+    payload = request.get_json(silent=True) or {}
+    username = payload.get("username", "")
+    try:
+        if request.method == "POST":
+            account = add_trusted_account(username=username)
+            return jsonify({"ok": True, "account": account})
+        remove_trusted_account(username=username)
+        return jsonify({"ok": True})
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+
+
+@app.route("/api/settings", methods=["GET", "POST"])
+def api_settings():
+    if request.method == "GET":
+        return jsonify({"settings": get_settings(), "themes": available_themes(), "news_roadmap": get_future_news_roadmap()})
+    payload = request.get_json(silent=True) or {}
+    settings = update_settings(payload)
+    return jsonify({"ok": True, "settings": settings})
+
+
+@app.route("/api/mission-brief/status", methods=["GET"])
+@api_guard
+def api_mission_brief_status():
+    settings = get_settings()
+    data = {
+        "should_show": _mission_brief_should_show(settings),
+        "last_viewed_date": settings.get("mission_brief_last_viewed_date", ""),
+        "trading_day": _trading_day_key(),
+    }
+    return _api_success(data, ok=True, **data)
+
+
+@app.route("/api/mission-brief/dismiss", methods=["POST"])
+@api_guard
+def api_mission_brief_dismiss():
+    settings = _dismiss_mission_brief()
+    data = {
+        "ok": True,
+        "dismissed": True,
+        "last_viewed_date": settings.get("mission_brief_last_viewed_date", ""),
+    }
+    return _api_success(data, **data)
+
+
+@app.route("/api/mission-brief/reset", methods=["POST"])
+@api_guard
+def api_mission_brief_reset():
+    settings = _reset_mission_brief()
+    data = {
+        "ok": True,
+        "show_mission_brief_again": settings.get("show_mission_brief_again", False),
+    }
+    return _api_success(data, **data)
+
+
+@app.route("/api/autonomy/status", methods=["GET"])
+@api_guard
+def api_autonomy_status():
+    payload = get_autonomy_status()
+    return _api_success(payload, autonomy=payload, ok=True)
+
+
+@app.route("/api/autonomy/set-mode", methods=["POST"])
+@api_guard
+def api_autonomy_set_mode():
+    payload = request.get_json(silent=True) or {}
+    mode = str(payload.get("mode", "OFF"))
+    reason = str(payload.get("mode_change_reason", ""))
+    result = set_mode(mode=mode, reason=reason)
+    return _api_success(result, autonomy=result, ok=True)
+
+
+@app.route("/api/autonomy/emergency-stop", methods=["POST"])
+@api_guard
+def api_autonomy_emergency_stop():
+    payload = request.get_json(silent=True) or {}
+    result = emergency_stop(reason=str(payload.get("mode_change_reason", "")))
+    return _api_success(result, autonomy=result, ok=True)
+
+
+@app.route("/api/autonomy/reset-stop", methods=["POST"])
+@api_guard
+def api_autonomy_reset_stop():
+    payload = request.get_json(silent=True) or {}
+    result = reset_emergency_stop(reason=str(payload.get("mode_change_reason", "")))
+    return _api_success(result, autonomy=result, ok=True)
+
+
+@app.route("/api/accounts", methods=["GET"])
+@api_guard
+def api_accounts():
+    accounts = get_accounts()
+    broker_framework = _broker_framework_status()
+    safety = {
+        "store_passwords": False,
+        "hardcoded_api_keys": False,
+        "credentials_source": ".env (future integration)",
+        "live_trading_default_off": True,
+        "etrade_approval_mode_required": True,
+        "webull_default_paper_mode": True,
+        "tradingview_executes_trades": False,
+        "options_execution_disabled": True,
+        "approval_required_by_default": True,
+        "emergency_kill_switch_placeholder": True,
+    }
+    return _api_success(
+        {"accounts": accounts, "safety": safety, "broker_framework": broker_framework},
+        accounts=accounts,
+        safety=safety,
+    )
+
+
+@app.route("/api/accounts/connect", methods=["POST"])
+def api_accounts_connect():
+    payload = request.get_json(silent=True) or {}
+    platform = payload.get("platform", "")
+    if not platform:
+        return jsonify({"ok": False, "error": "Platform is required."}), 400
+
+    try:
+        if payload.get("action") == "generate_webhook":
+            account = ensure_tradingview_webhook(platform=platform)
+            return jsonify({"ok": True, "account": account})
+        if "trading_enabled" in payload:
+            account = update_trading_enabled(platform=platform, trading_enabled=bool(payload.get("trading_enabled")))
+            return jsonify({"ok": True, "account": account})
+        account = connect_account(platform=platform)
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    return jsonify({"ok": True, "account": account})
+
+
+@app.route("/api/accounts/disconnect", methods=["POST"])
+def api_accounts_disconnect():
+    payload = request.get_json(silent=True) or {}
+    platform = payload.get("platform", "")
+    if not platform:
+        return jsonify({"ok": False, "error": "Platform is required."}), 400
+    try:
+        account = disconnect_account(platform=platform)
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    return jsonify({"ok": True, "account": account})
+
+
+@app.route("/api/accounts/test", methods=["POST"])
+def api_accounts_test():
+    payload = request.get_json(silent=True) or {}
+    platform = payload.get("platform", "")
+    if not platform:
+        return jsonify({"ok": False, "error": "Platform is required."}), 400
+    try:
+        account = test_account(platform=platform)
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    return jsonify({"ok": True, "account": account})
+
+
+@app.route("/api/tradingview/webhook", methods=["POST"])
+@api_guard
+def api_tradingview_webhook():
+    payload = request.get_json(silent=True) or {}
+    stored_alert = save_alert(payload)
+    account_result = record_tradingview_signal(payload=payload)
+    result = {
+        "signal_received": True,
+        "alert": stored_alert,
+        "account_status": account_result,
+        "never_auto_execute": True,
+    }
+    return _api_success(result, ok=True, **result)
+
+
+@app.route("/api/status", methods=["GET"])
+@api_guard
+def api_status():
+    context = _build_page_context(include_news=True)
+    tradingview = get_tradingview_status()
+    neural = context["status_summary"]["neural_status"]
+    broker_statuses = _broker_framework_status()
+    data = {
+        "api": {
+            "healthy": True,
+            "version": "foundation-sprint",
+        },
+        "market": {
+            "scanner_status": context["status_summary"]["scanner_status"],
+            "market_status": context["status_summary"]["market_status"],
+            "last_scanner_update": context["scanner_last_updated"],
+        },
+        "brokers": broker_statuses,
+        "tradingview": tradingview,
+        "neural": neural,
+        "intelligence": {
+            "upcoming_opportunities": context.get("upcoming_opportunities", []),
+            "mission_queue": context.get("mission_queue", []),
+            "strategy_map": context.get("strategy_map", {}),
+            "chart_levels_map": context.get("chart_levels_map", {}),
+        },
+        "safety": {
+            "live_trading_enabled": False,
+            "options_execution_enabled": False,
+            "approval_required": True,
+            "emergency_kill_switch_placeholder": True,
+        },
+        "autonomy": get_autonomy_status(),
+    }
+    return _api_success(data)
+
+
+@app.route("/api/news", methods=["GET"])
+@api_guard
+def api_news():
+    tickers = get_watchlist_tickers() or CORE_SCAN_UNIVERSE[:4]
+    bundle = fetch_news_bundle(tickers=tickers, limit=30)
+    return _api_success(bundle, news=bundle.get("items", []), errors=bundle.get("errors", []))
+
+
+@app.route("/api/neural/status", methods=["GET"])
+@api_guard
+def api_neural_status():
+    watchlist = get_watchlist()
+    scanner_rows, _, _ = get_market_data(force_refresh=False)
+    news_bundle = fetch_news_bundle(tickers=[item["ticker"] for item in watchlist], limit=10)
+    option_inputs = [get_options_data_for_ticker(row["ticker"], force_refresh=False) for row in scanner_rows[:3]]
+    neural = build_neural_status(
+        scanner_rows=scanner_rows,
+        watchlist_rows=watchlist,
+        news_items=news_bundle.get("items", []),
+        options_payloads=option_inputs,
+    )
+    top_tickers = _resolve_analysis_tickers([item["ticker"] for item in watchlist], scanner_rows, limit=5)
+    strategy_map = {ticker: get_strategy_data_for_ticker(ticker=ticker, force_refresh=False) for ticker in top_tickers}
+    chart_levels_map = {ticker: get_chart_levels_for_ticker(ticker=ticker, force_refresh=False) for ticker in top_tickers}
+    return _api_success(
+        {
+            **neural,
+            "strategy_map": strategy_map,
+            "chart_levels_map": chart_levels_map,
+        }
+    )
+
+
+@app.route("/api/tradingview/status", methods=["GET"])
+@api_guard
+def api_tradingview_status():
+    return _api_success(get_tradingview_status())
+
+
+if __name__ == "__main__":
+    import os
+    port = int(os.environ.get("PORT", 5000))
+    debug = os.environ.get("FLASK_DEBUG", "0") == "1"
+    app.run(host="0.0.0.0", port=port, debug=debug)

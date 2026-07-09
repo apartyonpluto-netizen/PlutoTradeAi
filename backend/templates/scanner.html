@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · Market Scanner{% endblock %}
+{% block content %}
+<section class="panel panel-table">
+    <div class="panel-head">
+        <h3>Market Scanner</h3>
+        <div class="inline-actions">
+            <span id="scannerUpdatedAt">{{ scanner_last_updated or 'n/a' }}</span>
+            <button id="refreshScannerButton" type="button">Refresh</button>
+        </div>
+    </div>
+    <p class="muted" id="scannerLiveBadge">Live updates every 20s</p>
+    <div id="scannerLoadingState" class="scanner-skeleton" hidden>
+        <div></div><div></div><div></div>
+    </div>
+    <div id="scannerErrors">
+        {% if scanner_errors %}<p class="error">{{ scanner_errors|join(' | ') }}</p>{% endif %}
+    </div>
+    <table id="scannerTable">
+        <thead>
+        <tr>
+            <th>Ticker</th>
+            <th>Price</th>
+            <th>Daily %</th>
+            <th>Relative Volume</th>
+            <th>Volume</th>
+            <th>Scanner Score</th>
+            <th>Last Updated</th>
+            <th>Watchlist Status</th>
+        </tr>
+        </thead>
+        <tbody>
+        {% for row in scanner_rows %}
+        <tr>
+            <td>{{ row.ticker }}</td>
+            <td>${{ row.price }}</td>
+            <td class="{{ 'tone-positive' if row.percent_change >= 0 else 'tone-caution' }}">{{ row.percent_change }}%</td>
+            <td>{{ row.relative_volume }}x</td>
+            <td>{{ row.volume }}</td>
+            <td>{{ row.scanner_score }}</td>
+            <td>{{ row.last_updated }}</td>
+            <td>{{ 'Tracked' if row.on_watchlist else 'Not tracked' }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<section class="panel">
+    <div class="panel-head"><h3>AI Options Suggestions</h3><span>CALL / PUT / WAIT outlook by ticker</span></div>
+    <p class="muted">For research only. Not financial advice.</p>
+    <div
+        class="options-suggestions-list"
+        data-options-suggestions="true"
+        data-tickers="{{ scanner_rows | map(attribute='ticker') | join(',') }}"
+    >
+        <p class="muted">Loading options suggestions...</p>
+    </div>
+</section>
+{% endblock %}

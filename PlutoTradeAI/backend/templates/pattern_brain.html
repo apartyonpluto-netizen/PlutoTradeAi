@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="glass-panel page-hero">
+    <h2>Pattern Brain</h2>
+    <p>Pattern recognition matrix with confidence scoring hooks.</p>
+</section>
+<section class="integration-hooks">
+    {% for item in ["Bull Flag", "Bear Flag", "Cup and Handle", "Head & Shoulders", "Inverse Head & Shoulders", "Double Top", "Double Bottom", "Ascending Triangle", "Descending Triangle", "Pennant", "Rectangle", "Channel", "Wedge"] %}
+    <article class="hook-card glass-panel"><h3>{{ item }}</h3><p>Ready</p></article>
+    {% endfor %}
+</section>
+{% endblock %}

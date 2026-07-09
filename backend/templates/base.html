@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}PlutoTrade AI{% endblock %}</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    {% block head_extras %}{% endblock %}
+</head>
+<body class="{% block body_class %}{% endblock %}">
+<div class="bg-space" aria-hidden="true"></div>
+<div class="bg-stars" aria-hidden="true"></div>
+<div class="bg-nebula" aria-hidden="true"></div>
+<div class="bg-planets" aria-hidden="true"></div>
+<div class="bg-warp" aria-hidden="true"></div>
+
+<div class="dashboard-shell">
+    <aside class="sidebar">
+        <div class="sidebar-frame">
+            <div class="brand">
+                <div class="brand-mark" aria-hidden="true"></div>
+                <div class="brand-text">
+                    <h1>PlutoTrade AI</h1>
+                    <span>Captain Curtis</span>
+                </div>
+            </div>
+            <div class="brand-badges">
+                <span class="badge badge-soft">v1.0.0</span>
+                <span class="badge">PRO</span>
+            </div>
+
+            {% set mission_nav = [
+                {"label": "Mission Control", "path": "/dashboard", "paths": ["/dashboard", "/mission-control"], "icon": "✦"},
+                {"label": "Watchlist", "path": "/watchlist", "paths": ["/watchlist"], "icon": "◉"},
+                {"label": "Market Scanner", "path": "/scanner", "paths": ["/scanner", "/market-scanner"], "icon": "⌁"},
+                {"label": "Candle Brain", "path": "/candle-brain", "paths": ["/candle-brain"], "icon": "◌"},
+                {"label": "Pattern Brain", "path": "/pattern-brain", "paths": ["/pattern-brain"], "icon": "⌬"},
+                {"label": "Volume Intelligence", "path": "/volume-scanner", "paths": ["/volume-scanner", "/trend-detection"], "icon": "⟐"},
+                {"label": "Support & Resistance", "path": "/support-resistance", "paths": ["/support-resistance", "/reversal-map"], "icon": "⌖"},
+                {"label": "News Intelligence", "path": "/news-intelligence", "paths": ["/news-intelligence"], "icon": "☰"},
+                {"label": "Confidence Engine", "path": "/neural-engine", "paths": ["/neural-engine"], "icon": "◎"},
+                {"label": "Options Brain", "path": "/options", "paths": ["/options"], "icon": "◈"},
+                {"label": "Trade Journal", "path": "/trade-journal", "paths": ["/trade-journal"], "icon": "✎"},
+                {"label": "Paper Trader", "path": "/account-hub", "paths": ["/account-hub"], "icon": "△"},
+                {"label": "Risk Manager", "path": "/support-resistance", "paths": ["/support-resistance", "/reversal-map"], "icon": "⬡"},
+                {"label": "Trade Router", "path": "/account-hub", "paths": ["/account-hub"], "icon": "↠"},
+                {"label": "Account Hub", "path": "/account-hub", "paths": ["/account-hub"], "icon": "⌂"},
+                {"label": "Settings", "path": "/settings", "paths": ["/settings"], "icon": "⚙"}
+            ] %}
+            <nav class="nav-menu">
+                {% for item in mission_nav %}
+                <a href="{{ item.path }}" class="{{ 'active' if request.path in item.paths else '' }}">
+                    <span class="nav-glyph" aria-hidden="true">{{ item.icon }}</span>
+                    <span>{{ item.label }}</span>
+                </a>
+                {% endfor %}
+            </nav>
+
+            <div class="system-card">
+                <div class="panel-head">
+                    <h3>Galactic Status</h3>
+                    <span id="systemAlertCount">{{ unread_alert_count }}</span>
+                </div>
+                <div class="status-track">
+                    <small>Market Sentiment</small>
+                    <b class="tone-positive">{{ status_summary.market_sentiment }}</b>
+                    <span class="sparkline pulse-line"></span>
+                </div>
+                <div class="status-track">
+                    <small>Volatility</small>
+                    <b class="tone-caution">{{ status_summary.risk_level }}</b>
+                    <span class="sparkline wave-line"></span>
+                </div>
+                <div class="status-track">
+                    <small>Liquidity Flow</small>
+                    <b class="tone-positive">Strong</b>
+                    <span class="sparkline arc-line"></span>
+                </div>
+            </div>
+        </div>
+    </aside>
+
+    <main class="main">
+        <header class="topbar topbar-with-alerts">
+            <input type="search" placeholder="Search signals, tickers, modules" id="globalSearch">
+            <div class="top-chip">Eastern Time<b>{{ status_summary.current_time }}</b></div>
+            <div class="top-chip">System Status<b>{{ status_summary.ai_status }}</b></div>
+            <button class="alert-button" id="alertDrawerToggle" type="button">
+                Notifications <b id="alertCount">{{ unread_alert_count }}</b>
+            </button>
+        </header>
+
+        {% block content %}{% endblock %}
+    </main>
+</div>
+
+<aside class="alert-drawer" id="alertDrawer">
+    <div class="panel-head">
+        <h3>Mission Alerts</h3>
+        <div class="inline-actions">
+            <button class="ghost-button" id="markAllReadButton" type="button">Mark All Read</button>
+            <button class="ghost-button" id="closeAlertDrawer" type="button">Close</button>
+        </div>
+    </div>
+
+    <form id="manualAlertForm" class="stack-form">
+        <input type="text" name="ticker" placeholder="Ticker (optional)">
+        <input type="text" name="message" placeholder="Add custom alert" required>
+        <button type="submit">Add Alert</button>
+    </form>
+
+    <div id="alertList">
+        {% for alert in alerts %}
+        <div class="alert-row {{ 'alert-read' if alert.read else '' }}" data-alert-id="{{ alert.id }}">
+            <div>
+                <b>{{ alert.category }}</b>
+                <p>{{ alert.ticker }} {{ alert.message }}</p>
+            </div>
+            <div class="action-row">
+                {% if not alert.read %}
+                <button class="ghost-button mark-read-alert" type="button" data-alert-id="{{ alert.id }}">Read</button>
+                {% endif %}
+                <button class="ghost-button dismiss-alert" type="button" data-alert-id="{{ alert.id }}">Dismiss</button>
+            </div>
+        </div>
+        {% else %}
+        <p class="muted">No active alerts.</p>
+        {% endfor %}
+    </div>
+</aside>
+
+<script src="/static/js/app.js"></script>
+{% block page_scripts %}{% endblock %}
+</body>
+</html>

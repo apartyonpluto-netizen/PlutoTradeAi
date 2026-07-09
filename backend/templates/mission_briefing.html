@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · Mission Brief{% endblock %}
+{% block content %}
+{% set brief = status_summary %}
+<section class="hero">
+    <div class="hero-glow" aria-hidden="true"></div>
+    <div class="hero-content">
+        <p class="eyebrow">Daily Mission Brief</p>
+        <h2>Good evening, Curtis.</h2>
+        <p class="hero-copy">Mission Control is ready. Here is your operational snapshot before entering the dashboard.</p>
+    </div>
+    <div class="mission-box">
+        <small>Command Prompt</small>
+        <b>Mission Brief is ready.</b>
+        <div class="inline-actions" style="margin-top: 12px;">
+            <a href="/dashboard" class="primary-link-button">Enter Dashboard</a>
+            <button type="button" class="ghost-button" id="dismissMissionBriefButton">Dismiss for Today</button>
+        </div>
+    </div>
+</section>
+
+<section class="panel">
+    <div class="panel-head">
+        <h3>Mission Brief</h3>
+        <span>Pre-Flight Checklist</span>
+    </div>
+    <div class="price-map-grid">
+        <div><small>Market Status</small><b>{{ brief.market_status }}</b></div>
+        <div><small>Premarket / Market / After Hours</small><b>{{ brief.market_phase }}</b></div>
+        <div><small>AI Confidence</small><b>{{ brief.ai_confidence }}</b></div>
+        <div><small>System Health</small><b>{{ brief.system_health }}</b></div>
+        <div><small>Neural Engine Status</small><b>{{ brief.ai_status }}</b></div>
+        <div><small>Scanner Status</small><b>{{ brief.scanner_status }}</b></div>
+        <div><small>Broker Status</small><b>{{ brief.broker_statuses.etrade.status }}</b></div>
+        <div><small>High-Priority Opportunities</small><b>{{ brief.opportunity_count }}</b></div>
+        <div><small>Potential Reversal Setups</small><b>{{ brief.reversal_count }}</b></div>
+        <div><small>Mission Queue</small><b>{{ mission_queue|length }} priorities</b></div>
+        <div><small>Market Sentiment</small><b>{{ brief.market_sentiment }}</b></div>
+        <div><small>Economic Events</small><b>CPI · Fed speakers · Earnings schedule</b></div>
+        <div><small>Today's Earnings</small><b>{{ watchlist|map(attribute='ticker')|list|join(', ') if watchlist else 'None' }}</b></div>
+        <div><small>Watchlist Summary</small><b>{{ watchlist|length }} symbols tracked</b></div>
+        <div><small>Trusted News</small><b>{{ brief.settings.trusted_news_sources|join(', ') if brief.settings and brief.settings.trusted_news_sources else 'Yahoo Finance' }}</b></div>
+        <div><small>Trade Thesis of the Day</small><b>{{ upcoming_opportunities[0].trade_thesis if upcoming_opportunities else 'No thesis available' }}</b></div>
+        <div><small>Highest Risk Opportunity</small><b>{{ upcoming_opportunities[0].ticker if upcoming_opportunities else 'n/a' }}</b></div>
+        <div><small>Highest Confidence Opportunity</small><b>{{ upcoming_opportunities[0].ticker if upcoming_opportunities else 'n/a' }}</b></div>
+        <div><small>Support Levels</small><b>{{ upcoming_opportunities[0].support if upcoming_opportunities else 'n/a' }}</b></div>
+        <div><small>Resistance Levels</small><b>{{ upcoming_opportunities[0].resistance if upcoming_opportunities else 'n/a' }}</b></div>
+        <div><small>Upcoming Breakout Levels</small><b>{{ upcoming_opportunities[0].breakout_level if upcoming_opportunities else 'n/a' }}</b></div>
+        <div><small>Gap Watch</small><b>{{ upcoming_opportunities[0].extended_hours.gap_percent if upcoming_opportunities else 'n/a' }}%</b></div>
+        <div><small>Extended Hours Summary</small><b>{{ upcoming_opportunities[0].extended_hours.extended_hours_trend if upcoming_opportunities else 'n/a' }}</b></div>
+        <div><small>Watch Today</small><b>{{ brief.watch_today|join(', ') if brief.watch_today else 'None' }}</b></div>
+        <div><small>News Impact</small><b>{{ brief.news_impact }}</b></div>
+        <div><small>Paper Trading Account</small><b>{{ 'Connected' if brief.paper_connected else 'Not Connected' }}</b></div>
+        <div><small>Live Trading</small><b>{{ 'Enabled' if brief.live_trading_enabled else 'Disabled' }}</b></div>
+    </div>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script>
+(() => {
+  const dismissBtn = document.getElementById("dismissMissionBriefButton");
+  if (!dismissBtn) return;
+  dismissBtn.addEventListener("click", async () => {
+    try {
+      await fetch("/api/mission-brief/dismiss", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
+    } catch (_) {}
+    window.location.href = "/dashboard";
+  });
+})();
+</script>
+{% endblock %}

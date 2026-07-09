@@ -1,0 +1,188 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · Account Hub{% endblock %}
+{% block content %}
+{% set state = namespace(etrade=None, webull=None, tradingview=None) %}
+{% for account in accounts %}
+    {% if account.platform == "etrade" %}
+        {% set state.etrade = account %}
+    {% elif account.platform == "webull" %}
+        {% set state.webull = account %}
+    {% elif account.platform == "tradingview" %}
+        {% set state.tradingview = account %}
+    {% endif %}
+{% endfor %}
+
+<section class="hero account-hub-hero">
+    <div class="hero-glow" aria-hidden="true"></div>
+    <div class="hero-content">
+        <p class="eyebrow">Account Hub</p>
+        <h2>Connected Brokerage + Signal Infrastructure</h2>
+        <p class="hero-copy">Manage real execution, paper insurance lanes, and webhook analytics from one secure command center.</p>
+    </div>
+    <div class="mission-box">
+        <small>Safety Guardrails</small>
+        <b>Live trading defaults to OFF · Approval mode required</b>
+    </div>
+</section>
+
+<section class="account-hub-grid">
+    <article class="panel account-card" data-platform="etrade">
+        <div class="panel-head">
+            <h3>Morgan Stanley E*TRADE</h3>
+            <span>Real Execution</span>
+        </div>
+        <div class="status-line">
+            <i class="status-light {{ 'status-green' if state.etrade.status == 'Connected' else ('status-yellow' if state.etrade.status == 'Sandbox' else 'status-red') }}"></i>
+            <b data-account-field="status">{{ state.etrade.status }}</b>
+        </div>
+        <p class="muted">{{ state.etrade.purpose }}</p>
+        <div class="account-meta-grid">
+            <div><small>Account type</small><strong data-account-field="account_type">{{ state.etrade.account_type }}</strong></div>
+            <div><small>Last sync</small><strong data-account-field="last_sync">{{ state.etrade.last_sync or "Never" }}</strong></div>
+            <div><small>Permissions</small><strong data-account-field="permissions">{{ state.etrade.permissions|join(", ") }}</strong></div>
+            <div>
+                <small>Trading enabled</small>
+                <label class="toggle-wrap">
+                    <input type="checkbox" class="trading-toggle" {% if state.etrade.trading_enabled %}checked{% endif %}>
+                    <span>Enable live routing</span>
+                </label>
+            </div>
+        </div>
+        <div class="account-actions">
+            <button type="button" class="account-connect">Connect</button>
+            <button type="button" class="account-test">Test Connection</button>
+            <button type="button" class="ghost-button account-disconnect">Disconnect</button>
+            <button type="button" class="ghost-button open-setup-modal">Setup Guide</button>
+        </div>
+    </article>
+
+    <article class="panel account-card" data-platform="webull">
+        <div class="panel-head">
+            <h3>Webull</h3>
+            <span>Paper Insurance</span>
+        </div>
+        <div class="status-line">
+            <i class="status-light {{ 'status-green' if state.webull.status == 'Connected' else ('status-yellow' if state.webull.status == 'Paper Mode' else 'status-red') }}"></i>
+            <b data-account-field="status">{{ state.webull.status }}</b>
+        </div>
+        <p class="muted">{{ state.webull.purpose }}</p>
+        <div class="account-meta-grid">
+            <div><small>Paper mode enabled</small><strong data-account-field="paper_mode">{{ "Yes" if state.webull.paper_mode else "No" }}</strong></div>
+            <div><small>Last sync</small><strong data-account-field="last_sync">{{ state.webull.last_sync or "Never" }}</strong></div>
+            <div><small>Risk simulation enabled</small><strong data-account-field="risk_simulation_enabled">{{ "Yes" if state.webull.risk_simulation_enabled else "No" }}</strong></div>
+        </div>
+        <div class="account-actions">
+            <button type="button" class="account-connect">Connect</button>
+            <button type="button" class="account-test">Test Paper Trade</button>
+            <button type="button" class="ghost-button account-disconnect">Disconnect</button>
+            <button type="button" class="ghost-button open-setup-modal">Setup Guide</button>
+        </div>
+    </article>
+
+    <article class="panel account-card" data-platform="tradingview">
+        <div class="panel-head">
+            <h3>TradingView</h3>
+            <span>Webhook Analytics</span>
+        </div>
+        <div class="status-line">
+            <i class="status-light {{ 'status-green' if state.tradingview.status == 'Connected' else ('status-yellow' if state.tradingview.status == 'Webhook Ready' else 'status-red') }}"></i>
+            <b data-account-field="status">{{ state.tradingview.status }}</b>
+        </div>
+        <p class="muted">{{ state.tradingview.purpose }}</p>
+        <div class="account-meta-grid">
+            <div><small>Webhook URL</small><strong data-account-field="webhook_url">{{ state.tradingview.webhook_url or "Not generated" }}</strong></div>
+            <div><small>Alert status</small><strong data-account-field="alert_status">{{ state.tradingview.alert_status or "Idle" }}</strong></div>
+            <div><small>Last signal received</small><strong data-account-field="last_signal_received">{{ state.tradingview.last_signal_received or "Never" }}</strong></div>
+        </div>
+        <div class="account-actions">
+            <button type="button" class="generate-webhook">Generate Webhook URL</button>
+            <button type="button" class="account-test">Test Alert</button>
+            <button type="button" class="ghost-button account-disconnect">Disconnect</button>
+            <button type="button" class="ghost-button open-setup-modal">Setup Guide</button>
+        </div>
+    </article>
+</section>
+
+<section class="panel">
+    <div class="panel-head">
+        <h3>Future Platforms</h3>
+        <span>Locked Integrations</span>
+    </div>
+    <div class="future-platform-grid">
+        {% for item in ["Robinhood", "Fidelity", "Charles Schwab", "Alpaca", "Coinbase", "Interactive Brokers"] %}
+        <article class="future-platform-card">
+            <h4>{{ item }}</h4>
+            <p>Coming soon</p>
+            <span>Locked</span>
+        </article>
+        {% endfor %}
+    </div>
+</section>
+
+<section class="panel">
+    <div class="panel-head">
+        <h3>Operations Health</h3>
+        <span>Production Readiness</span>
+    </div>
+    <div class="price-map-grid">
+        <div><small>Market Status</small><b>{{ mission_brief.market_status if mission_brief else 'n/a' }}</b></div>
+        <div><small>Connected Lanes</small><b>{{ mission_brief.account_status if mission_brief else 'n/a' }}</b></div>
+        <div><small>Live Trading</small><b>{{ 'Enabled' if mission_brief and mission_brief.live_trading_enabled else 'Disabled' }}</b></div>
+    </div>
+</section>
+
+<section class="panel autonomy-control-card" data-autonomy-control>
+    <div class="panel-head">
+        <h3>Autonomous Mode</h3>
+        <span>Safety-first staged rollout</span>
+    </div>
+    <div class="price-map-grid">
+        <div><small>Current Mode</small><b data-autonomy-field="current_mode">{{ autonomy_status.current_mode if autonomy_status else 'OFF' }}</b></div>
+        <div><small>Live Trading Locked</small><b data-autonomy-field="live_trading_locked">{{ 'Yes' if autonomy_status and autonomy_status.live_trading_locked else 'Yes' }}</b></div>
+        <div><small>Paper Trading Active</small><b data-autonomy-field="paper_trading_active">{{ 'Yes' if autonomy_status and autonomy_status.paper_trading_active else 'No' }}</b></div>
+        <div><small>Approval Required</small><b data-autonomy-field="approval_required_status">{{ 'Yes' if autonomy_status and autonomy_status.approval_required_status else 'No' }}</b></div>
+        <div><small>Emergency Stop</small><b data-autonomy-field="emergency_stop_enabled">{{ 'Active' if autonomy_status and autonomy_status.emergency_stop_enabled else 'Inactive' }}</b></div>
+    </div>
+    <div class="grid-form" style="margin-top: 12px;">
+        <select id="autonomyModeSelector">
+            {% for mode in ["OFF", "SCOUT", "ANALYST", "PAPER", "APPROVAL", "AUTONOMOUS"] %}
+            <option value="{{ mode }}" {% if autonomy_status and autonomy_status.current_mode == mode %}selected{% endif %}>{{ mode }}</option>
+            {% endfor %}
+        </select>
+        <input type="text" id="autonomyModeReason" placeholder="Reason for mode change">
+        <button type="button" id="setAutonomyModeButton">Set Mode</button>
+        <button type="button" class="ghost-button" id="autonomyEmergencyStopButton">Emergency Stop</button>
+        <button type="button" class="ghost-button" id="autonomyResetStopButton">Reset Stop</button>
+    </div>
+    <p class="muted">V1 safety policy: autonomous real execution is locked until future release and risk-rule validation.</p>
+</section>
+
+<div class="setup-modal" id="autonomyWarningModal" aria-hidden="true">
+    <div class="setup-modal-panel">
+        <div class="panel-head">
+            <h3>Confirm Autonomous Mode Change</h3>
+            <button type="button" class="ghost-button close-autonomy-modal">Close</button>
+        </div>
+        <p class="muted">Changing mode affects scout, analysis, paper, and approval workflows. Live real execution remains locked in V1.</p>
+        <div class="inline-actions">
+            <button type="button" id="confirmAutonomyModeButton">Confirm Mode Change</button>
+        </div>
+    </div>
+</div>
+
+<div class="setup-modal" id="setupModal" aria-hidden="true">
+    <div class="setup-modal-panel">
+        <div class="panel-head">
+            <h3>Integration Setup Instructions</h3>
+            <button type="button" class="ghost-button close-setup-modal">Close</button>
+        </div>
+        <ol class="setup-steps">
+            <li>Use official API apps only. Keep credentials in <code>.env</code> when credentials are added.</li>
+            <li>Never store real passwords in the app or data files.</li>
+            <li>Keep E*TRADE in approval mode until explicit production sign-off.</li>
+            <li>Webull remains paper/simulation lane by default.</li>
+            <li>TradingView sends signals only and does not execute trades directly.</li>
+        </ol>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · Early Trend Detection{% endblock %}
+{% block content %}
+<section class="panel">
+    <div class="panel-head"><h3>Early Trend Detection</h3><span>Pre-breakout intelligence</span></div>
+    {% if trend_errors %}<p class="error">{{ trend_errors|join(' | ') }}</p>{% endif %}
+    <div class="price-map-list">
+        {% for row in trend_rows %}
+        <article class="price-map-card">
+            <div class="price-map-head"><h4>{{ row.ticker }}</h4><span>{{ row.last_updated }}</span></div>
+            <div class="detect-tags">
+                {% if row.volume_compression %}<span>Volume Compression</span>{% endif %}
+                {% if row.volume_expansion %}<span>Volume Expansion</span>{% endif %}
+                {% if row.higher_highs %}<span>Higher Highs</span>{% endif %}
+                {% if row.higher_lows %}<span>Higher Lows</span>{% endif %}
+                {% if row.lower_highs %}<span>Lower Highs</span>{% endif %}
+                {% if row.lower_lows %}<span>Lower Lows</span>{% endif %}
+                {% if row.bull_flag %}<span>Bull Flag</span>{% endif %}
+                {% if row.bear_flag %}<span>Bear Flag</span>{% endif %}
+                {% if row.failed_breakout %}<span>Failed Breakout</span>{% endif %}
+                {% if row.failed_breakdown %}<span>Failed Breakdown</span>{% endif %}
+                {% if row.trend_continuation %}<span>Trend Continuation</span>{% endif %}
+                {% if row.trend_reversal %}<span>Trend Reversal</span>{% endif %}
+                {% if row.institutional_buying %}<span>Institutional Buying</span>{% endif %}
+                {% if row.sector_momentum %}<span>Sector Momentum</span>{% endif %}
+                {% if row.relative_strength %}<span>Relative Strength</span>{% endif %}
+                {% if row.gap_up %}<span>Gap Up</span>{% endif %}
+                {% if row.gap_down %}<span>Gap Down</span>{% endif %}
+                {% if row.unusual_volume %}<span>Unusual Volume</span>{% endif %}
+            </div>
+            <p class="muted">Latest close {{ row.latest_close }} · high {{ row.latest_high }} · low {{ row.latest_low }}</p>
+        </article>
+        {% else %}
+        <p class="muted">No trend rows available.</p>
+        {% endfor %}
+    </div>
+</section>
+{% endblock %}

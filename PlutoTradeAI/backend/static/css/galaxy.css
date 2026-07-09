@@ -1,0 +1,85 @@
+:root {
+    --bg-space: #02000b;
+    --purple: #7b2cff;
+    --accent: #00eaff;
+    --neon: #00ff99;
+    --text: #ffffff;
+    --panel: rgba(12, 10, 35, 0.6);
+    --border: rgba(0, 234, 255, 0.35);
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    min-height: 100vh;
+    background: radial-gradient(circle at 20% 20%, #12022e, var(--bg-space) 45%, #010008 100%);
+    color: var(--text);
+    font-family: "Inter", sans-serif;
+    overflow-x: hidden;
+}
+
+.space-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+}
+
+#starfield {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+}
+
+.nebula {
+    position: absolute;
+    border-radius: 999px;
+    filter: blur(38px);
+    opacity: 0.34;
+}
+
+.nebula-a {
+    width: 500px;
+    height: 500px;
+    background: radial-gradient(circle, rgba(123, 44, 255, 0.8), rgba(123, 44, 255, 0));
+    top: -120px;
+    left: -140px;
+}
+
+.nebula-b {
+    width: 580px;
+    height: 580px;
+    background: radial-gradient(circle, rgba(0, 234, 255, 0.45), rgba(0, 234, 255, 0));
+    right: -180px;
+    bottom: -190px;
+}
+
+.warp-layer {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+}
+
+.app-shell {
+    position: relative;
+    z-index: 2;
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    gap: 18px;
+    min-height: 100vh;
+    padding: 16px;
+}
+
+.main-shell {
+    display: grid;
+    grid-template-rows: auto 1fr;
+    gap: 18px;
+}
+
+.page-content {
+    padding-bottom: 16px;
+}

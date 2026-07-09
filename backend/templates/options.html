@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · AI Options Suggestions{% endblock %}
+{% block content %}
+<section class="panel">
+    <div class="panel-head"><h3>AI Options Suggestions</h3><span>Scanner + Watchlist coverage</span></div>
+    <p class="muted">AI favors directional setups only when confidence is present. For research only. Not financial advice.</p>
+    <div
+        class="options-suggestions-list"
+        data-options-suggestions="true"
+        data-tickers="{{ options_tickers | join(',') }}"
+    >
+        <p class="muted">Loading options suggestions...</p>
+    </div>
+</section>
+{% endblock %}

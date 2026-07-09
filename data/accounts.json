@@ -1,0 +1,50 @@
+[
+  {
+    "platform": "etrade",
+    "display_name": "Morgan Stanley E*TRADE",
+    "status": "Not Connected",
+    "purpose": "real trade execution",
+    "last_sync": "",
+    "permissions": [
+      "read_balances",
+      "read_positions",
+      "place_orders_with_approval"
+    ],
+    "paper_mode": false,
+    "trading_enabled": false,
+    "webhook_url": "",
+    "account_type": "Brokerage",
+    "approval_mode": true
+  },
+  {
+    "platform": "webull",
+    "display_name": "Webull",
+    "status": "Paper Mode",
+    "purpose": "paper trade / insurance lane",
+    "last_sync": "",
+    "permissions": [
+      "paper_trade",
+      "market_data"
+    ],
+    "paper_mode": true,
+    "trading_enabled": false,
+    "webhook_url": "",
+    "risk_simulation_enabled": true
+  },
+  {
+    "platform": "tradingview",
+    "display_name": "TradingView",
+    "status": "Not Connected",
+    "purpose": "charting, analytics, webhook alerts",
+    "last_sync": "",
+    "permissions": [
+      "signal_ingest",
+      "alert_webhooks"
+    ],
+    "paper_mode": false,
+    "trading_enabled": false,
+    "webhook_url": "",
+    "alert_status": "Idle",
+    "last_signal_received": ""
+  }
+]

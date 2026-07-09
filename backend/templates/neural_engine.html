@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · Neural Engine{% endblock %}
+{% block content %}
+<section class="panel">
+    <div class="panel-head">
+        <h3>Neural Engine</h3>
+        <span>Architecture Ready</span>
+    </div>
+    <p class="muted">Neural engine is operating in framework mode. Signals are aggregated for decision support only.</p>
+    <div class="price-map-grid">
+        <div><small>Confidence</small><b>{{ status_summary.neural_status.confidence_score }}%</b></div>
+        <div><small>Bias</small><b>{{ status_summary.neural_status.bias }}</b></div>
+        <div><small>Final Decision</small><b>{{ status_summary.neural_status.final_decision }}</b></div>
+    </div>
+</section>
+
+<section class="panel">
+    <div class="panel-head"><h3>Signal Stack</h3><span>Placeholder Fusion</span></div>
+    <div class="watch-row"><span>Scanner Score</span><b>{{ status_summary.neural_status.inputs.scanner_score }}</b></div>
+    <div class="watch-row"><span>Trend Signal</span><b>{{ status_summary.neural_status.inputs.trend_signal_placeholder }}</b></div>
+    <div class="watch-row"><span>Volume Signal</span><b>{{ status_summary.neural_status.inputs.volume_signal_placeholder }}</b></div>
+    <div class="watch-row"><span>News Sentiment</span><b>{{ status_summary.neural_status.inputs.news_sentiment_placeholder }}</b></div>
+    <div class="watch-row"><span>Options Bias</span><b>{{ status_summary.neural_status.inputs.options_bias_placeholder }}</b></div>
+</section>
+
+<section class="panel">
+    <div class="panel-head"><h3>Risk Flags</h3><span>Safety Defaults</span></div>
+    {% for flag in status_summary.neural_status.risk_flags %}
+    <div class="log-row">{{ flag }}</div>
+    {% else %}
+    <p class="muted">No risk flags reported.</p>
+    {% endfor %}
+</section>
+
+<section class="panel">
+    <div class="panel-head"><h3>Future Modules</h3><span>Planned</span></div>
+    <div class="future-platform-grid">
+        {% for item in ["Machine Learning", "Backtesting", "Options Scanner", "Crypto", "Futures", "Economic Calendar", "Dark Pools", "Portfolio Analytics", "Risk Engine", "Voice Assistant"] %}
+        <article class="future-platform-card">
+            <h4>{{ item }}</h4>
+            <p>Planned</p>
+            <span>Future</span>
+        </article>
+        {% endfor %}
+    </div>
+</section>
+{% endblock %}
