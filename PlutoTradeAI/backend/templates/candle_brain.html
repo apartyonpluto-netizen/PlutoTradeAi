@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="glass-panel page-hero">
+    <h2>Candle Brain</h2>
+    <p>Candlestick recognition matrix with confidence scoring hooks.</p>
+</section>
+<section class="integration-hooks">
+    {% for item in ["Hammer", "Doji", "Morning Star", "Evening Star", "Bullish Engulfing", "Bearish Engulfing", "Harami", "Piercing Pattern", "Dark Cloud Cover", "Three White Soldiers", "Three Black Crows", "Shooting Star", "Hanging Man", "Spinning Top"] %}
+    <article class="hook-card glass-panel"><h3>{{ item }}</h3><p>Ready</p></article>
+    {% endfor %}
+</section>
+{% endblock %}

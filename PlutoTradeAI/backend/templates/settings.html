@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="glass-panel page-hero">
+    <h2>Settings</h2>
+    <p>Platform configuration and control toggles.</p>
+</section>
+<section class="glass-panel table-panel">
+    <div class="watchlist-form">
+        <input type="text" value="Theme: Galaxy" readonly>
+        <input type="text" value="Notifications: Enabled" readonly>
+        <input type="text" value="AI Confidence Threshold: 65" readonly>
+        <input type="text" value="Scanner Frequency: 20s" readonly>
+        <input type="text" value="Market Hours: US Equities" readonly>
+        <input type="text" value="Paper Trading: Enabled" readonly>
+    </div>
+</section>
+{% endblock %}

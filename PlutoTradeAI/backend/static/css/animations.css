@@ -1,0 +1,78 @@
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+@keyframes pulseGlow {
+    0%, 100% { box-shadow: 0 0 12px rgba(0, 234, 255, 0.4), 0 0 28px rgba(123, 44, 255, 0.35); }
+    50% { box-shadow: 0 0 18px rgba(0, 255, 153, 0.5), 0 0 42px rgba(0, 234, 255, 0.52); }
+}
+
+@keyframes sweep {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+@keyframes fadeInUp {
+    from { opacity: 0; transform: translateY(24px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes streak {
+    from { transform: translateX(-140vw); opacity: 0; }
+    25% { opacity: 0.55; }
+    to { transform: translateX(120vw); opacity: 0; }
+}
+
+@keyframes opportunityLift {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-2px); }
+}
+
+.rotating {
+    animation: spin 32s linear infinite;
+}
+
+.pulse-glow {
+    animation: pulseGlow 2.8s ease-in-out infinite;
+}
+
+.radar-sweep {
+    animation: sweep 3.5s linear infinite;
+}
+
+.fade-in-up {
+    animation: fadeInUp 0.9s ease forwards;
+}
+
+.glow-hover {
+    transition: transform 0.24s ease, box-shadow 0.24s ease;
+}
+
+.glow-hover:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 0 24px rgba(0, 234, 255, 0.24), 0 16px 35px rgba(0, 0, 0, 0.35);
+}
+
+.warp-streak {
+    position: absolute;
+    width: 130px;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, rgba(0, 234, 255, 0.85), transparent);
+    animation: streak 2.4s linear forwards;
+}
+
+.opportunity-card {
+    animation: opportunityLift 4.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .rotating,
+    .pulse-glow,
+    .radar-sweep,
+    .fade-in-up,
+    .warp-streak,
+    .opportunity-card {
+        animation: none !important;
+    }
+}

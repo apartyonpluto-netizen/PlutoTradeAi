@@ -1,0 +1,475 @@
+2026-07-08T22:50:00-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T22:50:05-0400 | INFO | plutotrade.app | Request: GET /api/status
+2026-07-08T22:50:16-0400 | INFO | plutotrade.app | Response: GET /api/status -> 200
+2026-07-08T22:50:22-0400 | INFO | plutotrade.app | Request: GET /api/scanner
+2026-07-08T22:50:22-0400 | INFO | plutotrade.app | Response: GET /api/scanner -> 200
+2026-07-08T22:50:22-0400 | INFO | plutotrade.app | Request: GET /api/options/NVDA
+2026-07-08T22:50:22-0400 | INFO | plutotrade.app | Response: GET /api/options/NVDA -> 200
+2026-07-08T22:50:22-0400 | INFO | plutotrade.app | Request: GET /api/tradingview/status
+2026-07-08T22:50:22-0400 | INFO | plutotrade.app | Response: GET /api/tradingview/status -> 200
+2026-07-08T22:50:22-0400 | INFO | plutotrade.app | Request: GET /api/news
+2026-07-08T22:50:22-0400 | INFO | plutotrade.app | Response: GET /api/news -> 200
+2026-07-08T22:50:22-0400 | INFO | plutotrade.app | Request: GET /api/neural/status
+2026-07-08T22:50:22-0400 | INFO | plutotrade.app | Response: GET /api/neural/status -> 200
+2026-07-08T22:50:22-0400 | INFO | plutotrade.app | Request: GET /dashboard
+2026-07-08T22:50:25-0400 | INFO | plutotrade.app | Response: GET /dashboard -> 200
+2026-07-08T22:50:25-0400 | INFO | plutotrade.app | Request: GET /account-hub
+2026-07-08T22:50:25-0400 | INFO | plutotrade.app | Response: GET /account-hub -> 200
+2026-07-08T22:50:30-0400 | INFO | plutotrade.app | Request: GET /api/watchlist
+2026-07-08T22:50:30-0400 | INFO | plutotrade.app | Response: GET /api/watchlist -> 200
+2026-07-08T22:50:30-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T22:50:30-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T22:50:30-0400 | INFO | plutotrade.app | Request: GET /api/accounts
+2026-07-08T22:50:30-0400 | INFO | plutotrade.app | Response: GET /api/accounts -> 200
+2026-07-08T22:50:34-0400 | INFO | plutotrade.app | Request: GET /api/watchlist
+2026-07-08T22:50:34-0400 | INFO | plutotrade.app | Response: GET /api/watchlist -> 200
+2026-07-08T22:50:46-0400 | INFO | plutotrade.app | Request: POST /api/tradingview/webhook
+2026-07-08T22:50:46-0400 | INFO | plutotrade.app | Response: POST /api/tradingview/webhook -> 200
+2026-07-08T22:50:46-0400 | INFO | plutotrade.app | Request: GET /api/tradingview/status
+2026-07-08T22:50:46-0400 | INFO | plutotrade.app | Response: GET /api/tradingview/status -> 200
+2026-07-08T22:51:00-0400 | INFO | plutotrade.app | Request: GET /api/options/NVDA
+2026-07-08T22:51:00-0400 | INFO | plutotrade.app | Response: GET /api/options/NVDA -> 200
+2026-07-08T22:51:04-0400 | INFO | plutotrade.app | Request: GET /api/options/NVDA
+2026-07-08T22:51:04-0400 | INFO | plutotrade.app | Response: GET /api/options/NVDA -> 200
+2026-07-08T22:52:13-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T22:52:13-0400 | INFO | plutotrade.app | Request: GET /api/status
+2026-07-08T22:52:24-0400 | INFO | plutotrade.app | Response: GET /api/status -> 200
+2026-07-08T22:52:24-0400 | INFO | plutotrade.app | Request: GET /api/scanner
+2026-07-08T22:52:24-0400 | INFO | plutotrade.app | Response: GET /api/scanner -> 200
+2026-07-08T22:52:24-0400 | INFO | plutotrade.app | Request: GET /api/options/NVDA
+2026-07-08T22:52:24-0400 | INFO | plutotrade.app | Response: GET /api/options/NVDA -> 200
+2026-07-08T22:52:24-0400 | INFO | plutotrade.app | Request: GET /api/tradingview/status
+2026-07-08T22:52:24-0400 | INFO | plutotrade.app | Response: GET /api/tradingview/status -> 200
+2026-07-08T22:52:24-0400 | INFO | plutotrade.app | Request: GET /api/news
+2026-07-08T22:52:24-0400 | INFO | plutotrade.app | Response: GET /api/news -> 200
+2026-07-08T22:52:24-0400 | INFO | plutotrade.app | Request: GET /api/neural/status
+2026-07-08T22:52:24-0400 | INFO | plutotrade.app | Response: GET /api/neural/status -> 200
+2026-07-08T22:52:24-0400 | INFO | plutotrade.app | Request: GET /dashboard
+2026-07-08T22:52:27-0400 | INFO | plutotrade.app | Response: GET /dashboard -> 200
+2026-07-08T22:52:27-0400 | INFO | plutotrade.app | Request: GET /account-hub
+2026-07-08T22:52:27-0400 | INFO | plutotrade.app | Response: GET /account-hub -> 200
+2026-07-08T22:52:50-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T22:52:50-0400 | INFO | plutotrade.app | Request: POST /api/tradingview/webhook
+2026-07-08T22:52:50-0400 | INFO | plutotrade.app | Response: POST /api/tradingview/webhook -> 200
+2026-07-08T22:52:50-0400 | INFO | plutotrade.app | Request: GET /api/tradingview/status
+2026-07-08T22:52:50-0400 | INFO | plutotrade.app | Response: GET /api/tradingview/status -> 200
+2026-07-08T22:53:19-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T22:53:19-0400 | INFO | plutotrade.app | Request: GET /api/status
+2026-07-08T22:53:29-0400 | INFO | plutotrade.app | Response: GET /api/status -> 200
+2026-07-08T22:53:29-0400 | INFO | plutotrade.app | Request: GET /api/scanner
+2026-07-08T22:53:29-0400 | INFO | plutotrade.app | Response: GET /api/scanner -> 200
+2026-07-08T22:53:29-0400 | INFO | plutotrade.app | Request: GET /api/options/NVDA
+2026-07-08T22:53:29-0400 | INFO | plutotrade.app | Response: GET /api/options/NVDA -> 200
+2026-07-08T22:53:29-0400 | INFO | plutotrade.app | Request: GET /api/tradingview/status
+2026-07-08T22:53:29-0400 | INFO | plutotrade.app | Response: GET /api/tradingview/status -> 200
+2026-07-08T22:53:29-0400 | INFO | plutotrade.app | Request: GET /api/news
+2026-07-08T22:53:29-0400 | INFO | plutotrade.app | Response: GET /api/news -> 200
+2026-07-08T22:53:29-0400 | INFO | plutotrade.app | Request: GET /api/neural/status
+2026-07-08T22:53:29-0400 | INFO | plutotrade.app | Response: GET /api/neural/status -> 200
+2026-07-08T22:53:29-0400 | INFO | plutotrade.app | Request: GET /dashboard
+2026-07-08T22:53:32-0400 | INFO | plutotrade.app | Response: GET /dashboard -> 200
+2026-07-08T22:53:32-0400 | INFO | plutotrade.app | Request: GET /account-hub
+2026-07-08T22:53:32-0400 | INFO | plutotrade.app | Response: GET /account-hub -> 200
+2026-07-08T22:53:37-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T22:53:37-0400 | INFO | plutotrade.app | Request: GET /api/watchlist
+2026-07-08T22:53:37-0400 | INFO | plutotrade.app | Response: GET /api/watchlist -> 200
+2026-07-08T22:53:37-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T22:53:49-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T22:53:49-0400 | INFO | plutotrade.app | Request: GET /api/accounts
+2026-07-08T22:53:49-0400 | INFO | plutotrade.app | Response: GET /api/accounts -> 200
+2026-07-08T23:01:48-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:01:48-0400 | INFO | plutotrade.app | Request: GET /
+2026-07-08T23:01:52-0400 | INFO | plutotrade.app | Response: GET / -> 200
+2026-07-08T23:01:52-0400 | INFO | plutotrade.app | Request: GET /dashboard
+2026-07-08T23:01:52-0400 | INFO | plutotrade.app | Response: GET /dashboard -> 200
+2026-07-08T23:01:52-0400 | INFO | plutotrade.app | Request: GET /watchlist
+2026-07-08T23:01:52-0400 | INFO | plutotrade.app | Response: GET /watchlist -> 200
+2026-07-08T23:01:52-0400 | INFO | plutotrade.app | Request: GET /scanner
+2026-07-08T23:01:52-0400 | INFO | plutotrade.app | Response: GET /scanner -> 200
+2026-07-08T23:01:52-0400 | INFO | plutotrade.app | Request: GET /account-hub
+2026-07-08T23:01:52-0400 | INFO | plutotrade.app | Response: GET /account-hub -> 200
+2026-07-08T23:01:52-0400 | INFO | plutotrade.app | Request: GET /notifications
+2026-07-08T23:01:52-0400 | INFO | plutotrade.app | Response: GET /notifications -> 200
+2026-07-08T23:01:52-0400 | INFO | plutotrade.app | Request: GET /dashboard
+2026-07-08T23:01:52-0400 | INFO | plutotrade.app | Response: GET /dashboard -> 200
+2026-07-08T23:07:06-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:07:06-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:07:16-0400 | INFO | plutotrade.app | Request: GET /
+2026-07-08T23:07:20-0400 | INFO | plutotrade.app | Response: GET / -> 200
+2026-07-08T23:07:20-0400 | INFO | plutotrade.app | Request: GET /static/css/style.css
+2026-07-08T23:07:20-0400 | INFO | plutotrade.app | Response: GET /static/css/style.css -> 200
+2026-07-08T23:07:20-0400 | INFO | plutotrade.app | Request: GET /static/js/app.js
+2026-07-08T23:07:20-0400 | INFO | plutotrade.app | Response: GET /static/js/app.js -> 200
+2026-07-08T23:07:30-0400 | INFO | plutotrade.app | Request: GET /dashboard
+2026-07-08T23:07:30-0400 | INFO | plutotrade.app | Response: GET /dashboard -> 200
+2026-07-08T23:07:30-0400 | INFO | plutotrade.app | Request: GET /static/css/style.css
+2026-07-08T23:07:30-0400 | INFO | plutotrade.app | Request: GET /static/js/app.js
+2026-07-08T23:07:30-0400 | INFO | plutotrade.app | Response: GET /static/css/style.css -> 304
+2026-07-08T23:07:30-0400 | INFO | plutotrade.app | Response: GET /static/js/app.js -> 304
+2026-07-08T23:07:38-0400 | INFO | plutotrade.app | Request: GET /watchlist
+2026-07-08T23:07:38-0400 | INFO | plutotrade.app | Response: GET /watchlist -> 200
+2026-07-08T23:07:38-0400 | INFO | plutotrade.app | Request: GET /static/css/style.css
+2026-07-08T23:07:38-0400 | INFO | plutotrade.app | Request: GET /static/js/app.js
+2026-07-08T23:07:38-0400 | INFO | plutotrade.app | Response: GET /static/css/style.css -> 304
+2026-07-08T23:07:38-0400 | INFO | plutotrade.app | Response: GET /static/js/app.js -> 304
+2026-07-08T23:07:38-0400 | INFO | plutotrade.app | Request: GET /api/options/TSLA
+2026-07-08T23:07:38-0400 | INFO | plutotrade.app | Response: GET /api/options/TSLA -> 200
+2026-07-08T23:07:38-0400 | INFO | plutotrade.app | Request: GET /api/options/AAPL
+2026-07-08T23:07:38-0400 | INFO | plutotrade.app | Request: GET /api/options/NVDA
+2026-07-08T23:07:38-0400 | INFO | plutotrade.app | Response: GET /api/options/NVDA -> 200
+2026-07-08T23:07:38-0400 | INFO | plutotrade.app | Request: GET /api/options/SPY
+2026-07-08T23:07:38-0400 | INFO | plutotrade.app | Request: GET /api/options/PLTR
+2026-07-08T23:07:38-0400 | INFO | plutotrade.app | Request: GET /api/options/AMD
+2026-07-08T23:07:38-0400 | INFO | plutotrade.app | Request: GET /api/options/QQQ
+2026-07-08T23:07:38-0400 | INFO | plutotrade.app | Response: GET /api/options/PLTR -> 200
+2026-07-08T23:07:39-0400 | INFO | plutotrade.app | Response: GET /api/options/AMD -> 200
+2026-07-08T23:07:39-0400 | INFO | plutotrade.app | Response: GET /api/options/QQQ -> 200
+2026-07-08T23:07:39-0400 | INFO | plutotrade.app | Response: GET /api/options/AAPL -> 200
+2026-07-08T23:07:39-0400 | INFO | plutotrade.app | Response: GET /api/options/SPY -> 200
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Request: GET /scanner
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Response: GET /scanner -> 200
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Request: GET /static/css/style.css
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Request: GET /static/js/app.js
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Response: GET /static/css/style.css -> 304
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Response: GET /static/js/app.js -> 304
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Request: GET /api/options/NVDA
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Response: GET /api/options/NVDA -> 200
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Request: GET /api/options/TSLA
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Response: GET /api/options/TSLA -> 200
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Request: GET /api/options/META
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Request: GET /api/options/AAPL
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Response: GET /api/options/AAPL -> 200
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Request: GET /api/options/PLTR
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Request: GET /api/options/QQQ
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Request: GET /api/options/AMD
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Request: GET /api/options/MSFT
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Response: GET /api/options/PLTR -> 200
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Response: GET /api/options/QQQ -> 200
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Request: GET /api/options/SPY
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Response: GET /api/options/SPY -> 200
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Response: GET /api/options/AMD -> 200
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Response: GET /api/options/MSFT -> 200
+2026-07-08T23:07:40-0400 | INFO | plutotrade.app | Response: GET /api/options/META -> 200
+2026-07-08T23:07:42-0400 | INFO | plutotrade.app | Request: GET /dashboard
+2026-07-08T23:07:42-0400 | INFO | plutotrade.app | Response: GET /dashboard -> 200
+2026-07-08T23:07:42-0400 | INFO | plutotrade.app | Request: GET /static/css/style.css
+2026-07-08T23:07:42-0400 | INFO | plutotrade.app | Request: GET /static/js/app.js
+2026-07-08T23:07:42-0400 | INFO | plutotrade.app | Response: GET /static/css/style.css -> 304
+2026-07-08T23:07:42-0400 | INFO | plutotrade.app | Response: GET /static/js/app.js -> 304
+2026-07-08T23:08:12-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:08:12-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:08:42-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:08:42-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:09:12-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:09:12-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:09:42-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:09:42-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:10:12-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:10:15-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:10:42-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:10:43-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:11:37-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:11:37-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:11:41-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:12:09-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:12:09-0400 | INFO | plutotrade.app | Request: GET /api/live-data-status
+2026-07-08T23:12:15-0400 | INFO | plutotrade.app | Response: GET /api/live-data-status -> 200
+2026-07-08T23:13:08-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:13:08-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:13:41-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:13:41-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:14:08-0400 | INFO | plutotrade.app | Request: GET /watchlist
+2026-07-08T23:14:09-0400 | INFO | plutotrade.app | Response: GET /watchlist -> 200
+2026-07-08T23:14:09-0400 | INFO | plutotrade.app | Request: GET /static/css/style.css
+2026-07-08T23:14:09-0400 | INFO | plutotrade.app | Response: GET /static/css/style.css -> 200
+2026-07-08T23:14:09-0400 | INFO | plutotrade.app | Request: GET /static/js/app.js
+2026-07-08T23:14:09-0400 | INFO | plutotrade.app | Response: GET /static/js/app.js -> 200
+2026-07-08T23:14:09-0400 | INFO | plutotrade.app | Request: GET /api/options/TSLA
+2026-07-08T23:14:09-0400 | INFO | plutotrade.app | Request: GET /api/options/NVDA
+2026-07-08T23:14:09-0400 | INFO | plutotrade.app | Response: GET /api/options/NVDA -> 200
+2026-07-08T23:14:09-0400 | INFO | plutotrade.app | Request: GET /api/options/PLTR
+2026-07-08T23:14:09-0400 | INFO | plutotrade.app | Response: GET /api/options/TSLA -> 200
+2026-07-08T23:14:09-0400 | INFO | plutotrade.app | Request: GET /api/options/AMD
+2026-07-08T23:14:09-0400 | INFO | plutotrade.app | Request: GET /api/options/SPY
+2026-07-08T23:14:09-0400 | INFO | plutotrade.app | Request: GET /api/options/AAPL
+2026-07-08T23:14:09-0400 | INFO | plutotrade.app | Response: GET /api/options/PLTR -> 200
+2026-07-08T23:14:09-0400 | INFO | plutotrade.app | Request: GET /api/options/QQQ
+2026-07-08T23:14:11-0400 | INFO | plutotrade.app | Response: GET /api/options/AAPL -> 200
+2026-07-08T23:14:11-0400 | INFO | plutotrade.app | Response: GET /api/options/QQQ -> 200
+2026-07-08T23:14:11-0400 | INFO | plutotrade.app | Response: GET /api/options/AMD -> 200
+2026-07-08T23:14:11-0400 | INFO | plutotrade.app | Response: GET /api/options/SPY -> 200
+2026-07-08T23:14:13-0400 | INFO | plutotrade.app | Request: GET /candle-brain
+2026-07-08T23:14:16-0400 | INFO | plutotrade.app | Response: GET /candle-brain -> 200
+2026-07-08T23:14:16-0400 | INFO | plutotrade.app | Request: GET /static/css/style.css
+2026-07-08T23:14:16-0400 | INFO | plutotrade.app | Request: GET /static/js/app.js
+2026-07-08T23:14:16-0400 | INFO | plutotrade.app | Response: GET /static/js/app.js -> 304
+2026-07-08T23:14:16-0400 | INFO | plutotrade.app | Response: GET /static/css/style.css -> 304
+2026-07-08T23:14:46-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:14:47-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:15:16-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:15:17-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:15:47-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:15:47-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:16:02-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:16:17-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:16:17-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:16:47-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:16:49-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:17:00-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:17:00-0400 | INFO | plutotrade.app | Request: GET /
+2026-07-08T23:17:05-0400 | INFO | plutotrade.app | Response: GET / -> 200
+2026-07-08T23:17:05-0400 | INFO | plutotrade.app | Request: GET /dashboard
+2026-07-08T23:17:05-0400 | INFO | plutotrade.app | Response: GET /dashboard -> 200
+2026-07-08T23:17:05-0400 | INFO | plutotrade.app | Request: GET /watchlist
+2026-07-08T23:17:05-0400 | INFO | plutotrade.app | Response: GET /watchlist -> 200
+2026-07-08T23:17:17-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:17:18-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:18:45-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:18:47-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:20:24-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:20:27-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:22:17-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:22:18-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:23:33-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:23:36-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:24:03-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:24:03-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:24:05-0400 | INFO | plutotrade.app | Request: GET /pattern-brain
+2026-07-08T23:24:07-0400 | INFO | plutotrade.app | Response: GET /pattern-brain -> 200
+2026-07-08T23:24:07-0400 | INFO | plutotrade.app | Request: GET /static/css/style.css
+2026-07-08T23:24:07-0400 | INFO | plutotrade.app | Response: GET /static/css/style.css -> 200
+2026-07-08T23:24:07-0400 | INFO | plutotrade.app | Request: GET /static/js/app.js
+2026-07-08T23:24:07-0400 | INFO | plutotrade.app | Response: GET /static/js/app.js -> 304
+2026-07-08T23:24:14-0400 | INFO | plutotrade.app | Request: GET /dashboard
+2026-07-08T23:24:14-0400 | INFO | plutotrade.app | Response: GET /dashboard -> 200
+2026-07-08T23:24:14-0400 | INFO | plutotrade.app | Request: GET /static/css/style.css
+2026-07-08T23:24:14-0400 | INFO | plutotrade.app | Request: GET /static/js/app.js
+2026-07-08T23:24:14-0400 | INFO | plutotrade.app | Response: GET /static/css/style.css -> 304
+2026-07-08T23:24:14-0400 | INFO | plutotrade.app | Response: GET /static/js/app.js -> 304
+2026-07-08T23:24:14-0400 | INFO | plutotrade.app | Request: GET /api/live-data-status
+2026-07-08T23:24:14-0400 | INFO | plutotrade.app | Response: GET /api/live-data-status -> 200
+2026-07-08T23:24:45-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:24:45-0400 | INFO | plutotrade.app | Request: GET /api/live-data-status
+2026-07-08T23:24:45-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:24:45-0400 | INFO | plutotrade.app | Response: GET /api/live-data-status -> 200
+2026-07-08T23:25:15-0400 | INFO | plutotrade.app | Request: GET /api/live-data-status
+2026-07-08T23:25:15-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:25:15-0400 | INFO | plutotrade.app | Response: GET /api/live-data-status -> 200
+2026-07-08T23:25:15-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:25:45-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:25:45-0400 | INFO | plutotrade.app | Request: GET /api/live-data-status
+2026-07-08T23:25:46-0400 | INFO | plutotrade.app | Response: GET /api/live-data-status -> 200
+2026-07-08T23:25:47-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:26:03-0400 | INFO | plutotrade.app | Request: GET /account-hub
+2026-07-08T23:26:03-0400 | INFO | plutotrade.app | Response: GET /account-hub -> 200
+2026-07-08T23:26:03-0400 | INFO | plutotrade.app | Request: GET /static/css/style.css
+2026-07-08T23:26:03-0400 | INFO | plutotrade.app | Request: GET /static/js/app.js
+2026-07-08T23:26:03-0400 | INFO | plutotrade.app | Response: GET /static/css/style.css -> 304
+2026-07-08T23:26:03-0400 | INFO | plutotrade.app | Response: GET /static/js/app.js -> 304
+2026-07-08T23:26:08-0400 | INFO | plutotrade.app | Request: GET /volume-scanner
+2026-07-08T23:26:10-0400 | INFO | plutotrade.app | Response: GET /volume-scanner -> 200
+2026-07-08T23:26:10-0400 | INFO | plutotrade.app | Request: GET /static/css/style.css
+2026-07-08T23:26:10-0400 | INFO | plutotrade.app | Request: GET /static/js/app.js
+2026-07-08T23:26:10-0400 | INFO | plutotrade.app | Response: GET /static/css/style.css -> 304
+2026-07-08T23:26:10-0400 | INFO | plutotrade.app | Response: GET /static/js/app.js -> 304
+2026-07-08T23:26:36-0400 | INFO | plutotrade.app | Request: GET /account-hub
+2026-07-08T23:26:37-0400 | INFO | plutotrade.app | Response: GET /account-hub -> 200
+2026-07-08T23:26:37-0400 | INFO | plutotrade.app | Request: GET /static/css/style.css
+2026-07-08T23:26:37-0400 | INFO | plutotrade.app | Request: GET /static/js/app.js
+2026-07-08T23:26:37-0400 | INFO | plutotrade.app | Response: GET /static/js/app.js -> 304
+2026-07-08T23:26:37-0400 | INFO | plutotrade.app | Response: GET /static/css/style.css -> 304
+2026-07-08T23:27:05-0400 | INFO | plutotrade.app | Request: GET /options
+2026-07-08T23:27:05-0400 | INFO | plutotrade.app | Response: GET /options -> 200
+2026-07-08T23:27:05-0400 | INFO | plutotrade.app | Request: GET /static/css/style.css
+2026-07-08T23:27:05-0400 | INFO | plutotrade.app | Request: GET /static/js/app.js
+2026-07-08T23:27:05-0400 | INFO | plutotrade.app | Response: GET /static/css/style.css -> 304
+2026-07-08T23:27:05-0400 | INFO | plutotrade.app | Response: GET /static/js/app.js -> 304
+2026-07-08T23:27:05-0400 | INFO | plutotrade.app | Request: GET /api/options/META
+2026-07-08T23:27:05-0400 | INFO | plutotrade.app | Request: GET /api/options/AMD
+2026-07-08T23:27:05-0400 | INFO | plutotrade.app | Request: GET /api/options/MSFT
+2026-07-08T23:27:05-0400 | INFO | plutotrade.app | Request: GET /api/options/NVDA
+2026-07-08T23:27:05-0400 | INFO | plutotrade.app | Request: GET /api/options/PLTR
+2026-07-08T23:27:05-0400 | INFO | plutotrade.app | Request: GET /api/options/AAPL
+2026-07-08T23:27:05-0400 | INFO | plutotrade.app | Response: GET /api/options/NVDA -> 200
+2026-07-08T23:27:05-0400 | INFO | plutotrade.app | Response: GET /api/options/PLTR -> 200
+2026-07-08T23:27:05-0400 | INFO | plutotrade.app | Request: GET /api/options/QQQ
+2026-07-08T23:27:05-0400 | INFO | plutotrade.app | Request: GET /api/options/SPY
+2026-07-08T23:27:06-0400 | INFO | plutotrade.app | Response: GET /api/options/AAPL -> 200
+2026-07-08T23:27:06-0400 | INFO | plutotrade.app | Request: GET /api/options/TSLA
+2026-07-08T23:27:06-0400 | INFO | plutotrade.app | Response: GET /api/options/TSLA -> 200
+2026-07-08T23:27:06-0400 | INFO | plutotrade.app | Response: GET /api/options/SPY -> 200
+2026-07-08T23:27:06-0400 | INFO | plutotrade.app | Response: GET /api/options/QQQ -> 200
+2026-07-08T23:27:06-0400 | INFO | plutotrade.app | Response: GET /api/options/META -> 200
+2026-07-08T23:27:06-0400 | INFO | plutotrade.app | Response: GET /api/options/MSFT -> 200
+2026-07-08T23:27:06-0400 | INFO | plutotrade.app | Response: GET /api/options/AMD -> 200
+2026-07-08T23:27:35-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:27:36-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:27:49-0400 | INFO | plutotrade.app | Request: GET /settings
+2026-07-08T23:27:49-0400 | INFO | plutotrade.app | Response: GET /settings -> 200
+2026-07-08T23:27:49-0400 | INFO | plutotrade.app | Request: GET /static/css/style.css
+2026-07-08T23:27:49-0400 | INFO | plutotrade.app | Request: GET /static/js/app.js
+2026-07-08T23:27:49-0400 | INFO | plutotrade.app | Response: GET /static/css/style.css -> 304
+2026-07-08T23:27:49-0400 | INFO | plutotrade.app | Response: GET /static/js/app.js -> 304
+2026-07-08T23:27:51-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:27:54-0400 | INFO | plutotrade.app | Request: POST /api/settings
+2026-07-08T23:27:54-0400 | INFO | plutotrade.app | Response: POST /api/settings -> 200
+2026-07-08T23:27:58-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:27:58-0400 | INFO | plutotrade.app | Request: GET /dashboard
+2026-07-08T23:28:02-0400 | INFO | plutotrade.app | Response: GET /dashboard -> 200
+2026-07-08T23:28:02-0400 | INFO | plutotrade.app | Request: GET /static/css/style.css
+2026-07-08T23:28:02-0400 | INFO | plutotrade.app | Request: GET /static/js/app.js
+2026-07-08T23:28:02-0400 | INFO | plutotrade.app | Response: GET /static/js/app.js -> 304
+2026-07-08T23:28:02-0400 | INFO | plutotrade.app | Response: GET /static/css/style.css -> 304
+2026-07-08T23:28:02-0400 | INFO | plutotrade.app | Request: GET /api/live-data-status
+2026-07-08T23:28:02-0400 | INFO | plutotrade.app | Response: GET /api/live-data-status -> 200
+2026-07-08T23:28:05-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:28:13-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:28:19-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:28:32-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:28:32-0400 | INFO | plutotrade.app | Request: GET /api/live-data-status
+2026-07-08T23:28:33-0400 | INFO | plutotrade.app | Response: GET /api/live-data-status -> 200
+2026-07-08T23:28:34-0400 | ERROR | plutotrade.app | Unhandled API exception
+Traceback (most recent call last):
+  File "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/app.py", line 203, in wrapped
+    return handler(*args, **kwargs)
+  File "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/app.py", line 846, in api_alerts
+    context = _build_page_context(include_suggestions=True, include_news=True, include_reversal=True, include_trend=True)
+  File "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/app.py", line 582, in _build_page_context
+    strategy_map[ticker] = get_strategy_data_for_ticker(ticker=ticker, force_refresh=force_refresh)
+                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/app.py", line 358, in get_strategy_data_for_ticker
+    payload = build_strategy_intelligence(normalized_ticker)
+  File "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/brains/strategy_brain.py", line 140, in build_strategy_intelligence
+    current_price = float(closes.iloc[-1])
+TypeError: float() argument must be a string or a real number, not 'Series'
+2026-07-08T23:28:34-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 500
+2026-07-08T23:29:02-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:29:02-0400 | INFO | plutotrade.app | Request: GET /api/live-data-status
+2026-07-08T23:29:02-0400 | INFO | plutotrade.app | Response: GET /api/live-data-status -> 200
+2026-07-08T23:29:02-0400 | ERROR | plutotrade.app | Unhandled API exception
+Traceback (most recent call last):
+  File "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/app.py", line 203, in wrapped
+    return handler(*args, **kwargs)
+  File "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/app.py", line 846, in api_alerts
+    context = _build_page_context(include_suggestions=True, include_news=True, include_reversal=True, include_trend=True)
+  File "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/app.py", line 582, in _build_page_context
+    strategy_map[ticker] = get_strategy_data_for_ticker(ticker=ticker, force_refresh=force_refresh)
+                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/app.py", line 358, in get_strategy_data_for_ticker
+    payload = build_strategy_intelligence(normalized_ticker)
+  File "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/brains/strategy_brain.py", line 140, in build_strategy_intelligence
+    current_price = float(closes.iloc[-1])
+TypeError: float() argument must be a string or a real number, not 'Series'
+2026-07-08T23:29:02-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 500
+2026-07-08T23:29:32-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:29:32-0400 | INFO | plutotrade.app | Request: GET /api/live-data-status
+2026-07-08T23:29:33-0400 | INFO | plutotrade.app | Response: GET /api/live-data-status -> 200
+2026-07-08T23:29:33-0400 | ERROR | plutotrade.app | Unhandled API exception
+Traceback (most recent call last):
+  File "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/app.py", line 203, in wrapped
+    return handler(*args, **kwargs)
+  File "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/app.py", line 846, in api_alerts
+    context = _build_page_context(include_suggestions=True, include_news=True, include_reversal=True, include_trend=True)
+  File "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/app.py", line 582, in _build_page_context
+    strategy_map[ticker] = get_strategy_data_for_ticker(ticker=ticker, force_refresh=force_refresh)
+                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/app.py", line 358, in get_strategy_data_for_ticker
+    payload = build_strategy_intelligence(normalized_ticker)
+  File "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/brains/strategy_brain.py", line 140, in build_strategy_intelligence
+    current_price = float(closes.iloc[-1])
+TypeError: float() argument must be a string or a real number, not 'Series'
+2026-07-08T23:29:33-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 500
+2026-07-08T23:29:36-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:29:41-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:29:57-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:29:57-0400 | INFO | plutotrade.app | Request: GET /api/strategy/AAPL
+2026-07-08T23:29:58-0400 | INFO | plutotrade.app | Response: GET /api/strategy/AAPL -> 200
+2026-07-08T23:29:58-0400 | INFO | plutotrade.app | Request: GET /api/chart-levels/AAPL
+2026-07-08T23:29:58-0400 | INFO | plutotrade.app | Response: GET /api/chart-levels/AAPL -> 200
+2026-07-08T23:29:58-0400 | INFO | plutotrade.app | Request: GET /api/chart-levels/watchlist
+2026-07-08T23:29:58-0400 | INFO | plutotrade.app | Response: GET /api/chart-levels/watchlist -> 200
+2026-07-08T23:30:02-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:30:02-0400 | INFO | plutotrade.app | Request: GET /api/live-data-status
+2026-07-08T23:30:03-0400 | INFO | plutotrade.app | Response: GET /api/live-data-status -> 200
+2026-07-08T23:30:09-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:30:28-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:30:32-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:30:32-0400 | INFO | plutotrade.app | Request: GET /api/live-data-status
+2026-07-08T23:30:33-0400 | INFO | plutotrade.app | Response: GET /api/live-data-status -> 200
+2026-07-08T23:30:39-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:31:02-0400 | INFO | plutotrade.app | Request: GET /api/live-data-status
+2026-07-08T23:31:02-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:31:02-0400 | INFO | plutotrade.app | Response: GET /api/live-data-status -> 200
+2026-07-08T23:31:03-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:31:49-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:31:49-0400 | INFO | plutotrade.app | Request: GET /api/live-data-status
+2026-07-08T23:31:50-0400 | INFO | plutotrade.app | Response: GET /api/live-data-status -> 200
+2026-07-08T23:31:50-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:33:30-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:34:09-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:34:11-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:34:35-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:34:35-0400 | INFO | plutotrade.app | Request: GET /api/live-data-status
+2026-07-08T23:34:37-0400 | INFO | plutotrade.app | Response: GET /api/live-data-status -> 200
+2026-07-08T23:34:46-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 200
+2026-07-08T23:35:02-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:35:35-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:35:37-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:35:37-0400 | INFO | plutotrade.app | Request: GET /api/live-data-status
+2026-07-08T23:35:41-0400 | INFO | plutotrade.app | Response: GET /api/live-data-status -> 200
+2026-07-08T23:35:42-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:35:42-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:35:59-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:35:59-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:36:05-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:36:09-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:36:15-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:36:43-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:36:48-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:36:57-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:37:01-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:37:14-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:40:55-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:40:55-0400 | INFO | plutotrade.app | Request: GET /api/live-data-status
+2026-07-08T23:40:56-0400 | INFO | plutotrade.app | Response: GET /api/live-data-status -> 200
+2026-07-08T23:40:59-0400 | INFO | plutotrade.app | Request: GET /dashboard
+2026-07-08T23:41:06-0400 | ERROR | plutotrade.app | Unhandled API exception
+Traceback (most recent call last):
+  File "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/app.py", line 212, in wrapped
+    return handler(*args, **kwargs)
+  File "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/app.py", line 983, in api_alerts
+    context = _build_page_context(include_suggestions=True, include_news=True, include_reversal=True, include_trend=True)
+  File "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/app.py", line 711, in _build_page_context
+    "last_updated": strategy.get("last_updated", strategy.get("generated_at", _now_iso())),
+                                                                              ^^^^^^^^
+NameError: name '_now_iso' is not defined. Did you mean: '_now_utc'?
+2026-07-08T23:41:06-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 500
+2026-07-08T23:42:43-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:45:04-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:45:04-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:45:07-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:45:16-0400 | INFO | plutotrade.app | Request: GET /api/alerts
+2026-07-08T23:45:27-0400 | ERROR | plutotrade.app | Unhandled API exception
+Traceback (most recent call last):
+  File "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/app.py", line 212, in wrapped
+    return handler(*args, **kwargs)
+  File "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/app.py", line 983, in api_alerts
+    context = _build_page_context(include_suggestions=True, include_news=True, include_reversal=True, include_trend=True)
+  File "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/app.py", line 711, in _build_page_context
+    "last_updated": strategy.get("last_updated", strategy.get("generated_at", _now_iso())),
+                                                                              ^^^^^^^^
+NameError: name '_now_iso' is not defined. Did you mean: '_now_utc'?
+2026-07-08T23:45:27-0400 | INFO | plutotrade.app | Response: GET /api/alerts -> 500
+2026-07-08T23:45:29-0400 | INFO | plutotrade.app | Request: GET /
+2026-07-08T23:45:31-0400 | INFO | plutotrade.app | Request: GET /static/js/app.js
+2026-07-08T23:45:31-0400 | INFO | plutotrade.app | Request: GET /static/css/style.css
+2026-07-08T23:45:31-0400 | INFO | plutotrade.app | Response: GET /static/css/style.css -> 200
+2026-07-08T23:45:31-0400 | INFO | plutotrade.app | Response: GET /static/js/app.js -> 200
+2026-07-08T23:45:42-0400 | INFO | plutotrade | Logging initialized.
+2026-07-08T23:45:55-0400 | INFO | plutotrade.app | Request: GET /
+2026-07-08T23:46:06-0400 | INFO | plutotrade.app | Response: GET / -> 500
+2026-07-08T23:46:06-0400 | INFO | plutotrade.app | Request: GET /favicon.ico
+2026-07-08T23:46:06-0400 | INFO | plutotrade.app | Response: GET /favicon.ico -> 404
+2026-07-08T23:46:22-0400 | INFO | plutotrade.app | Request: GET /
+2026-07-08T23:46:24-0400 | INFO | plutotrade.app | Response: GET / -> 500
+2026-07-09T00:25:47-0400 | INFO | plutotrade | Logging initialized.

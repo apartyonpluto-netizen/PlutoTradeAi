@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · News Intelligence{% endblock %}
+{% block content %}
+<section class="panel">
+    <div class="panel-head">
+        <h3>X / Twitter News Intelligence</h3>
+        <span>Official API Only</span>
+    </div>
+    <p class="muted">Guardrail: X sentiment is informational only. Never auto-trade from social media alone.</p>
+    {% if news_errors %}
+    <p class="error">{{ news_errors|join(' | ') }}</p>
+    {% endif %}
+    <div class="news-list">
+        {% for item in news_rows %}
+        <article class="news-card">
+            <div class="panel-head">
+                <h4>{{ item.author }} · {{ item.ticker }}</h4>
+                <span>{{ item.sentiment }}</span>
+            </div>
+            <p>{{ item.text }}</p>
+            <p class="muted">Hype flags: {{ item.hype_flags|join(', ') if item.hype_flags else 'none' }}</p>
+            {% if item.url %}
+            <a href="{{ item.url }}" target="_blank" rel="noopener noreferrer">Open Post</a>
+            {% endif %}
+        </article>
+        {% else %}
+        <p class="muted">No X posts matched trusted accounts and watchlist tickers.</p>
+        {% endfor %}
+    </div>
+</section>
+<section class="panel">
+    <div class="panel-head"><h3>Future News Integrations</h3><span>Architecture Hooks</span></div>
+    <div class="price-map-grid">
+        {% for source in future_news_roadmap.sources %}
+        <div><small>{{ source.name }}</small><b>{{ source.status }}</b></div>
+        {% endfor %}
+    </div>
+</section>
+{% endblock %}

@@ -1,0 +1,12 @@
+{
+  "current_mode": "OFF",
+  "live_trading_enabled": false,
+  "paper_trading_enabled": false,
+  "approval_required": false,
+  "daily_loss_limit": 500.0,
+  "max_trade_size": 250.0,
+  "max_positions": 3,
+  "emergency_stop_enabled": false,
+  "last_mode_change": "",
+  "mode_change_reason": "Initialization"
+}

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="glass-panel page-hero">
+    <h2>Market Scanner Starfield</h2>
+    <p>Live movers ranked by price action, relative volume, and scanner intelligence score.</p>
+    <div class="inline-actions">
+        <span id="scannerUpdatedAt">{{ scanner_last_updated or 'n/a' }}</span>
+        <span id="scannerLiveBadge">Live updates every 20s</span>
+        <button id="refreshScannerButton" type="button" class="btn-gradient">Refresh</button>
+    </div>
+</section>
+
+<section class="glass-panel table-panel">
+    <div id="scannerErrors">
+        {% if scanner_errors %}<p class="negative">{{ scanner_errors|join(' | ') }}</p>{% endif %}
+    </div>
+    <table class="cockpit-table">
+        <thead>
+            <tr>
+                <th>Ticker</th>
+                <th>Price</th>
+                <th>% Change</th>
+                <th>Relative Volume</th>
+                <th>Volume</th>
+                <th>Scanner Score</th>
+                <th>Watchlist</th>
+                <th>Last Updated</th>
+            </tr>
+        </thead>
+        <tbody id="scannerTableBody">
+        {% for stock in movers %}
+            <tr>
+                <td>{{ stock.ticker }}</td>
+                <td>${{ stock.price }}</td>
+                <td class="{{ 'positive' if stock.percent_change > 0 else 'negative' }}">{{ stock.percent_change }}%</td>
+                <td>{{ stock.relative_volume }}</td>
+                <td>{{ stock.volume }}</td>
+                <td>{{ stock.scanner_score }}</td>
+                <td><span class="tag {{ 'tag-live' if stock.on_watchlist else 'tag-dark' }}">{{ 'ON' if stock.on_watchlist else 'OFF' }}</span></td>
+                <td>{{ stock.last_updated[:19] if stock.last_updated else 'n/a' }}</td>
+            </tr>
+        {% else %}
+            <tr><td colspan="8">No scanner results yet.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endblock %}

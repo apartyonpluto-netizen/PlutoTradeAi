@@ -1,0 +1,268 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero glass-panel parallax-layer">
+    <div class="hero-text">
+        <p class="eyebrow">PlutoTrade AI // Mission Control</p>
+        <h2>Operational Dashboard</h2>
+        <p>Live scanner intelligence, watchlist operations, and brokerage controls.</p>
+        <div class="mission-wrap">
+            <div class="mission-labels">
+                <span>Mission Progress</span>
+                <span>{{ mission_brief.mission_progress }}%</span>
+            </div>
+            <div class="mission-bar">
+                <div class="mission-progress pulse-glow" style="width: {{ mission_brief.mission_progress }}%;"></div>
+            </div>
+        </div>
+    </div>
+    <div class="hero-planet-wrap">
+        <div class="pluto-planet rotating"></div>
+        <div class="planet-ring"></div>
+        <div class="pulse-planet pulse-glow"></div>
+    </div>
+</section>
+
+<section class="stats-grid">
+    <article class="metric-card glass-panel glow-hover"><h3>Market Status</h3><p class="metric-value">{{ mission_brief.market_status }}</p></article>
+    <article class="metric-card glass-panel glow-hover"><h3>AI Status</h3><p class="metric-value">{{ mission_brief.ai_status }}</p></article>
+    <article class="metric-card glass-panel glow-hover"><h3>Scanner Status</h3><p class="metric-value">{{ mission_brief.scanner_status }}</p></article>
+    <article class="metric-card glass-panel glow-hover"><h3>Watchlist Status</h3><p class="metric-value">{{ watchlist|length }}</p></article>
+    <article class="metric-card glass-panel glow-hover"><h3>Account Status</h3><p class="metric-value">{{ mission_brief.account_status }}</p></article>
+    <article class="metric-card glass-panel glow-hover"><h3>Latest Alerts</h3><p class="metric-value">{{ alerts|length }}</p></article>
+    <article class="metric-card glass-panel glow-hover"><h3>Market Sentiment</h3><p class="metric-value">{{ mission_brief.market_sentiment }}</p></article>
+    <article class="metric-card glass-panel glow-hover"><h3>AI Confidence</h3><p class="metric-value">{{ mission_brief.ai_confidence }}</p></article>
+    <article class="metric-card glass-panel glow-hover"><h3>Risk Level</h3><p class="metric-value">{{ mission_brief.risk_level }}</p></article>
+    <article class="metric-card glass-panel glow-hover"><h3>Opportunities</h3><p class="metric-value">{{ mission_brief.todays_opportunities }}</p></article>
+    <article class="metric-card glass-panel glow-hover"><h3>Live Data</h3><p class="metric-value">{{ scanner_last_updated[:19] if scanner_last_updated else 'n/a' }}</p></article>
+    <article class="metric-card glass-panel glow-hover"><h3>Watch Today</h3><p class="metric-value">{{ mission_brief.watch_today|join(', ') if mission_brief.watch_today else 'n/a' }}</p></article>
+</section>
+
+<section class="glass-panel opportunities-panel">
+    <div class="panel-header">
+        <h3>🚀 Upcoming Opportunities</h3>
+        <p class="panel-subtext">AI favors high-conviction potential setups. Signals require confirmation.</p>
+    </div>
+    {% if opportunity_engine_errors %}
+    <p class="negative">Opportunity engine warnings: {{ opportunity_engine_errors|join(" | ") }}</p>
+    {% endif %}
+    <div class="opportunities-grid" id="upcomingOpportunitiesList">
+        {% for item in upcoming_opportunities %}
+        <article class="opportunity-card glass-panel glow-hover {{ 'high-conviction' if item.confidence_score >= 85 else '' }}" data-confidence="{{ item.confidence_score }}">
+            <header class="opportunity-header">
+                <div>
+                    <h4>{{ item.ticker }}</h4>
+                    <p>{{ item.company_name }}</p>
+                </div>
+                <div class="opportunity-tags">
+                    <span class="tag">{{ item.ai_bias }}</span>
+                    <span class="tag">{{ item.trade_quality }}</span>
+                    <span class="tag">{{ item.risk }}</span>
+                </div>
+            </header>
+            <div class="opportunity-metrics">
+                <p><b>Current Price:</b> ${{ item.current_price }}</p>
+                <p><b>Confidence:</b> {{ item.confidence_score }}%</p>
+                <p><b>Expected Horizon:</b> {{ item.expected_time_horizon }}</p>
+                <p><b>Expected Move:</b> {{ item.expected_move }}</p>
+            </div>
+            <div class="price-watch-grid">
+                <h5>Price Watch</h5>
+                <p><b>Ideal Entry Zone:</b> ${{ item.price_watch.ideal_entry_low }}–${{ item.price_watch.ideal_entry_high }}</p>
+                <p><b>Support:</b> ${{ item.price_watch.support }}</p>
+                <p><b>Resistance:</b> ${{ item.price_watch.resistance }}</p>
+                <p><b>Breakout Price:</b> ${{ item.price_watch.breakout_price }}</p>
+                <p><b>Breakdown Price:</b> ${{ item.price_watch.breakdown_price }}</p>
+                <p><b>Reversal Zone:</b> ${{ item.price_watch.reversal_zone_low }}–${{ item.price_watch.reversal_zone_high }}</p>
+                <p><b>Target 1:</b> ${{ item.price_watch.target_1 }}</p>
+                <p><b>Target 2:</b> ${{ item.price_watch.target_2 }}</p>
+                <p><b>Invalidation:</b> {% if item.ai_bias == 'PUT' %}Above{% else %}Below{% endif %} ${{ item.price_watch.invalidation_level }}</p>
+            </div>
+            <div class="thesis-block">
+                <h5>Trade Thesis</h5>
+                <p>{{ item.trade_thesis }}</p>
+            </div>
+            <div class="case-grid">
+                <div>
+                    <h5>Bull Case</h5>
+                    <ul class="feed-list">
+                        {% for line in item.bull_case %}
+                        <li>{{ line }}</li>
+                        {% endfor %}
+                    </ul>
+                </div>
+                <div>
+                    <h5>Bear Case</h5>
+                    <ul class="feed-list">
+                        {% for line in item.bear_case %}
+                        <li>{{ line }}</li>
+                        {% endfor %}
+                    </ul>
+                </div>
+            </div>
+            <div class="options-research-block">
+                <h5>Options Research</h5>
+                <div class="options-grid">
+                    {% for option in item.options_research %}
+                    <article class="glass-panel options-card">
+                        <h6>{{ option.profile }}</h6>
+                        <p><b>AI Bias:</b> {{ option.ai_bias }}</p>
+                        <p><b>Expiration Date:</b> {{ option.expiration_date }}</p>
+                        <p><b>Suggested Strike Area:</b> {{ option.suggested_strike_area }}</p>
+                        <p><b>Estimated Premium:</b> {{ option.estimated_premium }}</p>
+                        <p><b>Estimated Break-even:</b> {{ option.estimated_break_even }}</p>
+                        <p><b>Risk Rating:</b> {{ option.risk_rating }}</p>
+                        <p><b>Expected Hold Time:</b> {{ option.expected_hold_time }}</p>
+                        <p><b>Expected Volatility:</b> {{ option.expected_volatility }}</p>
+                        <p class="option-language">{{ option.language }}</p>
+                    </article>
+                    {% endfor %}
+                </div>
+            </div>
+        </article>
+        {% else %}
+        <article class="glass-panel panel"><p>No upcoming opportunities identified yet.</p></article>
+        {% endfor %}
+    </div>
+</section>
+
+<section class="opportunity-side-grid">
+    <article class="glass-panel panel">
+        <div class="panel-header">
+            <h3>Mission Queue</h3>
+        </div>
+        <ul class="feed-list" id="missionQueueList">
+            {% for item in mission_queue %}
+            <li>
+                <b>Priority {{ item.priority }} · {{ item.ticker }} · {{ item.ai_bias }}</b>
+                <p>Confidence {{ item.confidence }}%</p>
+                <p>Waiting for: {{ item.waiting_for }}</p>
+            </li>
+            {% else %}
+            <li>No queued missions.</li>
+            {% endfor %}
+        </ul>
+    </article>
+    <article class="glass-panel panel">
+        <div class="panel-header">
+            <h3>Upcoming Market Opportunities</h3>
+        </div>
+        <div id="opportunitiesTimeline" class="timeline-grid">
+            {% for bucket in ['Today', 'Tomorrow', 'Next 3 Days', 'Next Week', 'Next Month'] %}
+            <div class="timeline-bucket">
+                <h4>{{ bucket }}</h4>
+                <ul class="feed-list">
+                    {% for item in opportunities_timeline.get(bucket, []) %}
+                    <li><b>{{ item.ticker }}</b> · {{ item.label }} · {{ item.confidence }}</li>
+                    {% else %}
+                    <li>No scheduled setups.</li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endfor %}
+        </div>
+    </article>
+    <article class="glass-panel panel">
+        <div class="panel-header">
+            <h3>Mission Alerts</h3>
+        </div>
+        <ul class="feed-list" id="missionAlertsFeed">
+            {% for alert in mission_alerts %}
+            <li data-alert-key="{{ alert.ticker }}-{{ alert.message }}">
+                <b>{{ alert.type }} · {{ alert.ticker }}</b>
+                <p>{{ alert.message }}</p>
+                <p>Confidence: {{ alert.confidence }}</p>
+                <p>Suggested Action: {{ alert.suggested_action }}</p>
+            </li>
+            {% else %}
+            <li>No mission alerts currently.</li>
+            {% endfor %}
+        </ul>
+    </article>
+    <article class="glass-panel panel">
+        <div class="panel-header">
+            <h3>Engine Integrations</h3>
+        </div>
+        <ul class="feed-list">
+            {% for name, status in opportunity_integration_status.items() %}
+            <li><b>{{ name.replace('_', ' ')|title }}</b> · {{ status }}</li>
+            {% else %}
+            <li>No integration signals loaded.</li>
+            {% endfor %}
+        </ul>
+    </article>
+</section>
+
+<section class="command-grid">
+    <div class="center-panel glass-panel">
+        <div class="panel-header">
+            <h3>Top Market Movers</h3>
+            <a href="{{ url_for('scanner_page') }}" class="btn-gradient">Open Scanner</a>
+        </div>
+        <div class="table-wrap">
+            <table class="cockpit-table">
+                <thead>
+                    <tr>
+                        <th>Ticker</th>
+                        <th>Price</th>
+                        <th>% Change</th>
+                        <th>Volume</th>
+                        <th>Rel Vol</th>
+                        <th>Score</th>
+                        <th>Last Updated</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for stock in movers[:10] %}
+                    <tr>
+                        <td>{{ stock.ticker }}</td>
+                        <td>${{ stock.price }}</td>
+                        <td class="{{ 'positive' if stock.percent_change > 0 else 'negative' }}">{{ stock.percent_change }}%</td>
+                        <td>{{ stock.volume }}</td>
+                        <td>{{ stock.relative_volume }}</td>
+                        <td>{{ stock.scanner_score }}</td>
+                        <td>{{ stock.last_updated[:19] if stock.last_updated else 'n/a' }}</td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="7">No live scanner data available.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <aside class="right-panel">
+        <div class="glass-panel panel radar" id="neural-engine">
+            <h3>AI Radar</h3>
+            <div class="radar-core">
+                <span class="radar-sweep"></span>
+            </div>
+        </div>
+
+        <div class="glass-panel panel" id="watchlist-hook">
+            <h3>Watchlist</h3>
+            <ul class="stack-list">
+                {% for stock in watchlist[:6] %}
+                <li><span>{{ stock.ticker }}</span><small>{{ stock.category }}</small></li>
+                {% endfor %}
+            </ul>
+        </div>
+
+        <div class="glass-panel panel" id="suggestion-panel">
+            <h3>Watchlist Suggestions</h3>
+            <ul class="feed-list">
+                {% for suggestion in suggestions[:6] %}
+                <li>
+                    <b>{{ suggestion.ticker }}</b> · {{ suggestion.reason }}
+                    <div class="inline-actions" style="margin-top: 8px;">
+                        <button class="btn-neutral add-suggestion" data-ticker="{{ suggestion.ticker }}" data-category="{{ suggestion.category }}" data-status="{{ suggestion.status }}" data-ai-score="{{ suggestion.ai_score }}" data-notes="{{ suggestion.reason }}">Add</button>
+                        <button class="btn-neutral dismiss-suggestion">Dismiss</button>
+                    </div>
+                </li>
+                {% else %}
+                <li>No scanner suggestions currently.</li>
+                {% endfor %}
+            </ul>
+        </div>
+    </aside>
+</section>
+{% endblock %}

@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · Settings{% endblock %}
+{% block content %}
+<section class="panel">
+    <div class="panel-head"><h3>Platform Settings</h3><span>Enterprise controls</span></div>
+    <form id="platformSettingsForm" class="grid-form">
+        <select name="theme">
+            {% for theme in settings_themes %}
+            <option value="{{ theme }}" {% if settings_payload.theme == theme %}selected{% endif %}>{{ theme }}</option>
+            {% endfor %}
+        </select>
+        <input type="number" name="ai_confidence_threshold" min="0" max="99" value="{{ settings_payload.ai_confidence_threshold }}">
+        <input type="number" name="scanner_frequency_seconds" min="10" max="300" value="{{ settings_payload.scanner_frequency_seconds }}">
+        <input type="text" name="market_hours" value="{{ settings_payload.market_hours }}">
+        <label class="toggle-wrap"><input type="checkbox" name="paper_trading_enabled" {% if settings_payload.paper_trading_enabled %}checked{% endif %}><span>Paper Trading</span></label>
+        <label class="toggle-wrap"><input type="checkbox" name="auto_suggestions_enabled" {% if settings_payload.auto_suggestions_enabled %}checked{% endif %}><span>Auto Suggestions</span></label>
+        <label class="toggle-wrap"><input type="checkbox" name="show_mission_brief_again" {% if settings_payload.show_mission_brief_again %}checked{% endif %}><span>Show Mission Brief Again</span></label>
+        <button type="submit">Save Settings</button>
+    </form>
+    <div class="inline-actions" style="margin-top: 12px;">
+        <button type="button" id="manualMissionBriefResetButton" class="ghost-button">Reopen Mission Brief Now</button>
+    </div>
+</section>
+
+<section class="panel">
+    <div class="panel-head"><h3>Trusted X Accounts</h3><span>Alert Source Control</span></div>
+    <form id="trustedAccountForm" class="stack-form">
+        <input type="text" name="username" placeholder="@account" required>
+        <button type="submit">Add Trusted Account</button>
+    </form>
+    <div id="trustedAccountsList">
+        {% for account in trusted_accounts %}
+        <div class="alert-row">
+            <div><b>@{{ account.username }}</b><p>{{ 'enabled' if account.enabled else 'disabled' }}</p></div>
+            <button type="button" class="ghost-button remove-trusted-account" data-username="{{ account.username }}">Remove</button>
+        </div>
+        {% else %}
+        <p class="muted">No trusted accounts configured.</p>
+        {% endfor %}
+    </div>
+</section>
+
+<section class="panel">
+    <div class="panel-head"><h3>Connected Accounts + API Status</h3><span>Safety first</span></div>
+    <div class="price-map-grid">
+        <div><small>Connected Accounts</small><b>TradingView · E*TRADE · Webull</b></div>
+        <div><small>Notifications</small><b>{{ 'Enabled' if settings_payload.notifications_enabled else 'Disabled' }}</b></div>
+        <div><small>API Status</small><b>{{ settings_payload.api_status }}</b></div>
+        <div><small>Guardrail</small><b>Live trading default OFF</b></div>
+    </div>
+</section>
+
+<section class="panel">
+    <div class="panel-head"><h3>Future Trusted Sources</h3><span>No scraping</span></div>
+    <div class="news-list">
+        {% for source in future_news_roadmap.sources %}
+        <article class="news-card">
+            <h4>{{ source.name }}</h4>
+            <p>Status: {{ source.status }}</p>
+            <p class="muted">Integration hook: {{ source.integration }}</p>
+        </article>
+        {% endfor %}
+    </div>
+</section>
+{% endblock %}

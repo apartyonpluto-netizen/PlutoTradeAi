@@ -1,0 +1,17 @@
+{
+  "theme": "Nebula",
+  "notifications_enabled": true,
+  "ai_confidence_threshold": 68,
+  "scanner_frequency_seconds": 20,
+  "market_hours": "09:30-16:00 ET",
+  "paper_trading_enabled": true,
+  "auto_suggestions_enabled": true,
+  "show_mission_brief_again": false,
+  "mission_brief_last_viewed_date": "",
+  "api_status": "Operational",
+  "trusted_news_sources": [
+    "Official X API",
+    "Yahoo Finance News",
+    "MarketWatch RSS"
+  ]
+}
