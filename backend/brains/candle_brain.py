@@ -59,4 +59,4 @@ def analyze_candle(open_price, high_price, low_price, close_price):
 
 
 if __name__ == "__main__":
-    print(analyze_candle(100, 106, 99, 101))
+    analyze_candle(100, 106, 99, 101)

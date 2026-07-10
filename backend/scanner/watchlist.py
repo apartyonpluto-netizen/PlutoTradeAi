@@ -56,4 +56,4 @@ def add_to_watchlist(ticker, category="AI Discovery", status="Pending", ai_score
 
 
 if __name__ == "__main__":
-    print(get_watchlist())
+    get_watchlist()

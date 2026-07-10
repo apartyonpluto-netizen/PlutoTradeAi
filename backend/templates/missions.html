@@ -1,0 +1,53 @@
+{% extends 'base.html' %}
+{% block page_id %}missions{% endblock %}
+{% block content %}
+<section class="hero-card">
+  <h1>Mission Assignment Center</h1>
+  <p>Assign symbols as AI missions, route them to scanners and brains, and track profile evolution.</p>
+  <div class="action-row">
+    <button id="openMissionFromCenter" type="button">Assign Market Symbol</button>
+    <a class="tab" href="{{ url_for('login_page') }}">Sign In for Persistent Missions</a>
+  </div>
+</section>
+
+<section class="panel">
+  <h3>Mission Timeline</h3>
+  <form class="inline-search" id="missionTimelineForm">
+    <input id="missionTimelineTicker" name="ticker" value="{{ ticker }}" placeholder="TSLA, NVDA, SPY">
+    <button type="submit">Load Timeline</button>
+  </form>
+  <div id="missionTimelineStatus" class="status-line">Loading mission timeline...</div>
+  <div id="missionTimelineSummary" class="detail-body"></div>
+  <div id="missionTimelineTrack" class="timeline-track"></div>
+</section>
+
+<section class="grid-two">
+  <article class="panel">
+    <h3>Mission Control Summary</h3>
+    <div id="missionControlStatus" class="status-line">Loading mission summary...</div>
+    <div id="missionControlSummary" class="detail-body"></div>
+  </article>
+
+  <article class="panel">
+    <h3>Dashboard Brief Mirror</h3>
+    <div id="missionDashboardSummary" class="detail-body"></div>
+  </article>
+</section>
+
+<section class="panel">
+  <h3>Active Missions</h3>
+  <table class="data-table" id="missionsTable">
+    <thead>
+      <tr>
+        <th>Ticker</th>
+        <th>Company</th>
+        <th>Priority</th>
+        <th>Mission Type</th>
+        <th>Last AI Update</th>
+        <th>Last Market Update</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</section>
+{% endblock %}

@@ -1,0 +1,42 @@
+{% extends 'base.html' %}
+{% block page_id %}dashboard{% endblock %}
+{% block content %}
+<section class="hero-card">
+  <h1>Mission Control</h1>
+  <p>Unified command center for market research, scanner intelligence, and AI trade planning.</p>
+</section>
+
+<section class="panel">
+  <h3>Daily Mission Brief</h3>
+  <div id="dashboardBrief" class="detail-body">
+    <div class="detail-item">Good Morning.</div>
+    <div class="detail-item">AI monitored {{ mission_brief.overnight_monitored }} assigned symbols overnight.</div>
+    <div class="detail-item">{{ mission_brief.require_attention }} require your attention.</div>
+    <div class="detail-item">{{ mission_brief.setups_strengthened }} setups strengthened.</div>
+    <div class="detail-item">{{ mission_brief.setups_invalidated }} setup invalidated.</div>
+    <div class="detail-item">Highest Priority Mission: {{ mission_brief.highest_priority_mission.ticker }} | Confidence {{ mission_brief.highest_priority_mission.confidence }}% | Recommended {{ mission_brief.highest_priority_mission.recommended }}</div>
+  </div>
+</section>
+
+<section class="grid-two">
+  <article class="panel">
+    <h3>Chart Sprint</h3>
+    <p class="subtext">Candles, volume, and overlays for <span id="dashboardTickerLabel">{{ ticker }}</span>.</p>
+    <div class="timeframes">
+      <button class="time-btn" data-timeframe="1D">1D</button>
+      <button class="time-btn" data-timeframe="5D">5D</button>
+      <button class="time-btn is-active" data-timeframe="1M">1M</button>
+      <button class="time-btn" data-timeframe="3M">3M</button>
+      <button class="time-btn" data-timeframe="6M">6M</button>
+      <button class="time-btn" data-timeframe="1Y">1Y</button>
+    </div>
+    <div id="dashboardChartStatus" class="status-line">Loading chart...</div>
+    <div id="dashboardChart" class="chart"></div>
+  </article>
+
+  <article class="panel">
+    <h3>Live Snapshot</h3>
+    <div id="dashboardSnapshot" class="metric-grid"></div>
+  </article>
+</section>
+{% endblock %}

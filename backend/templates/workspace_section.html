@@ -1,0 +1,17 @@
+{% extends 'base.html' %}
+{% block page_id %}workspace-section{% endblock %}
+{% block content %}
+<section class="hero-card">
+  <h1>{{ title }}</h1>
+  <p>{{ subtitle }}</p>
+</section>
+
+<section class="panel">
+  <h3>Founder Preview Notice</h3>
+  <div class="detail-body">
+    <div class="detail-item">This section is active in navigation and available in preview mode.</div>
+    <div class="detail-item">Research-only controls are enforced platform-wide.</div>
+    <div class="detail-item">No live trading, broker execution, or autonomous execution is enabled.</div>
+  </div>
+</section>
+{% endblock %}

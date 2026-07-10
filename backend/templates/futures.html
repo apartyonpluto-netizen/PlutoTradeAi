@@ -1,0 +1,29 @@
+{% extends 'base.html' %}
+{% block page_id %}futures{% endblock %}
+{% block content %}
+<section class="hero-card">
+  <h1>Futures Command</h1>
+  <p>Analyze ES, NQ, YM, RTY, CL, and GC with trend, support, resistance, breakout, volume, risk, and direction guidance.</p>
+</section>
+
+<section class="panel">
+  <h3>Futures Universe</h3>
+  <div class="status-line" id="futuresStatus">Loading futures command...</div>
+  <div class="detail-body" id="futuresSummary"></div>
+  <table class="data-table" id="futuresTable">
+    <thead>
+      <tr>
+        <th>Ticker</th>
+        <th>Price</th>
+        <th>Trend</th>
+        <th>Support</th>
+        <th>Resistance</th>
+        <th>Direction</th>
+        <th>Risk</th>
+        <th>Confidence</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</section>
+{% endblock %}

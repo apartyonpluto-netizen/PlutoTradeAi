@@ -1,0 +1,31 @@
+{% extends 'base.html' %}
+{% block page_id %}auth{% endblock %}
+{% block content %}
+<section class="hero-card">
+  <h1>{{ title }}</h1>
+  <p>{{ subtitle }}</p>
+</section>
+
+<section class="panel auth-panel">
+  <form method="post" class="auth-form" action="{{ url_for('register_submit' if mode == 'register' else 'login_submit') }}">
+    <div class="form-row">
+      <label>Username</label>
+      <input name="username" required maxlength="32" autocomplete="username" placeholder="curtis">
+    </div>
+    <div class="form-row">
+      <label>Password</label>
+      <input name="password" type="password" required minlength="8" autocomplete="current-password" placeholder="Minimum 8 characters">
+    </div>
+    {% if mode == 'register' %}
+    <div class="form-row">
+      <label>Confirm Password</label>
+      <input name="confirm_password" type="password" required minlength="8" autocomplete="new-password">
+    </div>
+    {% endif %}
+    <div class="modal-actions">
+      <button type="submit">{{ action_label }}</button>
+      <a class="tab" href="{{ toggle_href }}">{{ toggle_label }}</a>
+    </div>
+  </form>
+</section>
+{% endblock %}

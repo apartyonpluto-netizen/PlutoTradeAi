@@ -34,4 +34,4 @@ def find_support_resistance(ticker, period="3mo", interval="1d"):
 
 
 if __name__ == "__main__":
-    print(find_support_resistance("TSLA"))
+    find_support_resistance("TSLA")

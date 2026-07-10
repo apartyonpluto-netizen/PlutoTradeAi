@@ -1,0 +1,38 @@
+{% extends 'base.html' %}
+{% block page_id %}scanners{% endblock %}
+{% block content %}
+<section class="hero-card">
+  <h1>Market Intelligence</h1>
+  <p>Unified scanners workspace with consistent routing and module-backed results.</p>
+</section>
+
+<section class="tabs">
+  <a class="tab {% if active_scanner == 'overview' %}is-active{% endif %}" href="{{ url_for('scanners_overview') }}">Overview</a>
+  <a class="tab {% if active_scanner == 'movers' %}is-active{% endif %}" href="{{ url_for('scanners_workspace', scanner_name='movers') }}">Market Movers</a>
+  <a class="tab {% if active_scanner == 'volume' %}is-active{% endif %}" href="{{ url_for('scanners_workspace', scanner_name='volume') }}">Volume Scanner</a>
+  <a class="tab {% if active_scanner == 'reversals' %}is-active{% endif %}" href="{{ url_for('scanners_workspace', scanner_name='reversals') }}">Reversal Scanner</a>
+  <a class="tab {% if active_scanner == 'breakouts' %}is-active{% endif %}" href="{{ url_for('scanners_workspace', scanner_name='breakouts') }}">Breakout Scanner</a>
+  <a class="tab {% if active_scanner == 'extended-hours' %}is-active{% endif %}" href="{{ url_for('scanners_workspace', scanner_name='extended-hours') }}">Extended Hours</a>
+  <a class="tab {% if active_scanner == 'futures' %}is-active{% endif %}" href="{{ url_for('scanners_workspace', scanner_name='futures') }}">Futures</a>
+  <a class="tab {% if active_scanner == 'watchlist' %}is-active{% endif %}" href="{{ url_for('scanners_workspace', scanner_name='watchlist') }}">Watchlist Scanner</a>
+  <a class="tab {% if active_scanner == 'upcoming' %}is-active{% endif %}" href="{{ url_for('scanners_workspace', scanner_name='upcoming') }}">Upcoming Opportunities</a>
+</section>
+
+<section class="panel">
+  <h3>Scanner Results</h3>
+  <div id="scannersStatus" class="status-line">Loading scanner...</div>
+  <div id="scannersSummary" class="detail-body"></div>
+  <table class="data-table" id="scannersTable">
+    <thead>
+      <tr>
+        <th>Ticker</th>
+        <th>Price</th>
+        <th>Change %</th>
+        <th>Rel Vol</th>
+        <th>Score</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</section>
+{% endblock %}

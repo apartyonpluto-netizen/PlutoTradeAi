@@ -70,14 +70,4 @@ def scan_market():
 
 
 if __name__ == "__main__":
-    for stock in scan_market():
-        print(stock)
-
-        if not stock["on_watchlist"] and stock["scanner_score"] >= 65:
-            print(add_to_watchlist(
-                stock["ticker"],
-                category="AI Discovery",
-                status="Pending",
-                ai_score=stock["scanner_score"],
-                notes="Market scanner detected strong movement and/or volume"
-            ))
+    scan_market()

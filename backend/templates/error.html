@@ -1,0 +1,12 @@
+{% extends 'base.html' %}
+{% block page_id %}error{% endblock %}
+{% block content %}
+<section class="hero-card">
+  <h1>{{ code }} · {{ title }}</h1>
+  <p>{{ message }}</p>
+  <div class="action-row">
+    <a class="tab" href="{{ url_for('dashboard') }}">Return to Dashboard</a>
+    <a class="tab" href="{{ url_for('mission_control') }}">Mission Assignment Center</a>
+  </div>
+</section>
+{% endblock %}

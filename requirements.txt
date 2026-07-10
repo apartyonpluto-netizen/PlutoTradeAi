@@ -3,3 +3,6 @@ pandas
 numpy
 requests
 python-dotenv
+Flask
+pytest
+gunicorn

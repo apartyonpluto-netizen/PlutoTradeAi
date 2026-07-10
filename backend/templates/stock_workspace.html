@@ -1,0 +1,68 @@
+{% extends 'base.html' %}
+{% block page_id %}stock-workspace{% endblock %}
+{% block content %}
+<section class="hero-card">
+  <h1>Stock Workspace: <span id="workspaceTicker">{{ ticker }}</span></h1>
+  <p>Analyze your own symbol with live/delayed status, chart overlays, and AI-linked actions.</p>
+  <form class="inline-search" action="{{ url_for('stock_redirect') }}" method="get">
+    <input name="ticker" value="{{ ticker }}" placeholder="Type ticker">
+    <button type="submit">Open Workspace</button>
+  </form>
+</section>
+
+<section class="action-row">
+  <button class="stock-action" data-action="analyze">Analyze</button>
+  <button class="stock-action" data-action="mission">Assign Mission</button>
+  <button class="stock-action" data-action="chart">Open Chart</button>
+  <button class="stock-action" data-action="thesis">View AI Thesis</button>
+  <button class="stock-action" data-action="options">View Options</button>
+  <button class="stock-action" data-action="levels">View Key Levels</button>
+</section>
+
+<section class="grid-two">
+  <article class="panel">
+    <h3>Market Data</h3>
+    <div id="stockDataStatus" class="status-line">Loading ticker data...</div>
+    <div id="stockMetrics" class="metric-grid"></div>
+  </article>
+
+  <article class="panel">
+    <h3>Chart</h3>
+    <div class="timeframes">
+      <button class="time-btn" data-timeframe="1D">1D</button>
+      <button class="time-btn" data-timeframe="5D">5D</button>
+      <button class="time-btn is-active" data-timeframe="1M">1M</button>
+      <button class="time-btn" data-timeframe="3M">3M</button>
+      <button class="time-btn" data-timeframe="6M">6M</button>
+      <button class="time-btn" data-timeframe="1Y">1Y</button>
+    </div>
+    <div class="overlay-grid">
+      <label><input type="checkbox" data-overlay="major_support" checked> Major support</label>
+      <label><input type="checkbox" data-overlay="major_resistance" checked> Major resistance</label>
+      <label><input type="checkbox" data-overlay="breakout_level" checked> Breakout level</label>
+      <label><input type="checkbox" data-overlay="breakdown_level" checked> Breakdown level</label>
+      <label><input type="checkbox" data-overlay="reversal_zone" checked> Reversal zone</label>
+      <label><input type="checkbox" data-overlay="premarket" checked> Premarket high/low</label>
+      <label><input type="checkbox" data-overlay="ema9" checked> EMA 9</label>
+      <label><input type="checkbox" data-overlay="ema20" checked> EMA 20</label>
+      <label><input type="checkbox" data-overlay="ema50" checked> EMA 50</label>
+      <label><input type="checkbox" data-overlay="ema200"> EMA 200</label>
+      <label><input type="checkbox" data-overlay="vwap" checked> VWAP</label>
+    </div>
+    <div id="stockChartStatus" class="status-line">Loading chart...</div>
+    <div id="stockChart" class="chart"></div>
+  </article>
+</section>
+
+<section class="panel" id="workspaceDetailPanel">
+  <h3>AI and Strategy Output</h3>
+  <div id="workspaceDetailBody" class="detail-body"></div>
+</section>
+
+<section class="panel">
+  <h3>Mission History Timeline</h3>
+  <div id="stockMissionTimelineStatus" class="status-line">Loading mission history...</div>
+  <div id="stockMissionTimelineSummary" class="detail-body"></div>
+  <div id="stockMissionTimelineTrack" class="timeline-track"></div>
+</section>
+{% endblock %}

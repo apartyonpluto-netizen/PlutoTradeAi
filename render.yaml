@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: plutotrade-ai-web
+    env: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --chdir backend app:app
+    envVars:
+      - key: PLUTO_ROLE
+        value: web
+      - key: PLUTO_ENABLE_WORKER
+        value: "false"
+
+  - type: worker
+    name: plutotrade-ai-worker
+    env: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m backend.worker
+    envVars:
+      - key: PLUTO_ROLE
+        value: worker
+      - key: PLUTO_ENABLE_WORKER
+        value: "false"

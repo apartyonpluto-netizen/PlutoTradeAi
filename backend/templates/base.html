@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PlutoTrade AI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Sora:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='main.css') }}">
+</head>
+<body data-page="{% block page_id %}base{% endblock %}" data-ticker="{{ ticker or 'SPY' }}" data-active-scanner="{{ active_scanner or 'overview' }}" data-active-brain="{{ active_brain or 'overview' }}">
+  <div class="planet-bg"></div>
+  <div class="orbital-grid"></div>
+
+  <aside class="side-nav">
+    <div class="brand">PlutoTrade AI</div>
+    <div class="badge-row">
+      <span class="badge">{{ founder_preview }}</span>
+      <span class="badge">{{ research_only_badge }}</span>
+    </div>
+    <nav>
+      {% for item in nav_groups %}
+      {% if item.children %}
+      <details class="nav-group" {% if request.path == item.href %}open{% endif %}>
+        <summary class="nav-item {% if request.path == item.href %}is-active{% endif %} {% if item.disabled %}is-disabled{% endif %}">{{ item.name }}</summary>
+        <div class="nav-children">
+          {% for child in item.children %}
+          <a class="nav-child {% if request.path == child.href %}is-active{% endif %}" href="{{ child.href }}">{{ child.name }}</a>
+          {% endfor %}
+        </div>
+      </details>
+      {% else %}
+      <a class="nav-item {% if request.path == item.href %}is-active{% endif %} {% if item.disabled %}is-disabled{% endif %}" href="{{ item.href if not item.disabled else '#' }}">{{ item.name }}</a>
+      {% endif %}
+      {% endfor %}
+    </nav>
+    <p class="disclaimer">{{ research_disclaimer }}</p>
+  </aside>
+
+  <main class="main-shell">
+    <header class="top-bar">
+      <form class="ticker-form" action="{{ url_for('stock_redirect') }}" method="get">
+        <label for="tickerInput">Ticker</label>
+        <input id="tickerInput" name="ticker" value="{{ ticker or 'SPY' }}" placeholder="TSLA, NVDA, SPY" maxlength="12">
+        <button type="submit">Open</button>
+      </form>
+      <div class="top-actions">
+        <a class="top-link" href="{{ url_for('mission_control') }}">Mission Assignment Center</a>
+        <button id="openAssignMissionPanel" type="button">Assign Market Symbol</button>
+        <span class="status-pill">{{ 'Authenticated Persistent Mode' if admin_mode else 'Public Session Mode' }}</span>
+        <span class="status-pill">{{ current_user if current_user else 'Guest' }}</span>
+        {% if is_authenticated %}
+        <a class="top-link" href="{{ url_for('logout') }}">Logout</a>
+        {% else %}
+        <a class="top-link" href="{{ url_for('login_page') }}">Sign In</a>
+        {% endif %}
+      </div>
+    </header>
+
+    <section class="content-shell">
+      {% block content %}{% endblock %}
+    </section>
+  </main>
+
+  <div id="missionPanel" class="modal-shell" aria-hidden="true">
+    <div class="modal-card">
+      <h2>Assign Market Symbol</h2>
+      <form id="missionForm">
+        <div class="form-row">
+          <label>Ticker Symbol</label>
+          <input name="ticker_symbol" required maxlength="12" placeholder="TSLA, NVDA, ES, NQ, GC">
+          <p class="field-help">Examples: TSLA, NVDA, AMD, SPY, QQQ, ES, NQ, GC, CL.</p>
+        </div>
+
+        <div id="missionSymbolPreview" class="symbol-preview"></div>
+
+        <div class="form-row">
+          <label>Quick Action</label>
+          <select name="quick_action">
+            <option>Analyze Everywhere</option>
+            <option>Scanner Only</option>
+            <option>Brains Only</option>
+            <option>Options Only</option>
+            <option>Futures Only</option>
+            <option>Custom Selection</option>
+          </select>
+        </div>
+
+        <div class="form-row">
+          <label>Asset Type</label>
+          <select name="asset_type">
+            <option>Stock</option>
+            <option>ETF</option>
+            <option>Index</option>
+            <option>Futures</option>
+            <option>Crypto (Future)</option>
+            <option>Forex (Future)</option>
+          </select>
+        </div>
+
+        <div class="form-row">
+          <label>Mission Type</label>
+          <select name="mission_type">
+            <option>Research</option>
+            <option>Day Trade</option>
+            <option>Swing Trade</option>
+            <option>Long Term</option>
+            <option>Options</option>
+            <option>Futures</option>
+            <option>Scalp</option>
+            <option>AI Discovery</option>
+          </select>
+        </div>
+
+        <div class="form-row">
+          <label>Mission Priority</label>
+          <select name="priority">
+            <option>★★★★★ Critical</option>
+            <option>★★★★ High</option>
+            <option selected>★★★ Medium</option>
+            <option>★★ Low</option>
+            <option>★ Low Priority</option>
+          </select>
+        </div>
+
+        <div class="form-row">
+          <label>Assign To Scanners</label>
+          <div class="checkbox-grid">
+            <label><input type="checkbox" name="assigned_scanners" value="Scanner Center"> Scanner Center</label>
+            <label><input type="checkbox" name="assigned_scanners" value="Market Movers"> Market Movers</label>
+            <label><input type="checkbox" name="assigned_scanners" value="Volume Scanner"> Volume Scanner</label>
+            <label><input type="checkbox" name="assigned_scanners" value="Breakout Scanner"> Breakout Scanner</label>
+            <label><input type="checkbox" name="assigned_scanners" value="Breakdown Scanner"> Breakdown Scanner</label>
+            <label><input type="checkbox" name="assigned_scanners" value="Reversal Scanner"> Reversal Scanner</label>
+            <label><input type="checkbox" name="assigned_scanners" value="Extended Hours Scanner"> Extended Hours Scanner</label>
+            <label><input type="checkbox" name="assigned_scanners" value="Premarket Scanner"> Premarket Scanner</label>
+            <label><input type="checkbox" name="assigned_scanners" value="Futures Scanner"> Futures Scanner</label>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <label>Assign To AI Brains</label>
+          <div class="checkbox-grid">
+            <label><input type="checkbox" name="assigned_brains" value="Pattern Brain"> Pattern Brain</label>
+            <label><input type="checkbox" name="assigned_brains" value="Trend Brain"> Trend Brain</label>
+            <label><input type="checkbox" name="assigned_brains" value="Strategy Brain"> Strategy Brain</label>
+            <label><input type="checkbox" name="assigned_brains" value="Support & Resistance Brain"> Support & Resistance Brain</label>
+            <label><input type="checkbox" name="assigned_brains" value="Risk Brain"> Risk Brain</label>
+            <label><input type="checkbox" name="assigned_brains" value="Confidence Engine"> Confidence Engine</label>
+            <label><input type="checkbox" name="assigned_brains" value="Options Brain"> Options Brain</label>
+            <label><input type="checkbox" name="assigned_brains" value="Market Readiness"> Market Readiness</label>
+            <label><input type="checkbox" name="assigned_brains" value="Trade Thesis"> Trade Thesis</label>
+            <label><input type="checkbox" name="assigned_brains" value="Upcoming Opportunities"> Upcoming Opportunities</label>
+            <label><input type="checkbox" name="assigned_brains" value="Mission Queue"> Mission Queue</label>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <label>AI Monitoring</label>
+          <div class="checkbox-grid">
+            <label><input type="checkbox" name="monitoring_flags" value="Monitor Continuously"> Monitor Continuously</label>
+            <label><input type="checkbox" name="monitoring_flags" value="Include in Daily Mission Brief"> Include in Daily Mission Brief</label>
+            <label><input type="checkbox" name="monitoring_flags" value="Include in Market Readiness"> Include in Market Readiness</label>
+            <label><input type="checkbox" name="monitoring_flags" value="Notify on Breakout"> Notify on Breakout</label>
+            <label><input type="checkbox" name="monitoring_flags" value="Notify on Breakdown"> Notify on Breakdown</label>
+            <label><input type="checkbox" name="monitoring_flags" value="Notify on New High"> Notify on New High</label>
+            <label><input type="checkbox" name="monitoring_flags" value="Notify on New Low"> Notify on New Low</label>
+            <label><input type="checkbox" name="monitoring_flags" value="Notify on Volume Spike"> Notify on Volume Spike</label>
+            <label><input type="checkbox" name="monitoring_flags" value="Notify on Relative Volume"> Notify on Relative Volume</label>
+            <label><input type="checkbox" name="monitoring_flags" value="Notify on Earnings"> Notify on Earnings</label>
+            <label><input type="checkbox" name="monitoring_flags" value="Notify on News"> Notify on News</label>
+            <label><input type="checkbox" name="monitoring_flags" value="Notify on AI Confidence Increase"> Notify on AI Confidence Increase</label>
+            <label><input type="checkbox" name="monitoring_flags" value="Notify when Trade Thesis Changes"> Notify when Trade Thesis Changes</label>
+            <label><input type="checkbox" name="monitoring_flags" value="Notify when Risk Changes"> Notify when Risk Changes</label>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <label>Notes</label>
+          <textarea name="notes" rows="2" placeholder="Mission context, catalysts, invalidation levels"></textarea>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" id="validateMissionSymbolButton">Validate Symbol</button>
+          <button type="button" id="analyzeMissionButton">Analyze Before Assigning</button>
+          <button type="submit">Assign Mission</button>
+          <button type="button" id="cancelMissionPanel">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toastHost" class="toast-host"></div>
+
+  <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

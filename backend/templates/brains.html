@@ -1,0 +1,28 @@
+{% extends 'base.html' %}
+{% block page_id %}brains{% endblock %}
+{% block content %}
+<section class="hero-card">
+  <h1>AI Intelligence</h1>
+  <p>Consolidated AI Brains workspace for thesis generation and risk-aware research.</p>
+</section>
+
+<section class="tabs">
+  <a class="tab {% if active_brain == 'overview' %}is-active{% endif %}" href="{{ url_for('brains_overview') }}?ticker={{ ticker }}">Brain Overview</a>
+  <a class="tab {% if active_brain == 'candle' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='candle') }}?ticker={{ ticker }}">Candle Brain</a>
+  <a class="tab {% if active_brain == 'pattern' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='pattern') }}?ticker={{ ticker }}">Pattern Brain</a>
+  <a class="tab {% if active_brain == 'trend' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='trend') }}?ticker={{ ticker }}">Trend Brain</a>
+  <a class="tab {% if active_brain == 'volume' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='volume') }}?ticker={{ ticker }}">Volume Brain</a>
+  <a class="tab {% if active_brain == 'support-resistance' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='support-resistance') }}?ticker={{ ticker }}">Support &amp; Resistance Brain</a>
+  <a class="tab {% if active_brain == 'strategy' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='strategy') }}?ticker={{ ticker }}">Strategy Brain</a>
+  <a class="tab {% if active_brain == 'options' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='options') }}?ticker={{ ticker }}">Options Brain</a>
+  <a class="tab {% if active_brain == 'risk' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='risk') }}?ticker={{ ticker }}">Risk Brain</a>
+  <a class="tab {% if active_brain == 'market-readiness' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='market-readiness') }}?ticker={{ ticker }}">Market Readiness</a>
+  <a class="tab {% if active_brain == 'confidence' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='confidence') }}?ticker={{ ticker }}">Neural/Confidence Engine</a>
+</section>
+
+<section class="panel">
+  <h3>Brain Output</h3>
+  <div id="brainsStatus" class="status-line">Loading brain output...</div>
+  <div id="brainsBody" class="detail-body"></div>
+</section>
+{% endblock %}
