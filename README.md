@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # PlutoTrade AI MVP
 
 Run the Flask app:
@@ -45,3 +46,6 @@ Main APIs:
 - `/api/accounts/disconnect`
 - `/api/accounts/test`
 - `/api/tradingview/webhook`
+=======
+# Plutotradeai
+>>>>>>> 616f13a7ab1cf467f1cc4ab408997d28bec85f22
