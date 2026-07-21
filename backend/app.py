@@ -7,10 +7,29 @@ from typing import Any, Dict, List
 from datetime import timedelta
 
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+try:
+    from flask_socketio import SocketIO
+except Exception:  # pragma: no cover - fallback for environments without optional dependency
+    class SocketIO:  # type: ignore[override]
+        def __init__(self, _app, *args, **kwargs):
+            pass
+
+        def on(self, _event: str):
+            def decorator(func):
+                return func
+
+            return decorator
+
+        def emit(self, _event: str, _payload=None):
+            return None
+
+        def run(self, app, host="0.0.0.0", port=8000, debug=False):
+            app.run(host=host, port=port, debug=debug)
 
 from backend.services.auth_service import authenticate_user, normalize_username, register_user, user_namespace
 from backend.brains.registry import BrainRegistry
 from backend.scanner.registry import ScannerRegistry
+from backend.scanner.market_scanner import SCAN_LIST
 from backend.services.market_data_service import (
     build_api_response,
     get_chart_data,
@@ -27,6 +46,7 @@ from backend.services.mission_assignment_service import (
     utc_now_iso,
 )
 from backend.services.mission_refresh_worker import MissionRefreshWorker
+from backend.services.live_market_stream import MarketStreamService
 
 DEFAULT_TICKER = "SPY"
 
@@ -38,6 +58,7 @@ SCANNER_ROUTES = {
     "breakouts": "breakouts",
     "extended-hours": "extended-hours",
     "futures": "futures",
+    "sector-rotation": "sector-rotation",
     "watchlist": "watchlist",
     "upcoming": "upcoming",
 }
@@ -54,6 +75,8 @@ BRAIN_ROUTES = {
     "risk": "risk",
     "market-readiness": "market-readiness",
     "confidence": "confidence",
+    "support": "support-resistance",
+    "resistance": "support-resistance",
 }
 
 ASSET_TYPES = ["Stock", "ETF", "Index", "Futures", "Crypto (Future)", "Forex (Future)"]
@@ -285,6 +308,14 @@ def _futures_analysis(ticker: str, brain_registry: BrainRegistry) -> Dict[str, A
         "trade_thesis": overview_data.get("trade_thesis"),
         "invalidation": overview_data.get("stop_invalidation") or overview_data.get("stop_loss"),
         "reasoning": overview_data.get("recommended_strategy"),
+        "why": {
+            "trend": trend_data.get("trend"),
+            "volume": snapshot.get("relative_volume"),
+            "support": level_data.get("support"),
+            "resistance": level_data.get("resistance"),
+            "risk": risk_data.get("risk_status"),
+            "invalidation": overview_data.get("stop_invalidation") or overview_data.get("stop_loss"),
+        },
     }
 
 
@@ -299,43 +330,81 @@ def create_app() -> Flask:
     scanner_registry = ScannerRegistry()
     brain_registry = BrainRegistry()
     worker = None
+    socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+    market_stream = MarketStreamService(socketio=socketio)
+    if not os.getenv("PYTEST_CURRENT_TEST"):
+        market_stream.start()
+
+    @socketio.on("connect")
+    def socket_connect():
+        status = market_stream.connection_status()
+        socketio.emit("connection_status", status)
+
+    @socketio.on("disconnect")
+    def socket_disconnect():
+        # No-op handler keeps disconnect telemetry explicit and prevents duplicate listener warnings.
+        return None
 
     @app.context_processor
     def inject_navigation() -> Dict[str, Any]:
         nav_groups = [
             {
                 "name": "Mission Control",
-                "href": url_for("mission_control"),
+                "href": url_for("dashboard"),
                 "children": [
-                    {"name": "Mission Assignment Center", "href": url_for("mission_control")},
-                    {"name": "Dashboard", "href": url_for("dashboard")},
+                    {"name": "Mission Control", "href": url_for("dashboard")},
                 ],
             },
             {
                 "name": "Market Intelligence",
                 "href": url_for("scanners_overview"),
                 "children": [
-                    {"name": "Scanners", "href": url_for("scanners_overview")},
-                    {"name": "Movers", "href": url_for("scanners_workspace", scanner_name="movers")},
+                    {"name": "Scanner Center", "href": url_for("scanners_overview")},
+                    {"name": "Market Movers", "href": url_for("scanners_workspace", scanner_name="movers")},
+                    {"name": "Volume", "href": url_for("scanners_workspace", scanner_name="volume")},
+                    {"name": "Breakouts", "href": url_for("scanners_workspace", scanner_name="breakouts")},
+                    {"name": "Reversals", "href": url_for("scanners_workspace", scanner_name="reversals")},
                     {"name": "Extended Hours", "href": url_for("scanners_workspace", scanner_name="extended-hours")},
-                    {"name": "Futures", "href": url_for("futures_command")},
+                    {"name": "Futures", "href": url_for("scanners_workspace", scanner_name="futures")},
+                    {"name": "Sector Rotation", "href": url_for("scanners_workspace", scanner_name="sector-rotation")},
                 ],
             },
             {
                 "name": "AI Intelligence",
                 "href": url_for("brains_overview"),
                 "children": [
-                    {"name": "Brains", "href": url_for("brains_overview")},
+                    {"name": "Brain Center", "href": url_for("brains_overview")},
+                    {"name": "Pattern Brain", "href": url_for("brains_workspace", brain_name="pattern")},
                     {"name": "Strategy", "href": url_for("brains_workspace", brain_name="strategy")},
+                    {"name": "Candle Brain", "href": url_for("brains_workspace", brain_name="candle")},
+                    {"name": "Trend Brain", "href": url_for("brains_workspace", brain_name="trend")},
                     {"name": "Risk", "href": url_for("brains_workspace", brain_name="risk")},
-                    {"name": "Confidence", "href": url_for("brains_workspace", brain_name="confidence")},
+                    {"name": "Confidence Engine", "href": url_for("brains_workspace", brain_name="confidence")},
                     {"name": "Market Readiness", "href": url_for("brains_workspace", brain_name="market-readiness")},
+                    {"name": "Options Brain", "href": url_for("brains_workspace", brain_name="options")},
                 ],
             },
-            {"name": "Opportunity Center", "href": url_for("stock_workspace", ticker=DEFAULT_TICKER)},
-            {"name": "Portfolio Command", "href": url_for("portfolio_command")},
-            {"name": "Account Hub", "href": url_for("account_hub")},
-            {"name": "Journal", "href": url_for("journal")},
+            {
+                "name": "Opportunity Center",
+                "href": url_for("stock_workspace", ticker=DEFAULT_TICKER),
+                "children": [
+                    {"name": "Mission Queue", "href": url_for("mission_control")},
+                    {"name": "Upcoming Opportunities", "href": url_for("scanners_workspace", scanner_name="upcoming")},
+                    {"name": "Trade Thesis", "href": url_for("brains_workspace", brain_name="strategy")},
+                    {"name": "Mission Timeline", "href": url_for("mission_control")},
+                    {"name": "Alerts", "href": url_for("alerts_workspace")},
+                ],
+            },
+            {
+                "name": "Portfolio",
+                "href": url_for("portfolio_command"),
+                "children": [
+                    {"name": "Watchlist", "href": url_for("scanners_workspace", scanner_name="watchlist")},
+                    {"name": "Paper Trading", "href": url_for("paper_trading_workspace")},
+                    {"name": "Journal", "href": url_for("journal")},
+                    {"name": "Performance", "href": url_for("performance_workspace")},
+                ],
+            },
             {"name": "Settings", "href": url_for("settings")},
         ]
 
@@ -463,6 +532,18 @@ def create_app() -> Flask:
     def account_hub():
         return render_template("workspace_section.html", title="Account Hub", subtitle="Manage preview account settings and authenticated mission persistence.")
 
+    @app.get("/portfolio/paper-trading")
+    def paper_trading_workspace():
+        return render_template("workspace_section.html", title="Paper Trading", subtitle="Paper trading mode only. No live broker execution is enabled in founder preview.")
+
+    @app.get("/portfolio/performance")
+    def performance_workspace():
+        return render_template("workspace_section.html", title="Performance", subtitle="Performance analytics for mission outcomes and paper-only execution logs.")
+
+    @app.get("/opportunities/alerts")
+    def alerts_workspace():
+        return render_template("workspace_section.html", title="Alerts", subtitle="Opportunity alerts and mission signal changes with research-only safeguards.")
+
     @app.get("/journal")
     def journal():
         return render_template("workspace_section.html", title="Journal", subtitle="Review mission notes and research logs from command-center workflows.")
@@ -534,6 +615,34 @@ def create_app() -> Flask:
     def api_status():
         return api_health()
 
+    @app.get("/api/market/status")
+    def api_market_status():
+        status = market_stream.connection_status()
+        return jsonify(
+            {
+                "success": True,
+                "data": status,
+                "error": None,
+                "timestamp": _utc_now_iso(),
+                "data_status": status.get("state", "unavailable"),
+                "provider": status.get("provider", "Unavailable"),
+            }
+        )
+
+    @app.get("/api/market/quote/<ticker>")
+    def api_market_quote(ticker: str):
+        response = market_stream.get_quote(ticker)
+        code = 200 if response.get("success") else 404
+        return jsonify(response), code
+
+    @app.get("/api/market/quotes")
+    def api_market_quotes():
+        raw = request.args.get("symbols", "")
+        symbols = [item.strip().upper() for item in raw.split(",") if item.strip()] if raw else None
+        response = market_stream.get_quotes(symbols)
+        code = 200 if response.get("success") else 400
+        return jsonify(response), code
+
     @app.get("/api/validate-symbol/<ticker>")
     def api_validate_symbol(ticker: str):
         normalized = normalize_ticker(ticker)
@@ -569,6 +678,14 @@ def create_app() -> Flask:
         response = get_chart_data(ticker, timeframe=timeframe)
         status = 200 if response.get("success") else 404
         return jsonify(response), status
+
+    @app.get("/api/tickers/suggest")
+    def api_ticker_suggest():
+        query = normalize_ticker(request.args.get("q", ""))
+        candidates = sorted(set(SCAN_LIST + FUTURES_SYMBOLS + ["SPY", "QQQ", "IWM", "DIA", "XLF", "XLK", "XLE"]))
+        if query:
+            candidates = [item for item in candidates if item.startswith(query)]
+        return jsonify(build_api_response(True, data={"items": candidates[:20]}, data_status="cached", provider="PlutoTradeAI"))
 
     @app.get("/api/futures")
     def api_futures_overview():
@@ -788,6 +905,8 @@ def create_app() -> Flask:
         return render_template("error.html", code=500, title="Server Error", message="PlutoTrade AI encountered an issue. Please retry shortly."), 500
 
     app.extensions["mission_refresh_worker"] = worker
+    app.extensions["socketio"] = socketio
+    app.extensions["market_stream_service"] = market_stream
 
     return app
 
@@ -796,8 +915,17 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    app.run(
+    socket_server = app.extensions.get("socketio")
+    if socket_server:
+        socket_server.run(
+            app,
+            host="0.0.0.0",
+            port=int(os.getenv("PORT", "8000")),
+            debug=os.getenv("FLASK_DEBUG", "false").lower() in {"1", "true", "yes", "on"},
+        )
+    else:
+        app.run(
         host="0.0.0.0",
         port=int(os.getenv("PORT", "8000")),
         debug=os.getenv("FLASK_DEBUG", "false").lower() in {"1", "true", "yes", "on"},
-    )
+        )

@@ -26,8 +26,13 @@ class RouteTests(unittest.TestCase):
             "/scanners/breakouts",
             "/scanners/extended-hours",
             "/scanners/futures",
+            "/scanners/sector-rotation",
             "/brains",
             "/brains/candle?ticker=SPY",
+            "/opportunities/alerts",
+            "/portfolio/paper-trading",
+            "/portfolio/performance",
+            "/api/tickers/suggest?q=SP",
         ]
 
         for path in paths:
@@ -250,6 +255,56 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(payload["success"])
         self.assertIn("rows", payload["data"])
+
+    def test_market_status_route(self):
+        response = self.client.get("/api/market/status")
+        payload = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["success"])
+        self.assertIn("state", payload["data"])
+
+    @patch("backend.services.live_market_stream.YFinancePollingProvider.get_quotes")
+    def test_market_quotes_route(self, mock_get_quotes):
+        mock_get_quotes.return_value = {
+            "TSLA": {
+                "symbol": "TSLA",
+                "price": 250.12,
+                "bid": 250.1,
+                "ask": 250.14,
+                "volume": 1000,
+                "timestamp": "2026-07-21T00:00:00+00:00",
+                "source_status": "DELAYED",
+                "provider": "YFinancePollingProvider",
+            }
+        }
+
+        response = self.client.get("/api/market/quotes?symbols=TSLA")
+        payload = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["success"])
+        self.assertIn("quotes", payload["data"])
+
+    @patch("backend.services.live_market_stream.YFinancePollingProvider.get_quote")
+    def test_market_quote_single_route(self, mock_get_quote):
+        mock_get_quote.return_value = {
+            "symbol": "TSLA",
+            "price": 250.12,
+            "bid": 250.1,
+            "ask": 250.14,
+            "volume": 1000,
+            "timestamp": "2026-07-21T00:00:00+00:00",
+            "source_status": "DELAYED",
+            "provider": "YFinancePollingProvider",
+        }
+
+        response = self.client.get("/api/market/quote/TSLA")
+        payload = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["data"]["symbol"], "TSLA")
 
     @patch("backend.app._find_mission_by_ticker")
     def test_mission_timeline_route(self, mock_find_mission):

@@ -4,5 +4,7 @@ numpy
 requests
 python-dotenv
 Flask
+Flask-SocketIO
+websocket-client
 pytest
 gunicorn

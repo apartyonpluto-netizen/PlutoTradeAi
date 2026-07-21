@@ -4,7 +4,7 @@ services:
     env: python
     plan: starter
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --chdir backend app:app
+    startCommand: gunicorn backend.app:app
     envVars:
       - key: PLUTO_ROLE
         value: web
