@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 .DS_Store
 .env
+
+# Runtime trading state (paper ledger, signals, symbol cache) - not source-controlled
+data/*.json
