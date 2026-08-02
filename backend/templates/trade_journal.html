@@ -4,13 +4,59 @@
 <section class="panel">
     <div class="panel-head">
         <h3>Trade Journal</h3>
-        <span>Execution Log</span>
+        <span>Execution Log · Paper Trades Only</span>
     </div>
-    <p class="muted">Trade journaling hooks are ready. Broker-linked fills and manual notes will appear here once journal persistence is enabled.</p>
+    <p class="muted">Paper trades fill at live market price via Yahoo Finance. No real money or broker order is ever placed here.</p>
     <div class="price-map-grid">
-        <div><small>Entries Today</small><b>0</b></div>
-        <div><small>Win Rate</small><b>n/a</b></div>
-        <div><small>PnL</small><b>n/a</b></div>
+        <div><small>Entries Today</small><b>{{ paper_trade_summary.entries_today }}</b></div>
+        <div><small>Win Rate</small><b>{{ paper_trade_summary.win_rate }}</b></div>
+        <div><small>PnL</small><b>{{ paper_trade_summary.total_pnl }}</b></div>
+        <div><small>Open Positions</small><b>{{ paper_trade_summary.open_count }}</b></div>
     </div>
+</section>
+
+<section class="panel">
+    <div class="panel-head"><h3>Open a paper trade</h3><span>Simulated fill at live price</span></div>
+    <form id="paperTradeForm" class="grid-form">
+        <input type="text" name="ticker" placeholder="Ticker" required>
+        <select name="direction">
+            <option value="CALL">Call</option>
+            <option value="PUT">Put</option>
+            <option value="BUY">Buy</option>
+            <option value="SELL">Sell</option>
+        </select>
+        <input type="number" name="quantity" placeholder="Quantity" value="1" min="0.01" step="0.01">
+        <input type="text" name="reason" placeholder="Reason (optional)">
+        <button type="submit">Execute Paper Trade</button>
+    </form>
+</section>
+
+<section class="panel panel-table">
+    <div class="panel-head"><h3>Positions</h3><span id="paperTradeCount">{{ paper_trades|length }} entries</span></div>
+    <table id="paperTradeTable">
+        <thead><tr><th>Ticker</th><th>Direction</th><th>Qty</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>
+        {% for trade in paper_trades %}
+        <tr data-trade-id="{{ trade.id }}">
+            <td>{{ trade.ticker }}</td>
+            <td>{{ trade.direction }}</td>
+            <td>{{ trade.quantity }}</td>
+            <td>${{ trade.entry_price }}</td>
+            <td>{{ trade.exit_price and "$" ~ trade.exit_price or "—" }}</td>
+            <td>{{ trade.pnl or "—" }}</td>
+            <td>{{ trade.status }}</td>
+            <td class="action-row">
+                {% if trade.status == "Open" %}
+                <button class="close-paper-trade" type="button">Close</button>
+                {% else %}
+                &mdash;
+                {% endif %}
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8" class="muted">No paper trades yet. Execute one above to get started.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
 </section>
 {% endblock %}

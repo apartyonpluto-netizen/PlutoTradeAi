@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · {{ searched_ticker or "Ticker Lookup" }}{% endblock %}
+{% block content %}
+
+{% if not searched_ticker %}
+<section class="panel">
+    <div class="panel-head"><h3>Ticker Lookup</h3><span>Search any symbol</span></div>
+    <p class="muted">Use the search bar above to look up any stock on Yahoo Finance — not just tickers already on your watchlist or scanner. You'll get a live quote, AI read, support/resistance, a price chart, and options ideas.</p>
+</section>
+{% else %}
+
+<section class="panel">
+    <div class="panel-head">
+        <h3>{{ searched_ticker }}{% if quote %} · ${{ quote.price }}{% endif %}</h3>
+        <span>
+            {% if already_on_watchlist %}On your watchlist{% else %}<button type="button" id="lookupAddToWatchlist" data-ticker="{{ searched_ticker }}">Add to Watchlist</button>{% endif %}
+        </span>
+    </div>
+    {% if quote %}
+    <div class="price-map-grid">
+        <div><small>Price</small><b>${{ quote.price }}</b></div>
+        <div><small>Daily %</small><b class="{{ 'tone-positive' if quote.percent_change|float >= 0 else 'tone-negative' }}">{{ "%+.2f"|format(quote.percent_change|float) }}%</b></div>
+        <div><small>Relative Volume</small><b>{{ "%.2f"|format(quote.relative_volume|float) }}x</b></div>
+        <div><small>Volume</small><b>{{ quote.volume }}</b></div>
+        <div><small>Scanner Score</small><b>{{ quote.scanner_score }}</b></div>
+        <div><small>Status</small><b>{{ quote.status }}</b></div>
+    </div>
+    {% else %}
+    <p class="error">{{ quote_errors|join(" · ") if quote_errors else "Live quote unavailable for this symbol right now." }}</p>
+    {% endif %}
+</section>
+
+<section class="panel">
+    <div class="panel-head"><h3>Price Chart</h3><span>3 month daily close</span></div>
+    {% if chart.available %}
+    <svg viewBox="0 0 {{ chart.width }} {{ chart.height }}" class="lookup-chart-svg" preserveAspectRatio="none">
+        <polygon points="{{ chart.fill_points }}" class="lookup-chart-fill {{ 'tone-fill-positive' if chart.trend_up else 'tone-fill-negative' }}"></polygon>
+        <polyline points="{{ chart.points }}" class="lookup-chart-line {{ 'tone-line-positive' if chart.trend_up else 'tone-line-negative' }}"></polyline>
+    </svg>
+    <div class="lookup-chart-range">
+        <span>${{ chart.min_price }}</span>
+        <span>${{ chart.max_price }}</span>
+    </div>
+    {% else %}
+    <p class="muted">Chart data unavailable for this symbol right now.</p>
+    {% endif %}
+</section>
+
+<section class="panel">
+    <div class="panel-head"><h3>AI Read</h3><span>Research only · not financial advice</span></div>
+    {% if strategy.insufficient_data %}
+    <p class="muted">{{ strategy.reason }}</p>
+    {% else %}
+    <div class="price-map-grid">
+        <div><small>Recommendation</small><b>{{ strategy.recommendation }}</b></div>
+        <div><small>Confidence</small><b>{{ strategy.strategy_confidence }}%</b></div>
+        <div><small>Best Strategy</small><b>{{ strategy.best_strategy }}</b></div>
+        <div><small>Risk Level</small><b>{{ strategy.risk_level }}</b></div>
+        <div><small>Ideal Timeframe</small><b>{{ strategy.ideal_timeframe }}</b></div>
+        <div><small>Expected Hold</small><b>{{ strategy.expected_hold_time }}</b></div>
+    </div>
+    <p><b>Why:</b> {{ strategy.why_this_strategy_fits }}</p>
+    {% if strategy.risk_warning %}<p class="muted">{{ strategy.risk_warning }}</p>{% endif %}
+    {% endif %}
+</section>
+
+<section class="panel">
+    <div class="panel-head"><h3>Support &amp; Resistance</h3><span>AI-detected levels</span></div>
+    {% if chart_levels.insufficient_data %}
+    <p class="muted">{{ chart_levels.reason }}</p>
+    {% else %}
+    <div class="price-map-grid">
+        <div><small>Breakout Level</small><b class="tone-positive">${{ chart_levels.breakout_level }}</b></div>
+        <div><small>Breakdown Level</small><b class="tone-negative">${{ chart_levels.breakdown_level }}</b></div>
+        <div><small>VWAP</small><b>${{ chart_levels.vwap }}</b></div>
+        <div><small>EMA 20</small><b>${{ chart_levels.ema_20 }}</b></div>
+        <div><small>EMA 50</small><b>${{ chart_levels.ema_50 }}</b></div>
+        <div><small>EMA 200</small><b>${{ chart_levels.ema_200 }}</b></div>
+    </div>
+    <div class="lookup-levels-row">
+        <div>
+            <small>Major Support</small>
+            <p>{% for level in chart_levels.major_support_levels %}${{ level }}{% if not loop.last %} · {% endif %}{% endfor %}</p>
+        </div>
+        <div>
+            <small>Major Resistance</small>
+            <p>{% for level in chart_levels.major_resistance_levels %}${{ level }}{% if not loop.last %} · {% endif %}{% endfor %}</p>
+        </div>
+    </div>
+    {% endif %}
+</section>
+
+<section class="panel">
+    <div class="panel-head"><h3>Options Ideas</h3><span>Live yfinance chain when available</span></div>
+    <p class="muted">For research only. Not financial advice.</p>
+    <div class="options-suggestions-list" data-options-suggestions="true" data-tickers="{{ searched_ticker }}">
+        <p class="muted">Loading options suggestions...</p>
+    </div>
+</section>
+
+{% endif %}
+{% endblock %}
+
+{% block page_scripts %}
+<script>
+(() => {
+    const button = document.getElementById("lookupAddToWatchlist");
+    if (!button) return;
+    button.addEventListener("click", async () => {
+        try {
+            await requestJson("/api/watchlist/add", {
+                method: "POST",
+                body: JSON.stringify({ ticker: button.dataset.ticker, category: "Priority", status: "Active" }),
+            });
+            showToast(`${button.dataset.ticker} added to watchlist.`, "success");
+            button.textContent = "Added";
+            button.disabled = true;
+        } catch (error) {
+            showToast(error.message, "error");
+        }
+    });
+})();
+</script>
+{% endblock %}

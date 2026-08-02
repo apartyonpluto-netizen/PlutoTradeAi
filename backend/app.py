@@ -54,6 +54,10 @@ if __package__:
     )
     from .neural.neural_engine import build_neural_status
     from .options.options_brain import build_options_research, to_legacy_options_payload
+    from .paper_trader import close_trade as close_paper_trade
+    from .paper_trader import get_summary as get_paper_trade_summary
+    from .paper_trader import list_trades as list_paper_trades
+    from .paper_trader import open_trade as open_paper_trade
     from .pattern_brain import analyze_patterns
     from .settings_store import available_themes, get_settings, update_settings
     from .watchlist import (
@@ -108,6 +112,10 @@ else:
     )
     from neural.neural_engine import build_neural_status
     from options.options_brain import build_options_research, to_legacy_options_payload
+    from paper_trader import close_trade as close_paper_trade
+    from paper_trader import get_summary as get_paper_trade_summary
+    from paper_trader import list_trades as list_paper_trades
+    from paper_trader import open_trade as open_paper_trade
     from pattern_brain import analyze_patterns
     from settings_store import available_themes, get_settings, update_settings
     from watchlist import (
@@ -292,6 +300,35 @@ def _cache_is_fresh(cache: Dict[str, object]) -> bool:
 
 def _ticker_key(tickers: List[str]) -> Tuple[str, ...]:
     return tuple(sorted({ticker.strip().upper() for ticker in tickers if ticker}))
+
+
+MACRO_TICKER_LABELS = {
+    "SPY": "SPY",
+    "QQQ": "QQQ",
+    "DIA": "DIA",
+    "^VIX": "VIX",
+    "BTC-USD": "BTC",
+    "ETH-USD": "ETH",
+    "GC=F": "GOLD",
+    "CL=F": "OIL",
+}
+MACRO_TICKER_CACHE: Dict[str, object] = {"rows": [], "expires_at": None}
+MACRO_TICKER_CACHE_SECONDS = 60
+
+
+def get_macro_ticker_tape(force_refresh: bool = False) -> List[Dict[str, object]]:
+    if not force_refresh and MACRO_TICKER_CACHE.get("rows") and _cache_is_fresh(MACRO_TICKER_CACHE):
+        return MACRO_TICKER_CACHE["rows"]
+
+    rows, _errors, _last_updated = scan_market(tickers=list(MACRO_TICKER_LABELS.keys()))
+    for row in rows:
+        row["display_label"] = MACRO_TICKER_LABELS.get(row["ticker"], row["ticker"])
+    if rows:
+        MACRO_TICKER_CACHE.update(
+            {"rows": rows, "expires_at": _now_utc() + timedelta(seconds=MACRO_TICKER_CACHE_SECONDS)}
+        )
+        return rows
+    return MACRO_TICKER_CACHE.get("rows", [])
 
 
 def get_market_data(force_refresh: bool = False) -> Tuple[List[Dict[str, object]], List[str], str]:
@@ -531,7 +568,8 @@ def _compute_status(scanner_rows: List[Dict[str, object]], scanner_errors: List[
         "account_status": "Connected" if any(a.get("status") != "Not Connected" for a in accounts) else "Not Connected",
         "market_sentiment": sentiment,
         "ai_confidence": f"{round(confidence)}%",
-        "risk_level": "Moderate" if confidence >= 68 else "Elevated",
+        "risk_level": "Low" if confidence >= 82 else "Moderate" if confidence >= 68 else "Elevated",
+        "risk_score_10": round(max(0.0, min(10.0, 10 - (confidence / 10))), 1),
         "opportunity_count": hot_count,
         "reversal_count": reversal_candidates,
         "watch_today": top_tickers,
@@ -822,16 +860,15 @@ def mission_brief_manual_page() -> str:
 @app.route("/dashboard")
 @app.route("/mission-control")
 def dashboard_page() -> str:
-    return render_template(
-        "dashboard.html",
-        **_build_page_context(
-            include_suggestions=True,
-            include_reversal=True,
-            include_trend=True,
-            include_news=True,
-            include_trusted_accounts=True,
-        ),
+    context = _build_page_context(
+        include_suggestions=True,
+        include_reversal=True,
+        include_trend=True,
+        include_news=True,
+        include_trusted_accounts=True,
     )
+    context["macro_ticker_rows"] = get_macro_ticker_tape()
+    return render_template("dashboard.html", **context)
 
 
 @app.route("/watchlist")
@@ -857,9 +894,87 @@ def trend_detection_page() -> str:
     return render_template("trend_detection.html", **_build_page_context(include_reversal=True, include_trend=True))
 
 
+def _build_price_chart(ticker: str) -> Dict[str, object]:
+    import yfinance as yf
+
+    try:
+        history = yf.Ticker(ticker).history(period="3mo", interval="1d", auto_adjust=False)
+    except Exception:
+        return {"available": False}
+
+    closes = history["Close"].dropna() if not history.empty and "Close" in history.columns else None
+    if closes is None or len(closes) < 2:
+        return {"available": False}
+
+    width, height, pad = 640, 160, 12
+    min_c, max_c = float(closes.min()), float(closes.max())
+    span = (max_c - min_c) or 1.0
+    n = len(closes)
+    points = []
+    for index, value in enumerate(closes):
+        x = (index / (n - 1)) * width
+        y = height - pad - (((float(value) - min_c) / span) * (height - 2 * pad))
+        points.append(f"{x:.1f},{y:.1f}")
+    points_str = " ".join(points)
+    fill_points = f"0,{height - pad} {points_str} {width},{height - pad}"
+
+    return {
+        "available": True,
+        "points": points_str,
+        "fill_points": fill_points,
+        "width": width,
+        "height": height,
+        "min_price": round(min_c, 2),
+        "max_price": round(max_c, 2),
+        "trend_up": float(closes.iloc[-1]) >= float(closes.iloc[0]),
+    }
+
+
+@app.route("/lookup")
+@app.route("/lookup/<ticker>")
+def ticker_lookup_page(ticker: str = "") -> str:
+    context = _build_page_context()
+    symbol = (ticker or request.args.get("ticker", "")).strip().upper()
+    context["searched_ticker"] = symbol
+    if not symbol:
+        return render_template("ticker_lookup.html", **context)
+
+    quote_rows, quote_errors, _ = scan_market(tickers=[symbol])
+    extended_hours = build_extended_hours_intelligence(symbol)
+    strategy = get_strategy_data_for_ticker(symbol, extended_hours=extended_hours)
+    chart_levels = get_chart_levels_for_ticker(symbol, extended_hours=extended_hours)
+
+    try:
+        options_payload = get_options_data_for_ticker(symbol)
+    except ValueError:
+        options_payload = None
+
+    watchlist_tickers = get_watchlist_tickers()
+
+    context.update(
+        {
+            "quote": quote_rows[0] if quote_rows else None,
+            "quote_errors": quote_errors,
+            "strategy": strategy,
+            "chart_levels": chart_levels,
+            "chart": _build_price_chart(symbol),
+            "options_payload": options_payload,
+            "already_on_watchlist": symbol in {t.upper() for t in watchlist_tickers},
+        }
+    )
+    return render_template("ticker_lookup.html", **context)
+
+
 @app.route("/options")
 def options_page() -> str:
-    return render_template("options.html", **_build_page_context())
+    context = _build_page_context()
+    searched_ticker = request.args.get("ticker", "").strip().upper()
+    if searched_ticker:
+        context["options_tickers"] = [searched_ticker] + [
+            ticker for ticker in context["options_tickers"] if ticker != searched_ticker
+        ]
+        context["searched_ticker"] = searched_ticker
+    return render_template("options.html", **context)
 
 
 @app.route("/news-intelligence")
@@ -886,7 +1001,10 @@ def notifications_page() -> str:
 
 @app.route("/trade-journal")
 def trade_journal_page() -> str:
-    return render_template("trade_journal.html", **_build_page_context(include_reversal=True, include_trend=True))
+    context = _build_page_context(include_reversal=True, include_trend=True)
+    context["paper_trades"] = list_paper_trades()
+    context["paper_trade_summary"] = get_paper_trade_summary()
+    return render_template("trade_journal.html", **context)
 
 
 @app.route("/candle-brain")
@@ -957,6 +1075,89 @@ def api_watchlist_delete():
     except ValueError as error:
         return jsonify({"ok": False, "error": str(error)}), 400
     return jsonify({"ok": True})
+
+
+@app.route("/api/paper-trade/list", methods=["GET"])
+@api_guard
+def api_paper_trade_list():
+    trades = list_paper_trades()
+    summary = get_paper_trade_summary()
+    return _api_success({"trades": trades, "summary": summary}, trades=trades, summary=summary, ok=True)
+
+
+@app.route("/api/paper-trade/execute", methods=["POST"])
+@api_guard
+def api_paper_trade_execute():
+    payload = request.get_json(silent=True) or {}
+    try:
+        trade = open_paper_trade(
+            ticker=payload.get("ticker", ""),
+            direction=payload.get("direction", ""),
+            quantity=payload.get("quantity", 1),
+            reason=payload.get("reason", ""),
+            confidence=payload.get("confidence"),
+        )
+    except ValueError as error:
+        raise ValidationError(str(error)) from error
+    return _api_success({"trade": trade}, trade=trade, ok=True)
+
+
+@app.route("/api/paper-trade/close", methods=["POST"])
+@api_guard
+def api_paper_trade_close():
+    payload = request.get_json(silent=True) or {}
+    try:
+        trade = close_paper_trade(payload.get("trade_id", ""))
+    except ValueError as error:
+        raise ValidationError(str(error)) from error
+    return _api_success({"trade": trade}, trade=trade, ok=True)
+
+
+TICKER_SEARCH_CACHE: Dict[str, Dict[str, object]] = {}
+TICKER_SEARCH_CACHE_SECONDS = 300
+
+
+@app.route("/api/ticker-search", methods=["GET"])
+@api_guard
+def api_ticker_search():
+    query = request.args.get("q", "").strip()
+    if len(query) < 1:
+        return _api_success({"results": []}, results=[], ok=True)
+
+    cache_key = query.lower()
+    cached = TICKER_SEARCH_CACHE.get(cache_key)
+    if cached and cached.get("expires_at") and cached["expires_at"] > _now_utc():
+        return _api_success({"results": cached["results"]}, results=cached["results"], ok=True)
+
+    import yfinance as yf
+
+    quotes: List[Dict[str, object]] = []
+    for attempt in range(2):
+        try:
+            search = yf.Search(query, max_results=8)
+            quotes = search.quotes or []
+        except Exception as error:
+            logger.warning("Ticker search failed for %r (attempt %d): %s", query, attempt, error)
+            quotes = []
+        if quotes:
+            break
+
+    results = [
+        {
+            "symbol": quote.get("symbol", ""),
+            "name": quote.get("shortname") or quote.get("longname") or quote.get("symbol", ""),
+            "exchange": quote.get("exchDisp", ""),
+            "type": quote.get("quoteType", ""),
+        }
+        for quote in quotes
+        if quote.get("symbol") and quote.get("quoteType") in {"EQUITY", "ETF", "INDEX"}
+    ]
+    if results:
+        TICKER_SEARCH_CACHE[cache_key] = {
+            "results": results,
+            "expires_at": _now_utc() + timedelta(seconds=TICKER_SEARCH_CACHE_SECONDS),
+        }
+    return _api_success({"results": results}, results=results, ok=True)
 
 
 @app.route("/api/suggestions", methods=["GET"])

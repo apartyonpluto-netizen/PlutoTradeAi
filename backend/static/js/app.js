@@ -690,6 +690,10 @@ const bindAccountHubPage = () => {
       if (!(node instanceof HTMLElement)) return;
       const key = node.dataset.accountField;
       if (!key || key === "status") return;
+      if (key === "webhook_url" && account[key]) {
+        node.textContent = account[key].startsWith("/") ? `${window.location.origin}${account[key]}` : account[key];
+        return;
+      }
       node.textContent = asDisplayValue(account[key]);
     });
     const light = card.querySelector(".status-light");
@@ -1021,9 +1025,179 @@ const bindLiveDataStatusCard = () => {
   }, 30000);
 };
 
+const buildPaperTradeRow = (trade) => `
+  <tr data-trade-id="${escapeHtml(trade.id)}">
+    <td>${escapeHtml(trade.ticker)}</td>
+    <td>${escapeHtml(trade.direction)}</td>
+    <td>${escapeHtml(trade.quantity)}</td>
+    <td>$${escapeHtml(trade.entry_price)}</td>
+    <td>${trade.exit_price ? `$${escapeHtml(trade.exit_price)}` : "—"}</td>
+    <td>${trade.pnl === "" || trade.pnl === undefined || trade.pnl === null ? "—" : escapeHtml(trade.pnl)}</td>
+    <td>${escapeHtml(trade.status)}</td>
+    <td class="action-row">${trade.status === "Open" ? '<button class="close-paper-trade" type="button">Close</button>' : "&mdash;"}</td>
+  </tr>`;
+
+const bindPaperTradePage = () => {
+  const form = document.getElementById("paperTradeForm");
+  const table = document.getElementById("paperTradeTable");
+  if (!(form instanceof HTMLFormElement) || !table) return;
+  const tbody = table.querySelector("tbody");
+  if (!(tbody instanceof HTMLElement)) return;
+  const countNode = document.getElementById("paperTradeCount");
+  const entriesNode = document.querySelector('[data-summary="entries_today"]');
+
+  const renderRows = (rows) => {
+    tbody.innerHTML = rows.length
+      ? rows.map((trade) => buildPaperTradeRow(trade)).join("")
+      : '<tr><td colspan="8" class="muted">No paper trades yet. Execute one above to get started.</td></tr>';
+    if (countNode) countNode.textContent = `${rows.length} entries`;
+  };
+
+  const loadTrades = async () => {
+    const payload = await requestJson("/api/paper-trade/list");
+    renderRows(payload.trades || []);
+  };
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = new FormData(form);
+    try {
+      await requestJson("/api/paper-trade/execute", {
+        method: "POST",
+        body: JSON.stringify({
+          ticker: data.get("ticker"),
+          direction: data.get("direction"),
+          quantity: data.get("quantity"),
+          reason: data.get("reason"),
+        }),
+      });
+      form.reset();
+      await loadTrades();
+      showToast("Paper trade executed at live price.", "success");
+    } catch (error) {
+      showToast(error.message, "error");
+    }
+  });
+
+  table.addEventListener("click", async (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement) || !target.classList.contains("close-paper-trade")) return;
+    const row = target.closest("tr[data-trade-id]");
+    if (!(row instanceof HTMLElement)) return;
+    try {
+      await requestJson("/api/paper-trade/close", {
+        method: "POST",
+        body: JSON.stringify({ trade_id: row.dataset.tradeId }),
+      });
+      await loadTrades();
+      showToast("Paper trade closed.", "success");
+    } catch (error) {
+      showToast(error.message, "error");
+    }
+  });
+};
+
+const bindGlobalSearch = () => {
+  const input = document.getElementById("globalSearch");
+  const results = document.getElementById("globalSearchResults");
+  if (!(input instanceof HTMLInputElement) || !(results instanceof HTMLElement)) return;
+
+  let debounceTimer = null;
+  let activeIndex = -1;
+  let currentItems = [];
+
+  const closeResults = () => {
+    results.hidden = true;
+    results.innerHTML = "";
+    activeIndex = -1;
+    currentItems = [];
+  };
+
+  const goToTicker = (symbol) => {
+    window.location.href = `/lookup/${encodeURIComponent(symbol)}`;
+  };
+
+  const renderResults = (items) => {
+    currentItems = items;
+    activeIndex = -1;
+    if (!items.length) {
+      results.innerHTML = '<div class="global-search-empty">No matching tickers found.</div>';
+      results.hidden = false;
+      return;
+    }
+    results.innerHTML = items
+      .map(
+        (item, index) => `
+      <div class="global-search-result" data-index="${index}" data-symbol="${escapeHtml(item.symbol)}">
+        <b>${escapeHtml(item.symbol)}</b>
+        <span>${escapeHtml(item.name)} · ${escapeHtml(item.exchange)}</span>
+      </div>`
+      )
+      .join("");
+    results.hidden = false;
+  };
+
+  input.addEventListener("input", () => {
+    const query = input.value.trim();
+    if (debounceTimer) window.clearTimeout(debounceTimer);
+    if (query.length < 1) {
+      closeResults();
+      return;
+    }
+    debounceTimer = window.setTimeout(async () => {
+      try {
+        const payload = await requestJson(`/api/ticker-search?q=${encodeURIComponent(query)}`);
+        renderResults(payload.results || []);
+      } catch (error) {
+        closeResults();
+      }
+    }, 250);
+  });
+
+  results.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const row = target.closest(".global-search-result");
+    if (!(row instanceof HTMLElement) || !row.dataset.symbol) return;
+    goToTicker(row.dataset.symbol);
+  });
+
+  input.addEventListener("keydown", (event) => {
+    if (results.hidden || !currentItems.length) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      activeIndex = Math.min(activeIndex + 1, currentItems.length - 1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      activeIndex = Math.max(activeIndex - 1, 0);
+    } else if (event.key === "Enter") {
+      if (activeIndex >= 0 && currentItems[activeIndex]) {
+        event.preventDefault();
+        goToTicker(currentItems[activeIndex].symbol);
+      }
+      return;
+    } else if (event.key === "Escape") {
+      closeResults();
+      return;
+    } else {
+      return;
+    }
+    Array.from(results.children).forEach((child, index) => {
+      child.classList.toggle("active", index === activeIndex);
+    });
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Node)) return;
+    if (!input.parentElement?.contains(event.target)) closeResults();
+  });
+};
+
 onReady(() => {
   bindAlertDrawer();
+  bindGlobalSearch();
   bindWatchlistPage();
+  bindPaperTradePage();
   bindAiChartMarks();
   bindScannerPage();
   bindOptionsSuggestions();
