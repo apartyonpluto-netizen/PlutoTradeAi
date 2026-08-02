@@ -65,6 +65,7 @@ def build_options_research(ticker: str) -> Dict[str, Any]:
             "estimated_premium": "data unavailable",
             "breakeven": "data unavailable",
             "risk_level": "data unavailable",
+            "expirations": expirations,
             "disclaimer": DISCLAIMER,
             "generated_at": legacy.get("generated_at", _now_iso()),
         }
@@ -83,6 +84,7 @@ def build_options_research(ticker: str) -> Dict[str, Any]:
         "estimated_premium": first_contract.get("estimated_option_premium", "data unavailable"),
         "breakeven": first_contract.get("break_even_price", "data unavailable"),
         "risk_level": legacy.get("risk_level", "data unavailable"),
+        "expirations": expirations,
         "disclaimer": DISCLAIMER,
         "generated_at": legacy.get("generated_at", _now_iso()),
     }
@@ -96,31 +98,23 @@ def to_legacy_options_payload(research_payload: Dict[str, Any]) -> Dict[str, Any
     if direction not in {"CALL", "PUT", "WAIT"}:
         direction = "WAIT"
 
-    expirations = [
-        {
-            "timeframe": "Short-term expiration",
-            "expiration_date": research_payload.get("expiration_suggestions", ["Data unavailable"])[0],
-            "suggested_contract_type": "Call" if direction == "CALL" else "Put" if direction == "PUT" else "Data unavailable",
-            "suggested_strike_area": research_payload.get("strike_area", "Data unavailable"),
-            "estimated_option_premium": research_payload.get("estimated_premium", "Data unavailable"),
-            "break_even_price": research_payload.get("breakeven", "Data unavailable"),
-            "risk_warning": "Data unavailable",
-            "selection_reason": "Data unavailable",
-        }
-    ]
-    for label, idx in [("Medium-term expiration", 1), ("Safer swing expiration", 2)]:
-        expirations.append(
+    # Prefer the real per-expiration data computed by legacy_build_options_outlook
+    # (distinct strike/premium/breakeven/risk copy per timeframe) over fabricating
+    # three identical entries from the condensed research_payload fields.
+    expirations = research_payload.get("expirations")
+    if not isinstance(expirations, list) or not expirations:
+        expirations = [
             {
-                "timeframe": label,
-                "expiration_date": research_payload.get("expiration_suggestions", ["Data unavailable"] * 3)[idx],
-                "suggested_contract_type": expirations[0]["suggested_contract_type"],
+                "timeframe": "Short-term expiration",
+                "expiration_date": research_payload.get("expiration_suggestions", ["Data unavailable"])[0],
+                "suggested_contract_type": "Call" if direction == "CALL" else "Put" if direction == "PUT" else "Data unavailable",
                 "suggested_strike_area": research_payload.get("strike_area", "Data unavailable"),
                 "estimated_option_premium": research_payload.get("estimated_premium", "Data unavailable"),
                 "break_even_price": research_payload.get("breakeven", "Data unavailable"),
                 "risk_warning": "Data unavailable",
                 "selection_reason": "Data unavailable",
             }
-        )
+        ]
 
     confidence = int(research_payload.get("confidence", 0) or 0)
     return {

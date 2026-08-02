@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -8,6 +9,28 @@ import pandas as pd
 import yfinance as yf
 
 DISCLAIMER_TEXT = "For research only. Not financial advice."
+
+
+def _fetch_option_chain_with_retry(ticker_client: "yf.Ticker", expiration_date: str, attempts: int = 3):
+    """Yahoo's unofficial options endpoint is flaky under rapid repeated calls
+    (a page load can fire 15+ chain requests across tickers/expirations) and
+    intermittently returns an empty/None chain instead of raising. Retry with
+    a short backoff before treating the expiration as unavailable.
+    """
+    last_error: Optional[Exception] = None
+    for attempt in range(attempts):
+        try:
+            chain = ticker_client.option_chain(expiration_date)
+        except Exception as error:  # noqa: BLE001 - deliberately broad, retried below
+            last_error = error
+            chain = None
+        if chain is not None and chain.calls is not None and chain.puts is not None:
+            return chain
+        if attempt < attempts - 1:
+            time.sleep(0.5 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+    return None
 
 
 def _safe_float(value: object) -> Optional[float]:
@@ -263,8 +286,10 @@ def build_options_outlook(ticker: str) -> Dict[str, object]:
             continue
 
         try:
-            chain = ticker_client.option_chain(selected_date)
+            chain = _fetch_option_chain_with_retry(ticker_client, selected_date)
         except Exception:
+            chain = None
+        if chain is None:
             expirations.append(
                 _build_unavailable_expiration(
                     label,
