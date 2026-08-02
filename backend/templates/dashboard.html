@@ -87,9 +87,18 @@
                 <h3 data-count-to="{{ status_summary.opportunity_count|int }}">0</h3>
                 <small>{{ status_summary.opportunity_count }} high quality setups</small>
             </article>
+            {% set risk_tone = "tone-positive" if status_summary.risk_level == "Low" else "tone-caution" if status_summary.risk_level == "Moderate" else "tone-negative" %}
             <article class="glass-panel metric-card">
                 <p>Risk Level</p>
-                <h3>{{ status_summary.risk_level }}</h3>
+                <div class="risk-gauge-wrap">
+                    <svg viewBox="0 0 120 68" class="risk-gauge" aria-hidden="true">
+                        <path d="M10 60 A50 50 0 0 1 110 60" class="risk-gauge-track"/>
+                        <path d="M10 60 A50 50 0 0 1 110 60" class="risk-gauge-fill {{ risk_tone }}-stroke"
+                              style="stroke-dasharray: 157; stroke-dashoffset: {{ 157 - (157 * (status_summary.risk_score_10 / 10)) }};"/>
+                    </svg>
+                    <span class="risk-gauge-label">{{ status_summary.risk_score_10 }} / 10</span>
+                </div>
+                <h3 class="{{ risk_tone }}" style="font-size: 1.3rem; margin-top: 0;">{{ status_summary.risk_level }}</h3>
                 <small>{{ status_summary.market_status }} market regime</small>
             </article>
         </section>
@@ -170,11 +179,11 @@
 
         <div class="ticker-stream glass-panel">
             <div class="ticker-track">
-                {% for row in scanner_rows[:8] %}
-                <span>{{ row.ticker }} <b class="{{ 'tone-positive' if row.percent_change|float >= 0 else 'tone-caution' }}">{{ "%+.2f"|format(row.percent_change|float) }}%</b></span>
+                {% for row in macro_ticker_rows %}
+                <span>{{ row.display_label }} <b class="{{ 'tone-positive' if row.percent_change|float >= 0 else 'tone-caution' }}">{{ "%+.2f"|format(row.percent_change|float) }}%</b></span>
                 {% endfor %}
-                {% for row in scanner_rows[:8] %}
-                <span>{{ row.ticker }} <b class="{{ 'tone-positive' if row.percent_change|float >= 0 else 'tone-caution' }}">{{ "%+.2f"|format(row.percent_change|float) }}%</b></span>
+                {% for row in macro_ticker_rows %}
+                <span>{{ row.display_label }} <b class="{{ 'tone-positive' if row.percent_change|float >= 0 else 'tone-caution' }}">{{ "%+.2f"|format(row.percent_change|float) }}%</b></span>
                 {% endfor %}
             </div>
         </div>

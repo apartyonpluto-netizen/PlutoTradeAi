@@ -90,7 +90,7 @@
         </div>
         <p class="muted">{{ state.tradingview.purpose }}</p>
         <div class="account-meta-grid">
-            <div><small>Webhook URL</small><strong data-account-field="webhook_url">{{ state.tradingview.webhook_url or "Not generated" }}</strong></div>
+            <div><small>Webhook URL</small><strong data-account-field="webhook_url">{{ (request.host_url.rstrip('/') + state.tradingview.webhook_url) if state.tradingview.webhook_url else "Not generated" }}</strong></div>
             <div><small>Alert status</small><strong data-account-field="alert_status">{{ state.tradingview.alert_status or "Idle" }}</strong></div>
             <div><small>Last signal received</small><strong data-account-field="last_signal_received">{{ state.tradingview.last_signal_received or "Never" }}</strong></div>
         </div>

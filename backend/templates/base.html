@@ -41,7 +41,7 @@
                 {"label": "Confidence Engine", "path": "/neural-engine", "paths": ["/neural-engine"], "icon": "◎"},
                 {"label": "Options Brain", "path": "/options", "paths": ["/options"], "icon": "◈"},
                 {"label": "Trade Journal", "path": "/trade-journal", "paths": ["/trade-journal"], "icon": "✎"},
-                {"label": "Paper Trader", "path": "/account-hub", "paths": ["/account-hub"], "icon": "△"},
+                {"label": "Paper Trader", "path": "/trade-journal", "paths": ["/trade-journal"], "icon": "△"},
                 {"label": "Risk Manager", "path": "/support-resistance", "paths": ["/support-resistance", "/reversal-map"], "icon": "⬡"},
                 {"label": "Trade Router", "path": "/account-hub", "paths": ["/account-hub"], "icon": "↠"},
                 {"label": "Account Hub", "path": "/account-hub", "paths": ["/account-hub"], "icon": "⌂"},
@@ -82,12 +82,20 @@
 
     <main class="main">
         <header class="topbar topbar-with-alerts">
-            <input type="search" placeholder="Search signals, tickers, modules" id="globalSearch">
+            <div class="global-search-wrap">
+                <input type="search" placeholder="Search signals, tickers, modules" id="globalSearch" autocomplete="off">
+                <div class="global-search-results" id="globalSearchResults" hidden></div>
+            </div>
+            <div class="topbar-brand">
+                <span class="topbar-brand-title">PlutoTrade AI</span>
+                <span class="topbar-brand-tagline">Trade the stars. Master the markets.</span>
+            </div>
             <div class="top-chip">Eastern Time<b>{{ status_summary.current_time }}</b></div>
             <div class="top-chip">System Status<b>{{ status_summary.ai_status }}</b></div>
             <button class="alert-button" id="alertDrawerToggle" type="button">
                 Notifications <b id="alertCount">{{ unread_alert_count }}</b>
             </button>
+            <div class="topbar-avatar" aria-hidden="true"></div>
         </header>
 
         {% block content %}{% endblock %}
