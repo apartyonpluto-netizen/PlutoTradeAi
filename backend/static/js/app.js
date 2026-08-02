@@ -14,6 +14,42 @@ const escapeHtml = (value) =>
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
 
+const formatRelativeTime = (isoString) => {
+  if (!isoString) return "";
+  const then = new Date(isoString).getTime();
+  if (Number.isNaN(then)) return "";
+  const diffSeconds = Math.round((Date.now() - then) / 1000);
+  if (diffSeconds < 5) return "Just now";
+  if (diffSeconds < 60) return `${diffSeconds}s ago`;
+  const diffMinutes = Math.round(diffSeconds / 60);
+  if (diffMinutes < 60) return `${diffMinutes}m ago`;
+  const diffHours = Math.round(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  const diffDays = Math.round(diffHours / 24);
+  if (diffDays < 7) return `${diffDays}d ago`;
+  const then_date = new Date(isoString);
+  const sameYear = then_date.getFullYear() === new Date().getFullYear();
+  return then_date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: sameYear ? undefined : "numeric",
+  });
+};
+
+const refreshRelativeTimes = () => {
+  document.querySelectorAll("[data-timestamp]").forEach((node) => {
+    if (!(node instanceof HTMLElement)) return;
+    const iso = node.dataset.timestamp || "";
+    if (!iso) return;
+    const label = formatRelativeTime(iso);
+    if (label) node.textContent = label;
+    if (!node.title) {
+      const full = new Date(iso);
+      if (!Number.isNaN(full.getTime())) node.title = full.toLocaleString();
+    }
+  });
+};
+
 const ensureToastContainer = () => {
   let container = document.getElementById("toastContainer");
   if (container) return container;
@@ -57,7 +93,7 @@ const showMissionAlert = (alert) => {
   card.innerHTML = `
     <small>Mission Alert</small>
     <b>${escapeHtml(alert.ticker || "MARKET")} ${escapeHtml(alert.message || "")}</b>
-    <span>${escapeHtml(alert.category || "System")}</span>
+    <span>${escapeHtml(alert.category || "System")} · <time data-timestamp="${escapeHtml(alert.created_at || "")}">${escapeHtml(formatRelativeTime(alert.created_at))}</time></span>
   `;
   container.appendChild(card);
   window.setTimeout(() => {
@@ -102,6 +138,7 @@ const renderAlertList = (listNode, alerts = []) => {
       <div class="alert-row ${alert.read ? "alert-read" : ""}" data-alert-id="${escapeHtml(alert.id)}">
         <div>
           <b>${escapeHtml(alert.category || alert.type || "System")}</b>
+          <time class="alert-time" data-timestamp="${escapeHtml(alert.created_at || "")}">${escapeHtml(formatRelativeTime(alert.created_at))}</time>
           <p>${escapeHtml(alert.ticker || "")} ${escapeHtml(alert.message || "")}</p>
         </div>
         <div class="action-row">
@@ -1208,4 +1245,6 @@ onReady(() => {
   bindMissionControlEffects();
   bindLiveDataStatusCard();
   bindMissionAlertFloater();
+  refreshRelativeTimes();
+  window.setInterval(refreshRelativeTimes, 30000);
 });

@@ -242,7 +242,7 @@
             <div class="mission-feed-list">
                 {% for alert in alerts[:8] %}
                 <div class="feed-item">
-                    <time>{{ alert.timestamp[11:16] if alert.timestamp else "--:--" }}</time>
+                    <time data-timestamp="{{ alert.created_at or '' }}">--</time>
                     <p>{{ alert.ticker }} {{ alert.message }}</p>
                 </div>
                 {% else %}

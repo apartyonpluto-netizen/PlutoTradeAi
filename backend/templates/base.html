@@ -122,6 +122,7 @@
         <div class="alert-row {{ 'alert-read' if alert.read else '' }}" data-alert-id="{{ alert.id }}">
             <div>
                 <b>{{ alert.category }}</b>
+                <time class="alert-time" data-timestamp="{{ alert.created_at or '' }}">--</time>
                 <p>{{ alert.ticker }} {{ alert.message }}</p>
             </div>
             <div class="action-row">

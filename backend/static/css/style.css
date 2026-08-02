@@ -1078,6 +1078,13 @@ select:focus {
     font-size: 0.85rem;
 }
 
+.alert-time {
+    margin-left: 8px;
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    letter-spacing: 0.03em;
+}
+
 .ghost-button {
     background: transparent;
     border-color: rgba(172, 128, 217, 0.45);
