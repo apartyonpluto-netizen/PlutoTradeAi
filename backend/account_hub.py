@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hmac
 import json
-import uuid
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+from urllib.parse import parse_qs, urlparse
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
@@ -153,8 +155,26 @@ def _find_account(accounts: List[Dict[str, Any]], platform: str) -> Tuple[Dict[s
 
 
 def _generate_webhook_url() -> str:
-    token = uuid.uuid4().hex[:14]
+    token = secrets.token_hex(16)
     return f"/api/tradingview/webhook?token={token}"
+
+
+def _extract_token(webhook_url: str) -> str:
+    query = parse_qs(urlparse(webhook_url or "").query)
+    return (query.get("token") or [""])[0]
+
+
+def verify_tradingview_token(token: str) -> bool:
+    """Constant-time check of an incoming webhook token against the stored one.
+
+    Fails closed: no stored token or no provided token both reject.
+    """
+    accounts = _load_accounts()
+    account, _ = _find_account(accounts, "tradingview")
+    expected = _extract_token(account.get("webhook_url", ""))
+    if not expected or not token:
+        return False
+    return hmac.compare_digest(expected, token)
 
 
 def get_accounts() -> List[Dict[str, Any]]:

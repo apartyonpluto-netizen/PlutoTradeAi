@@ -22,6 +22,7 @@ if __package__:
         record_tradingview_signal,
         test_account,
         update_trading_enabled,
+        verify_tradingview_token,
     )
     from .alerts import (
         add_manual_alert,
@@ -75,6 +76,7 @@ else:
         record_tradingview_signal,
         test_account,
         update_trading_enabled,
+        verify_tradingview_token,
     )
     from alerts import (
         add_manual_alert,
@@ -708,7 +710,7 @@ def _build_page_context(
                 "why_news_matters": strategy.get("why_news_matters", "Data unavailable"),
                 "data_source": strategy.get("data_source", "Data unavailable"),
                 "data_quality": strategy.get("data_quality", "Data unavailable"),
-                "last_updated": strategy.get("last_updated", strategy.get("generated_at", _now_iso())),
+                "last_updated": strategy.get("last_updated", strategy.get("generated_at", _now_utc())),
                 "live_or_delayed": strategy.get("live_or_delayed", "Delayed"),
                 "research_only": strategy.get("research_only", True),
                 "disclaimer": strategy.get("disclaimer", "For research only."),
@@ -1307,6 +1309,13 @@ def api_accounts_test():
 @app.route("/api/tradingview/webhook", methods=["POST"])
 @api_guard
 def api_tradingview_webhook():
+    if not verify_tradingview_token(request.args.get("token", "")):
+        return _api_failure(
+            "Invalid or missing webhook token.",
+            status_code=401,
+            error_code="invalid_webhook_token",
+            ok=False,
+        )
     payload = request.get_json(silent=True) or {}
     stored_alert = save_alert(payload)
     account_result = record_tradingview_signal(payload=payload)
