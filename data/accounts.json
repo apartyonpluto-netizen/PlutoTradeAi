@@ -34,17 +34,17 @@
   {
     "platform": "tradingview",
     "display_name": "TradingView",
-    "status": "Not Connected",
+    "status": "Webhook Ready",
     "purpose": "charting, analytics, webhook alerts",
-    "last_sync": "",
+    "last_sync": "2026-08-02T15:57:30.104806+00:00",
     "permissions": [
       "signal_ingest",
       "alert_webhooks"
     ],
     "paper_mode": false,
     "trading_enabled": false,
-    "webhook_url": "",
-    "alert_status": "Idle",
-    "last_signal_received": ""
+    "webhook_url": "/api/tradingview/webhook?token=16dfd343d12eb8b4529c7245a8188486",
+    "alert_status": "Signal Received",
+    "last_signal_received": "2026-08-02T15:57:30.104803+00:00"
   }
 ]

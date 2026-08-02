@@ -1,1 +1,11 @@
-[]
+[
+  {
+    "ticker": "AAPL",
+    "signal": "WAIT",
+    "price": "data unavailable",
+    "timeframe": "data unavailable",
+    "strategy": "TradingView Alert",
+    "confidence": "data unavailable",
+    "received_at": "2026-08-02T15:57:30.104115+00:00"
+  }
+]

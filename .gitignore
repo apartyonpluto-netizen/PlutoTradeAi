@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+venv/
+.venv/
+.env
+*.log
+logs/*.log
+
+data/accounts.json
+data/settings.json
+data/autonomy_settings.json
+data/alerts.json
+data/tradingview_alerts.json
+data/dismissed_alerts.json
+data/read_alerts.json
+
+.DS_Store
