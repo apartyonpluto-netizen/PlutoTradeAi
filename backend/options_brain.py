@@ -275,7 +275,7 @@ def build_options_outlook(ticker: str) -> Dict[str, object]:
             continue
 
         contracts = chain.calls if bias_contract_type == "Call" else chain.puts
-        if contracts.empty:
+        if contracts is None or contracts.empty:
             expirations.append(
                 _build_unavailable_expiration(
                     label,
