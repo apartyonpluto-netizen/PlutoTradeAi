@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PlutoTrade AI · Sign In</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<div class="bg-space" aria-hidden="true"></div>
+<div class="bg-stars" aria-hidden="true"></div>
+<div class="bg-nebula" aria-hidden="true"></div>
+<div class="bg-planets" aria-hidden="true"></div>
+<div class="bg-warp" aria-hidden="true"></div>
+
+<div class="auth-page">
+    <div class="auth-card">
+        <div class="auth-brand">
+            <div class="auth-brand-mark" aria-hidden="true"></div>
+            <div>
+                <h1>PlutoTrade AI</h1>
+                <span>Captain Curtis</span>
+            </div>
+        </div>
+        <h2>Sign in</h2>
+        <p class="muted">Your watchlist, trades, and alerts are private to your account.</p>
+        {% if error %}
+        <div class="auth-error">{{ error }}</div>
+        {% endif %}
+        <form method="POST" action="/login">
+            <input type="hidden" name="next" value="{{ next_path }}">
+            <div class="auth-field">
+                <label for="username">Username</label>
+                <input type="text" id="username" name="username" autocomplete="username" required autofocus>
+            </div>
+            <div class="auth-field">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" autocomplete="current-password" required>
+            </div>
+            <button type="submit" class="auth-submit">Sign In</button>
+        </form>
+        <p class="auth-switch">Don't have an account? <a href="/register">Create one</a></p>
+    </div>
+</div>
+</body>
+</html>

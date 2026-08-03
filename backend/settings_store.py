@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Dict, List
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-SETTINGS_FILE = BASE_DIR / "data" / "settings.json"
+DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
+USER_DATA_ROOT = DATA_DIR / "users"
+
+
+def _settings_file(user_id: str) -> Path:
+    if not user_id:
+        raise ValueError("user_id is required.")
+    return USER_DATA_ROOT / user_id / "settings.json"
 
 
 def _default_settings() -> Dict[str, object]:
@@ -24,26 +32,27 @@ def _default_settings() -> Dict[str, object]:
     }
 
 
-def _ensure_file() -> None:
-    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if SETTINGS_FILE.exists():
-        return
-    SETTINGS_FILE.write_text(json.dumps(_default_settings(), indent=2), encoding="utf-8")
+def _ensure_file(user_id: str) -> Path:
+    settings_file = _settings_file(user_id)
+    settings_file.parent.mkdir(parents=True, exist_ok=True)
+    if not settings_file.exists():
+        settings_file.write_text(json.dumps(_default_settings(), indent=2), encoding="utf-8")
+    return settings_file
 
 
-def get_settings() -> Dict[str, object]:
-    _ensure_file()
+def get_settings(user_id: str) -> Dict[str, object]:
+    settings_file = _ensure_file(user_id)
     try:
-        payload = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        payload = json.loads(settings_file.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         payload = _default_settings()
     merged = {**_default_settings(), **payload}
-    SETTINGS_FILE.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+    settings_file.write_text(json.dumps(merged, indent=2), encoding="utf-8")
     return merged
 
 
-def update_settings(payload: Dict[str, object]) -> Dict[str, object]:
-    settings = get_settings()
+def update_settings(user_id: str, payload: Dict[str, object]) -> Dict[str, object]:
+    settings = get_settings(user_id)
     safe_updates: Dict[str, object] = {}
     for key in [
         "theme",
@@ -63,7 +72,7 @@ def update_settings(payload: Dict[str, object]) -> Dict[str, object]:
     if bool(safe_updates.get("show_mission_brief_again")):
         safe_updates["mission_brief_last_viewed_date"] = ""
     settings.update(safe_updates)
-    SETTINGS_FILE.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    _settings_file(user_id).write_text(json.dumps(settings, indent=2), encoding="utf-8")
     return settings
 
 

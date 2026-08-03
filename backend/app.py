@@ -1,15 +1,25 @@
 from __future__ import annotations
 
 import json
+import os
+import secrets as secrets_module
 from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 
 if __package__:
+    from .auth import (
+        authenticate_user,
+        find_user_by_webhook_token,
+        get_user_by_id,
+        public_user,
+        register_user,
+    )
     from .autonomy.autonomous_controller import (
         emergency_stop,
         get_autonomy_status,
@@ -73,6 +83,13 @@ if __package__:
         update_stock,
     )
 else:
+    from auth import (
+        authenticate_user,
+        find_user_by_webhook_token,
+        get_user_by_id,
+        public_user,
+        register_user,
+    )
     from autonomy.autonomous_controller import emergency_stop, get_autonomy_status, reset_emergency_stop, set_mode
     from account_hub import (
         connect_account,
@@ -134,6 +151,26 @@ else:
 app = Flask(__name__)
 setup_logging()
 logger = get_logger("app")
+
+_DATA_DIR_FOR_SECRET = Path(os.environ.get("PLUTO_DATA_DIR", str(Path(__file__).resolve().parents[1] / "data"))).resolve()
+_DATA_DIR_FOR_SECRET.mkdir(parents=True, exist_ok=True)
+_SECRET_KEY_FILE = _DATA_DIR_FOR_SECRET / ".flask_secret_key"
+
+
+def _resolve_secret_key() -> str:
+    env_key = os.environ.get("FLASK_SECRET_KEY", "").strip()
+    if env_key:
+        return env_key
+    if _SECRET_KEY_FILE.exists():
+        stored = _SECRET_KEY_FILE.read_text(encoding="utf-8").strip()
+        if stored:
+            return stored
+    generated = secrets_module.token_hex(32)
+    _SECRET_KEY_FILE.write_text(generated, encoding="utf-8")
+    return generated
+
+
+app.secret_key = _resolve_secret_key()
 
 CORE_SCAN_UNIVERSE = ["TSLA", "NVDA", "AMD", "PLTR", "AAPL", "META", "MSFT", "SPY", "QQQ"]
 MARKET_CACHE: Dict[str, object] = {"rows": [], "errors": [], "last_updated": "", "expires_at": None}
@@ -239,6 +276,82 @@ def _log_response(response):
     return response
 
 
+_PUBLIC_PATHS = {"/login", "/register", "/logout"}
+_PUBLIC_PATH_PREFIXES = ("/static/",)
+_TOKEN_AUTH_PATHS = {"/api/tradingview/webhook"}
+
+
+@app.before_request
+def _require_login():
+    path = request.path
+    if path in _PUBLIC_PATHS or path in _TOKEN_AUTH_PATHS:
+        return None
+    if any(path.startswith(prefix) for prefix in _PUBLIC_PATH_PREFIXES):
+        return None
+
+    user_id = session.get("user_id")
+    if user_id and get_user_by_id(user_id):
+        return None
+
+    session.pop("user_id", None)
+    if path.startswith("/api/"):
+        return _api_failure("Authentication required. Please log in.", status_code=401, error_code="unauthorized", ok=False)
+    return redirect(url_for("login_page", next=path))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login_page():
+    if request.method == "GET":
+        if session.get("user_id") and get_user_by_id(session["user_id"]):
+            return redirect(url_for("dashboard_page"))
+        return render_template("login.html", error="", next_path=request.args.get("next", ""))
+
+    username = request.form.get("username", "")
+    password = request.form.get("password", "")
+    next_path = request.form.get("next", "") or ""
+    user = authenticate_user(username, password)
+    if not user:
+        return render_template("login.html", error="Incorrect username or password.", next_path=next_path), 401
+
+    session["user_id"] = user["id"]
+    session.permanent = True
+    target = next_path if next_path.startswith("/") else url_for("dashboard_page")
+    return redirect(target)
+
+
+@app.route("/register", methods=["GET", "POST"])
+def register_page():
+    if request.method == "GET":
+        if session.get("user_id") and get_user_by_id(session["user_id"]):
+            return redirect(url_for("dashboard_page"))
+        return render_template("register.html", error="")
+
+    username = request.form.get("username", "")
+    password = request.form.get("password", "")
+    confirm_password = request.form.get("confirm_password", "")
+    if password != confirm_password:
+        return render_template("register.html", error="Passwords do not match."), 400
+    try:
+        user = register_user(username, password)
+    except ValueError as error:
+        return render_template("register.html", error=str(error)), 400
+
+    session["user_id"] = user["id"]
+    session.permanent = True
+    return redirect(url_for("dashboard_page"))
+
+
+@app.route("/logout", methods=["POST"])
+def logout_page():
+    session.pop("user_id", None)
+    return redirect(url_for("login_page"))
+
+
+def _current_user_id() -> str:
+    """Guaranteed non-empty for any route reachable past the before_request auth gate."""
+    return session.get("user_id", "")
+
+
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -279,19 +392,21 @@ def _mission_brief_should_show(settings: Dict[str, object]) -> bool:
 
 def _dismiss_mission_brief() -> Dict[str, object]:
     return update_settings(
+        _current_user_id(),
         {
             "mission_brief_last_viewed_date": _trading_day_key(),
             "show_mission_brief_again": False,
-        }
+        },
     )
 
 
 def _reset_mission_brief() -> Dict[str, object]:
     return update_settings(
+        _current_user_id(),
         {
             "mission_brief_last_viewed_date": "",
             "show_mission_brief_again": True,
-        }
+        },
     )
 
 
@@ -337,7 +452,7 @@ def get_market_data(force_refresh: bool = False) -> Tuple[List[Dict[str, object]
     if not force_refresh and MARKET_CACHE.get("rows") and _cache_is_fresh(MARKET_CACHE):
         return MARKET_CACHE["rows"], MARKET_CACHE["errors"], MARKET_CACHE["last_updated"]
 
-    watchlist_tickers = get_watchlist_tickers()
+    watchlist_tickers = get_watchlist_tickers(_current_user_id())
     scan_universe = list(CORE_SCAN_UNIVERSE)
     rows, errors, last_updated = scan_market(tickers=scan_universe, watchlist_tickers=watchlist_tickers)
     if not rows and MARKET_CACHE.get("rows"):
@@ -545,8 +660,9 @@ def _build_neural_snapshot(
 
 
 def _compute_status(scanner_rows: List[Dict[str, object]], scanner_errors: List[str]) -> Dict[str, object]:
-    settings = get_settings()
-    accounts = get_accounts()
+    user_id = _current_user_id()
+    settings = get_settings(user_id)
+    accounts = get_accounts(user_id)
     top_tickers = [row["ticker"] for row in scanner_rows[:3]]
     confidence = sum(int(row.get("scanner_score", 0)) for row in scanner_rows[:5]) / max(1, len(scanner_rows[:5]))
     reversal_candidates = sum(1 for row in ANALYTICS_CACHE.get("trend_rows", []) if row.get("trend_reversal"))
@@ -561,11 +677,11 @@ def _compute_status(scanner_rows: List[Dict[str, object]], scanner_errors: List[
             sentiment = "Bearish"
 
     paper_connected = any(item.get("platform") == "webull" and item.get("status") != "Not Connected" for item in accounts)
-    tradingview_status = get_tradingview_status()
+    tradingview_status = get_tradingview_status(user_id)
     broker_statuses = _broker_framework_status()
     neural_status = _build_neural_snapshot(
         scanner_rows=scanner_rows,
-        watchlist_rows=get_watchlist(),
+        watchlist_rows=get_watchlist(user_id),
         news_rows=[],
     )
 
@@ -612,7 +728,8 @@ def _build_page_context(
     focus_ticker: str = "",
 ) -> Dict[str, object]:
     focus_ticker = focus_ticker.strip().upper()
-    watchlist = get_watchlist()
+    user_id = _current_user_id()
+    watchlist = get_watchlist(user_id)
     watchlist_tickers = [row["ticker"] for row in watchlist]
     scanner_rows, scanner_errors, scanner_last_updated = get_market_data(force_refresh=force_refresh)
     suggestions = (
@@ -697,7 +814,7 @@ def _build_page_context(
             )
             pattern_errors = candle_errors
 
-    settings_payload = get_settings()
+    settings_payload = get_settings(user_id)
     cached_reversal = reversal_rows or (ANALYTICS_CACHE.get("reversal_rows", []) if _cache_is_fresh(ANALYTICS_CACHE) else [])
     cached_trend = trend_rows or (ANALYTICS_CACHE.get("trend_rows", []) if _cache_is_fresh(ANALYTICS_CACHE) else [])
     cached_news = news_rows or (NEWS_CACHE.get("rows", []) if _cache_is_fresh(NEWS_CACHE) else [])
@@ -821,9 +938,9 @@ def _build_page_context(
         news_rows=cached_news,
         opportunities=upcoming_opportunities,
         market_phase=_market_phase(),
-        tradingview_alert=get_tradingview_status().get("latest_alert", {}),
+        tradingview_alert=get_tradingview_status(user_id).get("latest_alert", {}),
     )
-    alerts = get_alerts_snapshot(system_alerts)
+    alerts = get_alerts_snapshot(user_id, system_alerts)
 
     status_summary = _compute_status(scanner_rows, scanner_errors)
     status_summary["latest_alerts"] = alerts[:6]
@@ -832,10 +949,10 @@ def _build_page_context(
         watchlist_rows=watchlist,
         news_rows=cached_news,
     )
-    status_summary["tradingview_status"] = get_tradingview_status()
+    status_summary["tradingview_status"] = get_tradingview_status(user_id)
     status_summary["tradingview_latest_alert"] = status_summary["tradingview_status"].get("latest_alert", {})
     status_summary["broker_statuses"] = _broker_framework_status()
-    status_summary["autonomy_status"] = get_autonomy_status()
+    status_summary["autonomy_status"] = get_autonomy_status(user_id)
     status_summary["mission_brief_should_show"] = _mission_brief_should_show(settings_payload)
     status_summary["mission_brief_last_viewed_date"] = settings_payload.get("mission_brief_last_viewed_date", "")
     status_summary["mission_brief_today"] = _trading_day_key()
@@ -883,6 +1000,13 @@ def _build_page_context(
 @app.context_processor
 def inject_nav():
     return {"nav_items": NAV_ITEMS}
+
+
+@app.context_processor
+def inject_current_user():
+    user_id = session.get("user_id")
+    user = get_user_by_id(user_id) if user_id else None
+    return {"current_user": public_user(user) if user else None}
 
 
 @app.route("/")
@@ -1003,7 +1127,7 @@ def ticker_lookup_page(ticker: str = "") -> str:
     except ValueError:
         options_payload = None
 
-    watchlist_tickers = get_watchlist_tickers()
+    watchlist_tickers = get_watchlist_tickers(_current_user_id())
 
     context.update(
         {
@@ -1041,7 +1165,7 @@ def settings_page() -> str:
 @app.route("/account-hub")
 def account_hub_page() -> str:
     context = _build_page_context()
-    context["accounts"] = get_accounts()
+    context["accounts"] = get_accounts(_current_user_id())
     return render_template("account_hub.html", **context)
 
 
@@ -1053,8 +1177,9 @@ def notifications_page() -> str:
 @app.route("/trade-journal")
 def trade_journal_page() -> str:
     context = _build_page_context(include_reversal=True, include_trend=True)
-    context["paper_trades"] = list_paper_trades()
-    context["paper_trade_summary"] = get_paper_trade_summary()
+    user_id = _current_user_id()
+    context["paper_trades"] = list_paper_trades(user_id)
+    context["paper_trade_summary"] = get_paper_trade_summary(user_id)
     return render_template("trade_journal.html", **context)
 
 
@@ -1078,7 +1203,7 @@ def neural_engine_page() -> str:
 @app.route("/api/watchlist", methods=["GET"])
 @api_guard
 def api_watchlist():
-    rows = get_watchlist()
+    rows = get_watchlist(_current_user_id())
     try:
         rows = search_watchlist(
             rows=rows,
@@ -1102,7 +1227,7 @@ def api_watchlist():
 def api_watchlist_add():
     payload = request.get_json(silent=True) or {}
     try:
-        row = add_stock(payload)
+        row = add_stock(_current_user_id(), payload)
     except ValueError as error:
         return jsonify({"ok": False, "error": str(error)}), 400
     return jsonify({"ok": True, "item": row})
@@ -1113,7 +1238,7 @@ def api_watchlist_update():
     payload = request.get_json(silent=True) or {}
     ticker = payload.get("ticker", "")
     try:
-        row = update_stock(ticker=ticker, payload=payload)
+        row = update_stock(_current_user_id(), ticker=ticker, payload=payload)
     except ValueError as error:
         return jsonify({"ok": False, "error": str(error)}), 400
     return jsonify({"ok": True, "item": row})
@@ -1124,7 +1249,7 @@ def api_watchlist_delete():
     payload = request.get_json(silent=True) or {}
     ticker = payload.get("ticker", "")
     try:
-        delete_stock(ticker=ticker)
+        delete_stock(_current_user_id(), ticker=ticker)
     except ValueError as error:
         return jsonify({"ok": False, "error": str(error)}), 400
     return jsonify({"ok": True})
@@ -1133,8 +1258,9 @@ def api_watchlist_delete():
 @app.route("/api/paper-trade/list", methods=["GET"])
 @api_guard
 def api_paper_trade_list():
-    trades = list_paper_trades()
-    summary = get_paper_trade_summary()
+    user_id = _current_user_id()
+    trades = list_paper_trades(user_id)
+    summary = get_paper_trade_summary(user_id)
     return _api_success({"trades": trades, "summary": summary}, trades=trades, summary=summary, ok=True)
 
 
@@ -1144,6 +1270,7 @@ def api_paper_trade_execute():
     payload = request.get_json(silent=True) or {}
     try:
         trade = open_paper_trade(
+            user_id=_current_user_id(),
             ticker=payload.get("ticker", ""),
             direction=payload.get("direction", ""),
             quantity=payload.get("quantity", 1),
@@ -1160,7 +1287,7 @@ def api_paper_trade_execute():
 def api_paper_trade_close():
     payload = request.get_json(silent=True) or {}
     try:
-        trade = close_paper_trade(payload.get("trade_id", ""))
+        trade = close_paper_trade(_current_user_id(), payload.get("trade_id", ""))
     except ValueError as error:
         raise ValidationError(str(error)) from error
     return _api_success({"trade": trade}, trade=trade, ok=True)
@@ -1243,7 +1370,7 @@ def api_alerts():
         action = payload.get("action", "add")
         if action == "dismiss":
             try:
-                dismiss_alert(payload.get("id", ""))
+                dismiss_alert(_current_user_id(), payload.get("id", ""))
             except ValueError as error:
                 raise ValidationError(str(error)) from error
             context = _build_page_context(include_suggestions=True, include_news=True)
@@ -1255,7 +1382,7 @@ def api_alerts():
             )
         if action == "mark_read":
             try:
-                mark_alert_read(payload.get("id", ""))
+                mark_alert_read(_current_user_id(), payload.get("id", ""))
             except ValueError as error:
                 raise ValidationError(str(error)) from error
             context = _build_page_context(include_suggestions=True, include_news=True)
@@ -1266,7 +1393,7 @@ def api_alerts():
                 ok=True,
             )
         if action == "mark_all_read":
-            mark_all_read(alerts)
+            mark_all_read(_current_user_id(), alerts)
             context = _build_page_context(include_suggestions=True, include_news=True)
             return _api_success(
                 {"alerts": context["alerts"], "unread_count": context["unread_alert_count"]},
@@ -1275,7 +1402,7 @@ def api_alerts():
                 ok=True,
             )
         try:
-            alert = add_manual_alert(payload)
+            alert = add_manual_alert(_current_user_id(), payload)
         except ValueError as error:
             raise ValidationError(str(error)) from error
         context = _build_page_context(include_suggestions=True, include_news=True)
@@ -1365,7 +1492,7 @@ def api_strategy_ticker(ticker: str):
 def api_chart_levels_watchlist():
     force_refresh = request.args.get("refresh", "false").lower() == "true"
     query_tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
-    tickers = query_tickers or get_watchlist_tickers() or [row["ticker"] for row in get_market_data(force_refresh=False)[0][:6]]
+    tickers = query_tickers or get_watchlist_tickers(_current_user_id()) or [row["ticker"] for row in get_market_data(force_refresh=False)[0][:6]]
     rows = [get_chart_levels_for_ticker(ticker=ticker, force_refresh=force_refresh) for ticker in tickers]
     return _api_success({"rows": rows, "count": len(rows)}, rows=rows, count=len(rows), ok=True)
 
@@ -1416,16 +1543,18 @@ def api_trusted_accounts():
 @app.route("/api/settings", methods=["GET", "POST"])
 def api_settings():
     if request.method == "GET":
-        return jsonify({"settings": get_settings(), "themes": available_themes(), "news_roadmap": get_future_news_roadmap()})
+        return jsonify(
+            {"settings": get_settings(_current_user_id()), "themes": available_themes(), "news_roadmap": get_future_news_roadmap()}
+        )
     payload = request.get_json(silent=True) or {}
-    settings = update_settings(payload)
+    settings = update_settings(_current_user_id(), payload)
     return jsonify({"ok": True, "settings": settings})
 
 
 @app.route("/api/mission-brief/status", methods=["GET"])
 @api_guard
 def api_mission_brief_status():
-    settings = get_settings()
+    settings = get_settings(_current_user_id())
     data = {
         "should_show": _mission_brief_should_show(settings),
         "last_viewed_date": settings.get("mission_brief_last_viewed_date", ""),
@@ -1460,7 +1589,7 @@ def api_mission_brief_reset():
 @app.route("/api/autonomy/status", methods=["GET"])
 @api_guard
 def api_autonomy_status():
-    payload = get_autonomy_status()
+    payload = get_autonomy_status(_current_user_id())
     return _api_success(payload, autonomy=payload, ok=True)
 
 
@@ -1470,7 +1599,7 @@ def api_autonomy_set_mode():
     payload = request.get_json(silent=True) or {}
     mode = str(payload.get("mode", "OFF"))
     reason = str(payload.get("mode_change_reason", ""))
-    result = set_mode(mode=mode, reason=reason)
+    result = set_mode(_current_user_id(), mode=mode, reason=reason)
     return _api_success(result, autonomy=result, ok=True)
 
 
@@ -1478,7 +1607,7 @@ def api_autonomy_set_mode():
 @api_guard
 def api_autonomy_emergency_stop():
     payload = request.get_json(silent=True) or {}
-    result = emergency_stop(reason=str(payload.get("mode_change_reason", "")))
+    result = emergency_stop(_current_user_id(), reason=str(payload.get("mode_change_reason", "")))
     return _api_success(result, autonomy=result, ok=True)
 
 
@@ -1486,14 +1615,14 @@ def api_autonomy_emergency_stop():
 @api_guard
 def api_autonomy_reset_stop():
     payload = request.get_json(silent=True) or {}
-    result = reset_emergency_stop(reason=str(payload.get("mode_change_reason", "")))
+    result = reset_emergency_stop(_current_user_id(), reason=str(payload.get("mode_change_reason", "")))
     return _api_success(result, autonomy=result, ok=True)
 
 
 @app.route("/api/accounts", methods=["GET"])
 @api_guard
 def api_accounts():
-    accounts = get_accounts()
+    accounts = get_accounts(_current_user_id())
     broker_framework = _broker_framework_status()
     safety = {
         "store_passwords": False,
@@ -1521,14 +1650,15 @@ def api_accounts_connect():
     if not platform:
         return jsonify({"ok": False, "error": "Platform is required."}), 400
 
+    user_id = _current_user_id()
     try:
         if payload.get("action") == "generate_webhook":
-            account = ensure_tradingview_webhook(platform=platform)
+            account = ensure_tradingview_webhook(user_id, platform=platform)
             return jsonify({"ok": True, "account": account})
         if "trading_enabled" in payload:
-            account = update_trading_enabled(platform=platform, trading_enabled=bool(payload.get("trading_enabled")))
+            account = update_trading_enabled(user_id, platform=platform, trading_enabled=bool(payload.get("trading_enabled")))
             return jsonify({"ok": True, "account": account})
-        account = connect_account(platform=platform)
+        account = connect_account(user_id, platform=platform)
     except ValueError as error:
         return jsonify({"ok": False, "error": str(error)}), 400
     return jsonify({"ok": True, "account": account})
@@ -1541,7 +1671,7 @@ def api_accounts_disconnect():
     if not platform:
         return jsonify({"ok": False, "error": "Platform is required."}), 400
     try:
-        account = disconnect_account(platform=platform)
+        account = disconnect_account(_current_user_id(), platform=platform)
     except ValueError as error:
         return jsonify({"ok": False, "error": str(error)}), 400
     return jsonify({"ok": True, "account": account})
@@ -1554,7 +1684,7 @@ def api_accounts_test():
     if not platform:
         return jsonify({"ok": False, "error": "Platform is required."}), 400
     try:
-        account = test_account(platform=platform)
+        account = test_account(_current_user_id(), platform=platform)
     except ValueError as error:
         return jsonify({"ok": False, "error": str(error)}), 400
     return jsonify({"ok": True, "account": account})
@@ -1563,13 +1693,19 @@ def api_accounts_test():
 @app.route("/api/tradingview/webhook", methods=["POST"])
 @api_guard
 def api_tradingview_webhook():
-    if not verify_tradingview_token(request.args.get("token", "")):
+    # TradingView has no session/login - the token in the URL is the only
+    # identifying information, so it has to double as both auth and the
+    # lookup key for which user this alert belongs to.
+    token = request.args.get("token", "")
+    owner = find_user_by_webhook_token(token)
+    if not owner or not verify_tradingview_token(owner["id"], token):
         return _api_failure(
             "Invalid or missing webhook token.",
             status_code=401,
             error_code="invalid_webhook_token",
             ok=False,
         )
+    user_id = owner["id"]
     # TradingView's default alert message is plain text unless the user's alert
     # is configured to send JSON, and it doesn't always set Content-Type:
     # application/json even then - so parse defensively instead of trusting
@@ -1584,8 +1720,8 @@ def api_tradingview_webhook():
             payload = parsed if isinstance(parsed, dict) else {"message": raw_text}
         except ValueError:
             payload = {"message": raw_text} if raw_text else {}
-    stored_alert = save_alert(payload)
-    account_result = record_tradingview_signal(payload=payload)
+    stored_alert = save_alert(user_id, payload)
+    account_result = record_tradingview_signal(user_id, payload=payload)
     result = {
         "signal_received": True,
         "alert": stored_alert,
@@ -1599,7 +1735,7 @@ def api_tradingview_webhook():
 @api_guard
 def api_status():
     context = _build_page_context(include_news=True)
-    tradingview = get_tradingview_status()
+    tradingview = get_tradingview_status(_current_user_id())
     neural = context["status_summary"]["neural_status"]
     broker_statuses = _broker_framework_status()
     data = {
@@ -1627,7 +1763,7 @@ def api_status():
             "approval_required": True,
             "emergency_kill_switch_placeholder": True,
         },
-        "autonomy": get_autonomy_status(),
+        "autonomy": get_autonomy_status(_current_user_id()),
     }
     return _api_success(data)
 
@@ -1635,7 +1771,7 @@ def api_status():
 @app.route("/api/news", methods=["GET"])
 @api_guard
 def api_news():
-    tickers = get_watchlist_tickers() or CORE_SCAN_UNIVERSE[:4]
+    tickers = get_watchlist_tickers(_current_user_id()) or CORE_SCAN_UNIVERSE[:4]
     bundle = fetch_news_bundle(tickers=tickers, limit=30)
     return _api_success(bundle, news=bundle.get("items", []), errors=bundle.get("errors", []))
 
@@ -1643,7 +1779,7 @@ def api_news():
 @app.route("/api/neural/status", methods=["GET"])
 @api_guard
 def api_neural_status():
-    watchlist = get_watchlist()
+    watchlist = get_watchlist(_current_user_id())
     scanner_rows, _, _ = get_market_data(force_refresh=False)
     news_bundle = fetch_news_bundle(tickers=[item["ticker"] for item in watchlist], limit=10)
     option_inputs = [get_options_data_for_ticker(row["ticker"], force_refresh=False) for row in scanner_rows[:3]]
@@ -1668,7 +1804,7 @@ def api_neural_status():
 @app.route("/api/tradingview/status", methods=["GET"])
 @api_guard
 def api_tradingview_status():
-    return _api_success(get_tradingview_status())
+    return _api_success(get_tradingview_status(_current_user_id()))
 
 
 if __name__ == "__main__":

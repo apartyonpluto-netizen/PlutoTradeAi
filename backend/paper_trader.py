@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,7 +10,14 @@ from typing import Any, Dict, List, Optional
 import yfinance as yf
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-PAPER_TRADES_FILE = BASE_DIR / "data" / "paper_trades.csv"
+DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
+USER_DATA_ROOT = DATA_DIR / "users"
+
+
+def _paper_trades_file(user_id: str) -> Path:
+    if not user_id:
+        raise ValueError("user_id is required.")
+    return USER_DATA_ROOT / user_id / "paper_trades.csv"
 
 FIELDNAMES = [
     "id",
@@ -47,28 +55,31 @@ def _get_live_price(ticker: str) -> float:
     return float(close_prices.iloc[-1])
 
 
-def _ensure_file() -> None:
-    PAPER_TRADES_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if not PAPER_TRADES_FILE.exists():
-        with PAPER_TRADES_FILE.open("w", newline="", encoding="utf-8") as handle:
+def _ensure_file(user_id: str) -> Path:
+    trades_file = _paper_trades_file(user_id)
+    trades_file.parent.mkdir(parents=True, exist_ok=True)
+    if not trades_file.exists():
+        with trades_file.open("w", newline="", encoding="utf-8") as handle:
             csv.DictWriter(handle, fieldnames=FIELDNAMES).writeheader()
+    return trades_file
 
 
-def _read_all() -> List[Dict[str, Any]]:
-    _ensure_file()
-    with PAPER_TRADES_FILE.open("r", newline="", encoding="utf-8") as handle:
+def _read_all(user_id: str) -> List[Dict[str, Any]]:
+    trades_file = _ensure_file(user_id)
+    with trades_file.open("r", newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
 
 
-def _write_all(rows: List[Dict[str, Any]]) -> None:
-    _ensure_file()
-    with PAPER_TRADES_FILE.open("w", newline="", encoding="utf-8") as handle:
+def _write_all(user_id: str, rows: List[Dict[str, Any]]) -> None:
+    trades_file = _ensure_file(user_id)
+    with trades_file.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=FIELDNAMES)
         writer.writeheader()
         writer.writerows(rows)
 
 
 def open_trade(
+    user_id: str,
     ticker: str,
     direction: str,
     quantity: float = 1,
@@ -103,14 +114,14 @@ def open_trade(
         "reason": reason,
         "confidence": confidence if confidence is not None else "",
     }
-    rows = _read_all()
+    rows = _read_all(user_id)
     rows.append(row)
-    _write_all(rows)
+    _write_all(user_id, rows)
     return row
 
 
-def close_trade(trade_id: str) -> Dict[str, Any]:
-    rows = _read_all()
+def close_trade(user_id: str, trade_id: str) -> Dict[str, Any]:
+    rows = _read_all(user_id)
     target = next((row for row in rows if row.get("id") == trade_id), None)
     if target is None:
         raise ValueError("Paper trade not found.")
@@ -127,16 +138,16 @@ def close_trade(trade_id: str) -> Dict[str, Any]:
     target["pnl"] = round(pnl, 2)
     target["status"] = "Closed"
     target["closed_at"] = datetime.now(timezone.utc).isoformat()
-    _write_all(rows)
+    _write_all(user_id, rows)
     return target
 
 
-def list_trades() -> List[Dict[str, Any]]:
-    return list(reversed(_read_all()))
+def list_trades(user_id: str) -> List[Dict[str, Any]]:
+    return list(reversed(_read_all(user_id)))
 
 
-def get_summary() -> Dict[str, Any]:
-    rows = _read_all()
+def get_summary(user_id: str) -> Dict[str, Any]:
+    rows = _read_all(user_id)
     today = datetime.now(timezone.utc).date().isoformat()
     entries_today = sum(1 for row in rows if str(row.get("opened_at", "")).startswith(today))
     closed = [row for row in rows if row.get("status") == "Closed" and row.get("pnl") not in (None, "")]

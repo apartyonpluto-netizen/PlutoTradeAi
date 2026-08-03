@@ -2,15 +2,34 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Sequence
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-DATA_DIR = BASE_DIR / "data"
-ALERTS_FILE = DATA_DIR / "alerts.json"
-DISMISSED_FILE = DATA_DIR / "dismissed_alerts.json"
-READ_FILE = DATA_DIR / "read_alerts.json"
+DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
+USER_DATA_ROOT = DATA_DIR / "users"
+
+
+def _user_dir(user_id: str) -> Path:
+    if not user_id:
+        raise ValueError("user_id is required.")
+    path = USER_DATA_ROOT / user_id
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _alerts_file(user_id: str) -> Path:
+    return _user_dir(user_id) / "alerts.json"
+
+
+def _dismissed_file(user_id: str) -> Path:
+    return _user_dir(user_id) / "dismissed_alerts.json"
+
+
+def _read_file(user_id: str) -> Path:
+    return _user_dir(user_id) / "read_alerts.json"
 
 
 def _now_iso() -> str:
@@ -22,18 +41,9 @@ def _build_alert_id(alert_type: str, ticker: str, message: str) -> str:
     return f"{alert_type}-{ticker or 'global'}-{digest}"
 
 
-def _ensure_files() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if not ALERTS_FILE.exists():
-        ALERTS_FILE.write_text("[]", encoding="utf-8")
-    if not DISMISSED_FILE.exists():
-        DISMISSED_FILE.write_text("[]", encoding="utf-8")
-    if not READ_FILE.exists():
-        READ_FILE.write_text("[]", encoding="utf-8")
-
-
 def _load_json(path: Path) -> List[Dict[str, str]]:
-    _ensure_files()
+    if not path.exists():
+        path.write_text("[]", encoding="utf-8")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(data, list):
@@ -44,15 +54,14 @@ def _load_json(path: Path) -> List[Dict[str, str]]:
 
 
 def _save_json(path: Path, payload: List[Dict[str, str]]) -> None:
-    _ensure_files()
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def load_manual_alerts() -> List[Dict[str, str]]:
-    return _load_json(ALERTS_FILE)
+def load_manual_alerts(user_id: str) -> List[Dict[str, str]]:
+    return _load_json(_alerts_file(user_id))
 
 
-def add_manual_alert(payload: Dict[str, str]) -> Dict[str, str]:
+def add_manual_alert(user_id: str, payload: Dict[str, str]) -> Dict[str, str]:
     alert_type = (payload.get("type", "manual") or "manual").strip().lower()
     ticker = (payload.get("ticker", "") or "").strip().upper()
     message = (payload.get("message", "") or "").strip()
@@ -68,28 +77,30 @@ def add_manual_alert(payload: Dict[str, str]) -> Dict[str, str]:
         "created_at": _now_iso(),
     }
 
-    alerts = load_manual_alerts()
+    alerts = load_manual_alerts(user_id)
     if not any(existing["id"] == alert["id"] for existing in alerts):
         alerts.insert(0, alert)
-        _save_json(ALERTS_FILE, alerts)
+        _save_json(_alerts_file(user_id), alerts)
     return alert
 
 
-def dismiss_alert(alert_id: str) -> None:
+def dismiss_alert(user_id: str, alert_id: str) -> None:
     if not alert_id:
         raise ValueError("Alert ID is required.")
-    dismissed = _load_json(DISMISSED_FILE)
+    dismissed_file = _dismissed_file(user_id)
+    dismissed = _load_json(dismissed_file)
     if not any(item.get("id") == alert_id for item in dismissed):
         dismissed.append({"id": alert_id, "dismissed_at": _now_iso()})
-        _save_json(DISMISSED_FILE, dismissed)
+        _save_json(dismissed_file, dismissed)
 
 
-def dismiss_alerts(alert_ids: Sequence[str]) -> int:
+def dismiss_alerts(user_id: str, alert_ids: Sequence[str]) -> int:
     valid_ids = [alert_id for alert_id in alert_ids if alert_id]
     if not valid_ids:
         raise ValueError("At least one alert ID is required.")
 
-    dismissed = _load_json(DISMISSED_FILE)
+    dismissed_file = _dismissed_file(user_id)
+    dismissed = _load_json(dismissed_file)
     existing_ids = {item.get("id", "") for item in dismissed}
     newly_added = 0
     for alert_id in valid_ids:
@@ -99,16 +110,16 @@ def dismiss_alerts(alert_ids: Sequence[str]) -> int:
         existing_ids.add(alert_id)
         newly_added += 1
     if newly_added:
-        _save_json(DISMISSED_FILE, dismissed)
+        _save_json(dismissed_file, dismissed)
     return newly_added
 
 
-def _dismissed_ids() -> set[str]:
-    return {item.get("id", "") for item in _load_json(DISMISSED_FILE)}
+def _dismissed_ids(user_id: str) -> set[str]:
+    return {item.get("id", "") for item in _load_json(_dismissed_file(user_id))}
 
 
-def _read_ids() -> set[str]:
-    return {item.get("id", "") for item in _load_json(READ_FILE)}
+def _read_ids(user_id: str) -> set[str]:
+    return {item.get("id", "") for item in _load_json(_read_file(user_id))}
 
 
 def _category_for_type(alert_type: str) -> str:
@@ -285,10 +296,10 @@ def build_system_alerts(
     return alerts
 
 
-def get_alerts_snapshot(system_alerts: Sequence[Dict[str, str]]) -> List[Dict[str, str]]:
-    dismissed = _dismissed_ids()
-    read_ids = _read_ids()
-    manual_alerts = [item for item in load_manual_alerts() if item.get("id") not in dismissed]
+def get_alerts_snapshot(user_id: str, system_alerts: Sequence[Dict[str, str]]) -> List[Dict[str, str]]:
+    dismissed = _dismissed_ids(user_id)
+    read_ids = _read_ids(user_id)
+    manual_alerts = [item for item in load_manual_alerts(user_id) if item.get("id") not in dismissed]
     deduped_system = []
     seen = set()
     for item in system_alerts:
@@ -312,25 +323,27 @@ def get_alerts_snapshot(system_alerts: Sequence[Dict[str, str]]) -> List[Dict[st
     return normalized
 
 
-def mark_alert_read(alert_id: str) -> None:
+def mark_alert_read(user_id: str, alert_id: str) -> None:
     if not alert_id:
         raise ValueError("Alert ID is required.")
-    read_items = _load_json(READ_FILE)
+    read_file = _read_file(user_id)
+    read_items = _load_json(read_file)
     if any(item.get("id") == alert_id for item in read_items):
         return
     read_items.append({"id": alert_id, "read_at": _now_iso()})
-    _save_json(READ_FILE, read_items)
+    _save_json(read_file, read_items)
 
 
-def mark_all_read(alerts: Sequence[Dict[str, str]]) -> None:
-    existing = _read_ids()
-    rows = _load_json(READ_FILE)
+def mark_all_read(user_id: str, alerts: Sequence[Dict[str, str]]) -> None:
+    existing = _read_ids(user_id)
+    read_file = _read_file(user_id)
+    rows = _load_json(read_file)
     for alert in alerts:
         alert_id = alert.get("id", "")
         if not alert_id or alert_id in existing:
             continue
         rows.append({"id": alert_id, "read_at": _now_iso()})
-    _save_json(READ_FILE, rows)
+    _save_json(read_file, rows)
 
 
 def unread_count(alerts: Sequence[Dict[str, str]]) -> int:

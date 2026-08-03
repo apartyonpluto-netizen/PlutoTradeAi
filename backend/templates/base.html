@@ -106,6 +106,18 @@
                     <span class="sparkline arc-line"></span>
                 </div>
             </div>
+
+            {% if current_user %}
+            <div class="sidebar-user">
+                <div class="sidebar-user-info">
+                    <div class="topbar-avatar" aria-hidden="true"></div>
+                    <span class="sidebar-username">{{ current_user.username }}</span>
+                </div>
+                <form method="POST" action="/logout" class="sidebar-logout-form">
+                    <button type="submit" class="sidebar-logout-button">Sign Out</button>
+                </form>
+            </div>
+            {% endif %}
         </div>
     </aside>
 
@@ -132,7 +144,7 @@
             <button class="alert-button" id="alertDrawerToggle" type="button">
                 <span class="alert-button-label">Notifications</span> <b id="alertCount">{{ unread_alert_count }}</b>
             </button>
-            <div class="topbar-avatar" aria-hidden="true"></div>
+            <div class="topbar-avatar" aria-hidden="true" title="{{ current_user.username if current_user else '' }}"></div>
         </header>
 
         {% block content %}{% endblock %}

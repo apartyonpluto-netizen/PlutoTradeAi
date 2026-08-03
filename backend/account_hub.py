@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import os
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,10 +10,16 @@ from typing import Any, Dict, List, Tuple
 from urllib.parse import parse_qs, urlparse
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-DATA_DIR = BASE_DIR / "data"
-ACCOUNTS_FILE = DATA_DIR / "accounts.json"
+DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
+USER_DATA_ROOT = DATA_DIR / "users"
 
 STATUS_NOT_CONNECTED = "Not Connected"
+
+
+def _accounts_file(user_id: str) -> Path:
+    if not user_id:
+        raise ValueError("user_id is required.")
+    return USER_DATA_ROOT / user_id / "accounts.json"
 
 
 def _now_iso() -> str:
@@ -100,23 +107,24 @@ def _coerce_account(raw: Dict[str, Any]) -> Dict[str, Any]:
     return account
 
 
-def _ensure_accounts_file() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if ACCOUNTS_FILE.exists():
-        return
-    ACCOUNTS_FILE.write_text(json.dumps(_default_accounts(), indent=2), encoding="utf-8")
+def _ensure_accounts_file(user_id: str) -> Path:
+    accounts_file = _accounts_file(user_id)
+    accounts_file.parent.mkdir(parents=True, exist_ok=True)
+    if not accounts_file.exists():
+        accounts_file.write_text(json.dumps(_default_accounts(), indent=2), encoding="utf-8")
+    return accounts_file
 
 
-def _load_accounts() -> List[Dict[str, Any]]:
-    _ensure_accounts_file()
+def _load_accounts(user_id: str) -> List[Dict[str, Any]]:
+    accounts_file = _ensure_accounts_file(user_id)
     try:
-        payload = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
+        payload = json.loads(accounts_file.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         payload = _default_accounts()
-        _save_accounts(payload)
+        _save_accounts(user_id, payload)
     if not isinstance(payload, list):
         payload = _default_accounts()
-        _save_accounts(payload)
+        _save_accounts(user_id, payload)
     accounts = []
     for row in payload:
         if not isinstance(row, dict):
@@ -125,15 +133,15 @@ def _load_accounts() -> List[Dict[str, Any]]:
             accounts.append(_coerce_account(row))
         except ValueError:
             continue
-    return _hydrate_missing_accounts(accounts)
+    return _hydrate_missing_accounts(user_id, accounts)
 
 
-def _save_accounts(accounts: List[Dict[str, Any]]) -> None:
-    _ensure_accounts_file()
-    ACCOUNTS_FILE.write_text(json.dumps(accounts, indent=2), encoding="utf-8")
+def _save_accounts(user_id: str, accounts: List[Dict[str, Any]]) -> None:
+    accounts_file = _ensure_accounts_file(user_id)
+    accounts_file.write_text(json.dumps(accounts, indent=2), encoding="utf-8")
 
 
-def _hydrate_missing_accounts(accounts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _hydrate_missing_accounts(user_id: str, accounts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     indexed = {row["platform"]: row for row in accounts if row.get("platform")}
     for default_row in _default_accounts():
         platform = default_row["platform"]
@@ -143,7 +151,7 @@ def _hydrate_missing_accounts(accounts: List[Dict[str, Any]]) -> List[Dict[str, 
         merged = {**default_row, **indexed[platform]}
         indexed[platform] = _coerce_account(merged)
     ordered = [indexed["etrade"], indexed["webull"], indexed["tradingview"]]
-    _save_accounts(ordered)
+    _save_accounts(user_id, ordered)
     return ordered
 
 
@@ -164,12 +172,12 @@ def _extract_token(webhook_url: str) -> str:
     return (query.get("token") or [""])[0]
 
 
-def verify_tradingview_token(token: str) -> bool:
-    """Constant-time check of an incoming webhook token against the stored one.
+def verify_tradingview_token(user_id: str, token: str) -> bool:
+    """Constant-time check of an incoming webhook token against this user's stored one.
 
     Fails closed: no stored token or no provided token both reject.
     """
-    accounts = _load_accounts()
+    accounts = _load_accounts(user_id)
     account, _ = _find_account(accounts, "tradingview")
     expected = _extract_token(account.get("webhook_url", ""))
     if not expected or not token:
@@ -177,13 +185,13 @@ def verify_tradingview_token(token: str) -> bool:
     return hmac.compare_digest(expected, token)
 
 
-def get_accounts() -> List[Dict[str, Any]]:
-    return _load_accounts()
+def get_accounts(user_id: str) -> List[Dict[str, Any]]:
+    return _load_accounts(user_id)
 
 
-def connect_account(platform: str) -> Dict[str, Any]:
+def connect_account(user_id: str, platform: str) -> Dict[str, Any]:
     normalized_platform = _normalize_platform(platform)
-    accounts = _load_accounts()
+    accounts = _load_accounts(user_id)
     account, index = _find_account(accounts, normalized_platform)
 
     if normalized_platform == "etrade":
@@ -204,13 +212,13 @@ def connect_account(platform: str) -> Dict[str, Any]:
 
     account["last_sync"] = _now_iso()
     accounts[index] = account
-    _save_accounts(accounts)
+    _save_accounts(user_id, accounts)
     return account
 
 
-def disconnect_account(platform: str) -> Dict[str, Any]:
+def disconnect_account(user_id: str, platform: str) -> Dict[str, Any]:
     normalized_platform = _normalize_platform(platform)
-    accounts = _load_accounts()
+    accounts = _load_accounts(user_id)
     account, index = _find_account(accounts, normalized_platform)
     account["status"] = STATUS_NOT_CONNECTED
     account["trading_enabled"] = False
@@ -225,13 +233,13 @@ def disconnect_account(platform: str) -> Dict[str, Any]:
         account["last_signal_received"] = ""
 
     accounts[index] = account
-    _save_accounts(accounts)
+    _save_accounts(user_id, accounts)
     return account
 
 
-def test_account(platform: str) -> Dict[str, Any]:
+def test_account(user_id: str, platform: str) -> Dict[str, Any]:
     normalized_platform = _normalize_platform(platform)
-    accounts = _load_accounts()
+    accounts = _load_accounts(user_id)
     account, index = _find_account(accounts, normalized_platform)
 
     if account.get("status") == STATUS_NOT_CONNECTED:
@@ -244,16 +252,16 @@ def test_account(platform: str) -> Dict[str, Any]:
         account["alert_status"] = "Webhook Ready"
 
     accounts[index] = account
-    _save_accounts(accounts)
+    _save_accounts(user_id, accounts)
     return account
 
 
-def update_trading_enabled(platform: str, trading_enabled: bool) -> Dict[str, Any]:
+def update_trading_enabled(user_id: str, platform: str, trading_enabled: bool) -> Dict[str, Any]:
     normalized_platform = _normalize_platform(platform)
     if normalized_platform != "etrade":
         raise ValueError("Trading enabled toggle is only available for E*TRADE.")
 
-    accounts = _load_accounts()
+    accounts = _load_accounts(user_id)
     account, index = _find_account(accounts, normalized_platform)
     if account.get("status") != "Connected":
         account["trading_enabled"] = False
@@ -263,16 +271,16 @@ def update_trading_enabled(platform: str, trading_enabled: bool) -> Dict[str, An
     account["trading_enabled"] = bool(trading_enabled)
     account["last_sync"] = _now_iso()
     accounts[index] = account
-    _save_accounts(accounts)
+    _save_accounts(user_id, accounts)
     return account
 
 
-def ensure_tradingview_webhook(platform: str) -> Dict[str, Any]:
+def ensure_tradingview_webhook(user_id: str, platform: str) -> Dict[str, Any]:
     normalized_platform = _normalize_platform(platform)
     if normalized_platform != "tradingview":
         raise ValueError("Webhook URL can only be generated for TradingView.")
 
-    accounts = _load_accounts()
+    accounts = _load_accounts(user_id)
     account, index = _find_account(accounts, normalized_platform)
     if not account.get("webhook_url"):
         account["webhook_url"] = _generate_webhook_url()
@@ -280,12 +288,12 @@ def ensure_tradingview_webhook(platform: str) -> Dict[str, Any]:
     account["alert_status"] = "Listening"
     account["last_sync"] = _now_iso()
     accounts[index] = account
-    _save_accounts(accounts)
+    _save_accounts(user_id, accounts)
     return account
 
 
-def record_tradingview_signal(payload: Dict[str, Any]) -> Dict[str, Any]:
-    accounts = _load_accounts()
+def record_tradingview_signal(user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    accounts = _load_accounts(user_id)
     account, index = _find_account(accounts, "tradingview")
     account["status"] = account.get("status", "Webhook Ready")
     if account["status"] == STATUS_NOT_CONNECTED:
@@ -296,7 +304,7 @@ def record_tradingview_signal(payload: Dict[str, Any]) -> Dict[str, Any]:
     account["last_signal_received"] = _now_iso()
     account["last_sync"] = _now_iso()
     accounts[index] = account
-    _save_accounts(accounts)
+    _save_accounts(user_id, accounts)
     return {
         "ok": True,
         "signal_received": True,

@@ -14,7 +14,8 @@ except ImportError:
         return False
 
 BASE_DIR = Path(__file__).resolve().parents[2]
-TRUSTED_ACCOUNTS_FILE = BASE_DIR / "data" / "trusted_x_accounts.csv"
+DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
+TRUSTED_ACCOUNTS_FILE = DATA_DIR / "trusted_x_accounts.csv"
 X_RECENT_SEARCH_URL = "https://api.x.com/2/tweets/search/recent"
 
 POSITIVE_WORDS = {

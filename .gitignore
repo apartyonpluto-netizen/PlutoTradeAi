@@ -14,5 +14,11 @@ data/tradingview_alerts.json
 data/dismissed_alerts.json
 data/read_alerts.json
 data/paper_trades.csv
+data/watchlist.csv
+
+# Multi-user account data - per-user credentials, sessions, watchlists, trades
+data/.flask_secret_key
+data/users.json
+data/users/
 
 .DS_Store

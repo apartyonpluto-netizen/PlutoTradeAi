@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict
 
 BASE_DIR = Path(__file__).resolve().parents[2]
-SETTINGS_FILE = BASE_DIR / "data" / "autonomy_settings.json"
+DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
+USER_DATA_ROOT = DATA_DIR / "users"
 MODES = ("OFF", "SCOUT", "ANALYST", "PAPER", "APPROVAL", "AUTONOMOUS")
+
+
+def _settings_file(user_id: str) -> Path:
+    if not user_id:
+        raise ValueError("user_id is required.")
+    path = USER_DATA_ROOT / user_id
+    path.mkdir(parents=True, exist_ok=True)
+    return path / "autonomy_settings.json"
 
 
 def _now_iso() -> str:
@@ -30,26 +40,21 @@ def _default_settings() -> Dict[str, object]:
     }
 
 
-def _ensure_file() -> None:
-    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if SETTINGS_FILE.exists():
-        return
-    SETTINGS_FILE.write_text(json.dumps(_default_settings(), indent=2), encoding="utf-8")
-
-
-def _load() -> Dict[str, object]:
-    _ensure_file()
+def _load(user_id: str) -> Dict[str, object]:
+    settings_file = _settings_file(user_id)
+    if not settings_file.exists():
+        settings_file.write_text(json.dumps(_default_settings(), indent=2), encoding="utf-8")
     try:
-        payload = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        payload = json.loads(settings_file.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         payload = _default_settings()
     merged = {**_default_settings(), **payload}
-    SETTINGS_FILE.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+    settings_file.write_text(json.dumps(merged, indent=2), encoding="utf-8")
     return merged
 
 
-def _save(payload: Dict[str, object]) -> Dict[str, object]:
-    SETTINGS_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+def _save(user_id: str, payload: Dict[str, object]) -> Dict[str, object]:
+    _settings_file(user_id).write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return payload
 
 
@@ -66,20 +71,20 @@ def _derived(payload: Dict[str, object]) -> Dict[str, object]:
     }
 
 
-def get_autonomy_status() -> Dict[str, object]:
-    return _derived(_load())
+def get_autonomy_status(user_id: str) -> Dict[str, object]:
+    return _derived(_load(user_id))
 
 
-def set_mode(mode: str, reason: str = "") -> Dict[str, object]:
+def set_mode(user_id: str, mode: str, reason: str = "") -> Dict[str, object]:
     normalized_mode = str(mode or "").strip().upper()
     if normalized_mode not in MODES:
         raise ValueError("Unsupported autonomy mode.")
 
-    settings = _load()
+    settings = _load(user_id)
     if normalized_mode == "AUTONOMOUS":
         settings["mode_change_reason"] = "Locked until future release"
         settings["last_mode_change"] = _now_iso()
-        return _derived(_save(settings))
+        return _derived(_save(user_id, settings))
 
     settings["current_mode"] = normalized_mode
     settings["last_mode_change"] = _now_iso()
@@ -90,24 +95,23 @@ def set_mode(mode: str, reason: str = "") -> Dict[str, object]:
     if settings.get("emergency_stop_enabled"):
         settings["paper_trading_enabled"] = False
         settings["approval_required"] = False
-    return _derived(_save(settings))
+    return _derived(_save(user_id, settings))
 
 
-def emergency_stop(reason: str = "") -> Dict[str, object]:
-    settings = _load()
+def emergency_stop(user_id: str, reason: str = "") -> Dict[str, object]:
+    settings = _load(user_id)
     settings["emergency_stop_enabled"] = True
     settings["live_trading_enabled"] = False
     settings["paper_trading_enabled"] = False
     settings["approval_required"] = False
     settings["last_mode_change"] = _now_iso()
     settings["mode_change_reason"] = reason or "Emergency stop enabled"
-    return _derived(_save(settings))
+    return _derived(_save(user_id, settings))
 
 
-def reset_emergency_stop(reason: str = "") -> Dict[str, object]:
-    settings = _load()
+def reset_emergency_stop(user_id: str, reason: str = "") -> Dict[str, object]:
+    settings = _load(user_id)
     settings["emergency_stop_enabled"] = False
     settings["last_mode_change"] = _now_iso()
     settings["mode_change_reason"] = reason or "Emergency stop reset"
-    return _derived(_save(settings))
-
+    return _derived(_save(user_id, settings))

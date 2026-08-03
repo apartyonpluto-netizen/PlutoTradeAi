@@ -1,10 +1,18 @@
 import csv
+import os
 from pathlib import Path
 from typing import Dict, List, Sequence
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-WATCHLIST_FILE = BASE_DIR / "data" / "watchlist.csv"
+DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
+USER_DATA_ROOT = DATA_DIR / "users"
 WATCHLIST_HEADERS = ["ticker", "category", "status", "ai_score", "notes"]
+
+
+def _watchlist_file(user_id: str) -> Path:
+    if not user_id:
+        raise ValueError("user_id is required.")
+    return USER_DATA_ROOT / user_id / "watchlist.csv"
 
 
 def _normalize_ticker(ticker: str) -> str:
@@ -27,37 +35,39 @@ def _normalize_row(row: Dict[str, str]) -> Dict[str, str]:
     }
 
 
-def _ensure_watchlist_file() -> None:
-    WATCHLIST_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if WATCHLIST_FILE.exists():
-        return
+def _ensure_watchlist_file(user_id: str) -> Path:
+    watchlist_file = _watchlist_file(user_id)
+    watchlist_file.parent.mkdir(parents=True, exist_ok=True)
+    if watchlist_file.exists():
+        return watchlist_file
 
-    with WATCHLIST_FILE.open("w", newline="", encoding="utf-8") as file_handle:
+    with watchlist_file.open("w", newline="", encoding="utf-8") as file_handle:
         writer = csv.DictWriter(file_handle, fieldnames=WATCHLIST_HEADERS)
         writer.writeheader()
+    return watchlist_file
 
 
-def _write_watchlist(rows: List[Dict[str, str]]) -> None:
-    _ensure_watchlist_file()
-    with WATCHLIST_FILE.open("w", newline="", encoding="utf-8") as file_handle:
+def _write_watchlist(user_id: str, rows: List[Dict[str, str]]) -> None:
+    watchlist_file = _ensure_watchlist_file(user_id)
+    with watchlist_file.open("w", newline="", encoding="utf-8") as file_handle:
         writer = csv.DictWriter(file_handle, fieldnames=WATCHLIST_HEADERS)
         writer.writeheader()
         writer.writerows(rows)
 
 
-def get_watchlist() -> List[Dict[str, str]]:
-    _ensure_watchlist_file()
-    with WATCHLIST_FILE.open(newline="", encoding="utf-8") as file_handle:
+def get_watchlist(user_id: str) -> List[Dict[str, str]]:
+    watchlist_file = _ensure_watchlist_file(user_id)
+    with watchlist_file.open(newline="", encoding="utf-8") as file_handle:
         rows = [_normalize_row(row) for row in csv.DictReader(file_handle)]
     return [row for row in rows if row["ticker"]]
 
 
-def get_watchlist_tickers() -> List[str]:
-    return [item["ticker"] for item in get_watchlist()]
+def get_watchlist_tickers(user_id: str) -> List[str]:
+    return [item["ticker"] for item in get_watchlist(user_id)]
 
 
-def add_stock(payload: Dict[str, str]) -> Dict[str, str]:
-    rows = get_watchlist()
+def add_stock(user_id: str, payload: Dict[str, str]) -> Dict[str, str]:
+    rows = get_watchlist(user_id)
     normalized = _normalize_row(payload)
     if not normalized["ticker"]:
         raise ValueError("Ticker is required.")
@@ -66,16 +76,16 @@ def add_stock(payload: Dict[str, str]) -> Dict[str, str]:
         raise ValueError(f"{normalized['ticker']} is already in the watchlist.")
 
     rows.append(normalized)
-    _write_watchlist(rows)
+    _write_watchlist(user_id, rows)
     return normalized
 
 
-def update_stock(ticker: str, payload: Dict[str, str]) -> Dict[str, str]:
+def update_stock(user_id: str, ticker: str, payload: Dict[str, str]) -> Dict[str, str]:
     normalized_ticker = _normalize_ticker(ticker)
     if not normalized_ticker:
         raise ValueError("Ticker is required.")
 
-    rows = get_watchlist()
+    rows = get_watchlist(user_id)
     updated_row = None
     for index, row in enumerate(rows):
         if row["ticker"] != normalized_ticker:
@@ -94,21 +104,21 @@ def update_stock(ticker: str, payload: Dict[str, str]) -> Dict[str, str]:
     if not updated_row:
         raise ValueError(f"{normalized_ticker} was not found in the watchlist.")
 
-    _write_watchlist(rows)
+    _write_watchlist(user_id, rows)
     return updated_row
 
 
-def delete_stock(ticker: str) -> None:
+def delete_stock(user_id: str, ticker: str) -> None:
     normalized_ticker = _normalize_ticker(ticker)
     if not normalized_ticker:
         raise ValueError("Ticker is required.")
 
-    rows = get_watchlist()
+    rows = get_watchlist(user_id)
     remaining = [row for row in rows if row["ticker"] != normalized_ticker]
     if len(remaining) == len(rows):
         raise ValueError(f"{normalized_ticker} was not found in the watchlist.")
 
-    _write_watchlist(remaining)
+    _write_watchlist(user_id, remaining)
 
 
 def search_watchlist(
@@ -168,18 +178,6 @@ def sort_watchlist(rows: Sequence[Dict[str, str]], sort_by: str = "ticker", dire
     if sort_key in {"category", "status", "notes"}:
         return sorted(rows, key=lambda item: str(item.get(sort_key, "")).lower(), reverse=reverse)
     return sorted(rows, key=lambda item: _normalize_ticker(str(item.get("ticker", ""))), reverse=reverse)
-
-
-def add_watchlist_ticker(payload: Dict[str, str]) -> Dict[str, str]:
-    return add_stock(payload)
-
-
-def update_watchlist_ticker(ticker: str, payload: Dict[str, str]) -> Dict[str, str]:
-    return update_stock(ticker=ticker, payload=payload)
-
-
-def delete_watchlist_ticker(ticker: str) -> None:
-    delete_stock(ticker=ticker)
 
 
 def build_watchlist_suggestions(
