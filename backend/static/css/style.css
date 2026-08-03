@@ -1299,6 +1299,35 @@ select:focus {
     color: var(--text-primary);
 }
 
+.webhook-template-block {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid rgba(163, 121, 209, 0.24);
+}
+
+.webhook-template-block code {
+    background: rgba(163, 121, 209, 0.2);
+    border-radius: 6px;
+    padding: 1px 5px;
+    color: var(--text-primary);
+}
+
+.webhook-template-code {
+    display: block;
+    margin: 8px 0;
+    padding: 12px 14px;
+    background: rgba(8, 5, 18, 0.7);
+    border: 1px solid rgba(163, 121, 209, 0.3);
+    border-radius: var(--radius-md);
+    color: #d9c8ff;
+    font-family: var(--font-mono, monospace);
+    font-size: 0.78rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-x: auto;
+}
+
 .toast-container {
     position: fixed;
     right: 20px;
@@ -1666,31 +1695,63 @@ select:focus {
     place-items: center;
     width: 40px;
     height: 40px;
-    border-radius: 50%;
     flex: 0 0 auto;
-    background:
-        radial-gradient(circle at 30% 26%, rgba(255, 255, 255, 0.5), transparent 30%),
-        radial-gradient(circle at 62% 58%, rgba(210, 165, 130, 0.55), transparent 45%),
-        radial-gradient(circle at 40% 55%, #cbb8d8, #7d6f97 55%, #4a4160 85%);
-    border: 1px solid rgba(200, 170, 220, 0.4);
-    box-shadow: 0 0 12px rgba(150, 120, 190, 0.4);
-    transition: box-shadow 0.2s ease, transform 0.2s ease;
+    transition: transform 0.2s ease;
 }
 
-.pluto-tab:hover,
-.pluto-tab.active {
-    box-shadow: 0 0 18px rgba(190, 150, 230, 0.7);
+.pluto-tab:hover {
     transform: translateY(-1px);
+}
+
+.pluto-tab-ring {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 54px;
+    height: 18px;
+    border: 1px solid rgba(216, 190, 235, 0.4);
+    border-radius: 50%;
+    transform: translate(-50%, -50%) rotate(-20deg);
+    pointer-events: none;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.pluto-tab:hover .pluto-tab-ring,
+.pluto-tab.active .pluto-tab-ring {
+    border-color: rgba(226, 200, 245, 0.75);
+    box-shadow: 0 0 8px rgba(190, 150, 230, 0.45);
+}
+
+.pluto-tab-body {
+    position: relative;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    background:
+        radial-gradient(circle at 68% 66%, rgba(70, 45, 40, 0.55), transparent 40%),
+        radial-gradient(circle at 38% 62%, rgba(60, 40, 60, 0.4), transparent 34%),
+        radial-gradient(circle at 32% 26%, #f9ecd9 0%, #e3bd93 26%, #c78a8f 52%, #6c4a68 76%, #2a1c30 100%);
+    box-shadow:
+        inset -7px -6px 9px rgba(10, 4, 14, 0.55),
+        0 0 10px rgba(180, 140, 210, 0.35);
+    transition: box-shadow 0.2s ease;
+}
+
+.pluto-tab:hover .pluto-tab-body,
+.pluto-tab.active .pluto-tab-body {
+    box-shadow:
+        inset -7px -6px 9px rgba(10, 4, 14, 0.55),
+        0 0 16px rgba(200, 160, 235, 0.6);
 }
 
 .pluto-tab-moon {
     position: absolute;
-    top: -3px;
-    right: -4px;
-    width: 8px;
-    height: 8px;
+    top: 2px;
+    right: -2px;
+    width: 7px;
+    height: 7px;
     border-radius: 50%;
-    background: radial-gradient(circle at 35% 30%, #f2e9ff, #a293b8 70%);
+    background: radial-gradient(circle at 35% 30%, #f5eeff, #9c8db2 75%);
     box-shadow: 0 0 5px rgba(200, 180, 230, 0.7);
 }
 
