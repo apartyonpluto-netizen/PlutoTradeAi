@@ -172,7 +172,17 @@ def _resolve_secret_key() -> str:
 
 app.secret_key = _resolve_secret_key()
 
-CORE_SCAN_UNIVERSE = ["TSLA", "NVDA", "AMD", "PLTR", "AAPL", "META", "MSFT", "SPY", "QQQ"]
+# Curated, liquid Nasdaq-heavy scan universe (mostly Nasdaq-100 constituents
+# plus SPY/QQQ). scan_market() fetches this in two batched yf.download() calls
+# regardless of list size, so this can grow without a per-ticker request cost -
+# see market_scanner.py.
+CORE_SCAN_UNIVERSE = [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "AVGO", "COST", "NFLX",
+    "AMD", "PEP", "ADBE", "CSCO", "TMUS", "INTC", "QCOM", "TXN", "AMAT", "INTU",
+    "ISRG", "BKNG", "VRTX", "REGN", "GILD", "MU", "LRCX", "KLAC", "PANW", "ADI",
+    "MDLZ", "PYPL", "SNPS", "CDNS", "CRWD", "MRVL", "ABNB", "DXCM", "ORLY", "MNST",
+    "CTAS", "PDD", "MELI", "WDAY", "ROP", "PLTR", "SPY", "QQQ",
+]
 MARKET_CACHE: Dict[str, object] = {"rows": [], "errors": [], "last_updated": "", "expires_at": None}
 ANALYTICS_CACHE: Dict[str, object] = {
     "ticker_key": (),
@@ -548,9 +558,15 @@ def get_options_data_for_ticker(ticker: str, force_refresh: bool = False) -> Dic
         return cached_item["payload"]
 
     payload = build_options_research(normalized_ticker)
+    # A "data unavailable" result usually means Yahoo's flaky options endpoint
+    # rate-limited this request, not that the ticker genuinely has no chain -
+    # cache it briefly so a reload can retry instead of being stuck showing a
+    # stale failure for the full TTL.
+    is_unavailable = payload.get("confidence") == 0 and "unavailable" in str(payload.get("reason", "")).lower()
+    ttl = 15 if is_unavailable else OPTIONS_CACHE_SECONDS
     OPTIONS_CACHE[normalized_ticker] = {
         "payload": payload,
-        "expires_at": _now_utc() + timedelta(seconds=OPTIONS_CACHE_SECONDS),
+        "expires_at": _now_utc() + timedelta(seconds=ttl),
     }
     return payload
 
@@ -703,7 +719,6 @@ def _compute_status(scanner_rows: List[Dict[str, object]], scanner_errors: List[
         "news_impact": "Moderate",
         "paper_connected": paper_connected,
         "live_trading_enabled": False,
-        "mission_progress": 75,
         "settings": settings,
         "latest_alerts": [],
         "api_status": "Operational",
@@ -838,7 +853,11 @@ def _build_page_context(
                 strategy_map[ticker] = strategy
                 chart_levels_map[ticker] = chart
 
-        with ThreadPoolExecutor(max_workers=len(intelligence_tickers)) as executor:
+        # Options data alone fires several Yahoo requests per ticker (expiration
+        # list + one option_chain() call per expiration). Running all tickers at
+        # full concurrency stacks those into a burst large enough to trip
+        # Yahoo's rate limiting, so this pool is capped well below the others.
+        with ThreadPoolExecutor(max_workers=min(3, len(intelligence_tickers))) as executor:
             options_map = dict(
                 zip(
                     intelligence_tickers,

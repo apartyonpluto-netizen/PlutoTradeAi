@@ -1258,10 +1258,22 @@ const bindNavGroups = () => {
   const toggle = document.getElementById("analysisNavToggle");
   const group = document.getElementById("analysisNavGroup");
   if (!toggle || !group) return;
-  toggle.addEventListener("click", () => {
-    const isOpen = group.classList.toggle("open");
+  // max-height (not grid-template-rows: 0fr/1fr) because this rendering
+  // engine won't animate that grid property even though the rule applies -
+  // the row silently stays collapsed. max-height is universally reliable.
+  const setOpen = (isOpen) => {
+    group.classList.toggle("open", isOpen);
     toggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
+    group.style.maxHeight = isOpen ? `${group.scrollHeight}px` : "0px";
+  };
+  toggle.addEventListener("click", () => {
+    setOpen(!group.classList.contains("open"));
   });
+  // Server pre-renders the "open" class when the current page is inside
+  // Analysis, but only JS sets the max-height that actually reveals it.
+  if (group.classList.contains("open")) {
+    setOpen(true);
+  }
 };
 
 onReady(() => {

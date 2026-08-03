@@ -62,13 +62,9 @@
                 <span class="warp-trail"></span>
             </div>
             <div class="hero-copy-wrap">
-                <p class="eyebrow">Current Destination</p>
-                <h2>Financial Freedom</h2>
+                <p class="eyebrow">System Status</p>
+                <h2>{{ status_summary.ai_status }}</h2>
                 <p class="hero-copy">Neural systems are synchronized. Real-time scanners, confidence engines, and risk protocols are active.</p>
-                <div class="mission-progress-wrap">
-                    <div class="progress"><div style="width: {{ status_summary.mission_progress }}%;"></div></div>
-                    <span>Distance: {{ status_summary.mission_progress }}%</span>
-                </div>
             </div>
             <div class="hero-radar" aria-hidden="true">
                 <span></span><span></span><span></span>

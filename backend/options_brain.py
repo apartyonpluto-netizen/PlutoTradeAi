@@ -33,6 +33,42 @@ def _fetch_option_chain_with_retry(ticker_client: "yf.Ticker", expiration_date: 
     return None
 
 
+def _fetch_option_expirations_with_retry(ticker_client: "yf.Ticker", attempts: int = 3) -> List[str]:
+    """The expiration-date list is a separate Yahoo call from option_chain() and,
+    unlike it, previously had no retry at all - one rate-limited blip here marked
+    every expiration for the ticker 'unavailable' at once, which is the actual
+    failure mode that made liquid tickers like AAPL intermittently show no
+    options data.
+    """
+    for attempt in range(attempts):
+        try:
+            dates = list(ticker_client.options)
+        except Exception:
+            dates = []
+        if dates:
+            return dates
+        if attempt < attempts - 1:
+            time.sleep(0.5 * (attempt + 1))
+    return []
+
+
+def _fetch_history_with_retry(ticker_client: "yf.Ticker", attempts: int = 3, **kwargs) -> pd.DataFrame:
+    last_error: Optional[Exception] = None
+    for attempt in range(attempts):
+        try:
+            history = ticker_client.history(**kwargs)
+        except Exception as error:  # noqa: BLE001 - deliberately broad, retried below
+            last_error = error
+            history = None
+        if history is not None and not history.empty:
+            return history
+        if attempt < attempts - 1:
+            time.sleep(0.5 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+    return pd.DataFrame()
+
+
 def _safe_float(value: object) -> Optional[float]:
     try:
         number = float(value)
@@ -218,7 +254,7 @@ def build_options_outlook(ticker: str) -> Dict[str, object]:
 
     ticker_client = yf.Ticker(symbol)
     try:
-        history = ticker_client.history(period="6mo", interval="1d", auto_adjust=False)
+        history = _fetch_history_with_retry(ticker_client, period="6mo", interval="1d", auto_adjust=False)
     except Exception as error:
         return _build_data_unavailable_response(symbol, f"Data unavailable ({error}).")
 
@@ -244,10 +280,7 @@ def build_options_outlook(ticker: str) -> Dict[str, object]:
     direction, confidence, reason = _build_direction_model(close_prices=close_prices, volume_series=volume_series)
     bias_contract_type = "Call" if direction == "CALL" else "Put" if direction == "PUT" else "Call"
 
-    try:
-        option_dates = list(ticker_client.options)
-    except Exception:
-        option_dates = []
+    option_dates = _fetch_option_expirations_with_retry(ticker_client)
 
     expiration_specs = [
         (

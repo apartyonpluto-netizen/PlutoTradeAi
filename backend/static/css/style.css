@@ -189,6 +189,7 @@ body {
     border: 1px solid var(--border);
     box-shadow: var(--shadow-2);
     backdrop-filter: blur(14px);
+    overflow-y: auto;
 }
 
 .brand {
@@ -243,6 +244,12 @@ body {
     max-height: 52vh;
     overflow-y: auto;
     padding-right: 4px;
+    /* Without this, overflow-y:auto makes the flexbox spec's default
+       min-height:auto resolve to 0 for this item, so .sidebar-user's
+       margin-top:auto can squeeze the entire nav to zero height in short
+       viewports - the sidebar itself scrolls instead (it has its own
+       overflow-y:auto in the mobile breakpoint), so nothing is lost. */
+    flex-shrink: 0;
 }
 
 .nav-menu a {
@@ -1713,21 +1720,15 @@ select:focus {
 }
 
 .nav-group {
-    display: grid;
-    grid-template-rows: 0fr;
+    max-height: 0;
     overflow: hidden;
-    transition: grid-template-rows 0.25s ease;
+    transition: max-height 0.25s ease;
     padding-left: 14px;
     border-left: 1px solid rgba(177, 110, 255, 0.18);
     margin-left: 20px;
 }
 
-.nav-group.open {
-    grid-template-rows: 1fr;
-}
-
 .nav-group-inner {
-    min-height: 0;
     overflow: hidden;
 }
 
