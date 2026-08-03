@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Sequence, Tuple
@@ -516,15 +517,19 @@ def _build_neural_snapshot(
     watchlist_rows: List[Dict[str, str]],
     news_rows: List[Dict[str, object]],
 ) -> Dict[str, object]:
-    option_inputs: List[Dict[str, object]] = []
-    for ticker in [row.get("ticker", "") for row in scanner_rows[:3]]:
-        normalized = str(ticker).strip().upper()
-        if not normalized:
-            continue
+    tickers = [str(row.get("ticker", "")).strip().upper() for row in scanner_rows[:3]]
+    tickers = [ticker for ticker in tickers if ticker]
+
+    def _fetch_options(ticker: str) -> Dict[str, object] | None:
         try:
-            option_inputs.append(get_options_data_for_ticker(normalized))
+            return get_options_data_for_ticker(ticker)
         except ValueError:
-            continue
+            return None
+
+    option_inputs: List[Dict[str, object]] = []
+    if tickers:
+        with ThreadPoolExecutor(max_workers=len(tickers)) as executor:
+            option_inputs = [payload for payload in executor.map(_fetch_options, tickers) if payload is not None]
     return build_neural_status(
         scanner_rows=scanner_rows,
         watchlist_rows=watchlist_rows,
@@ -639,18 +644,30 @@ def _build_page_context(
             pattern_rows = PATTERN_CACHE["rows"]
             pattern_errors = list(CANDLE_CACHE.get("errors", [])) + list(PATTERN_CACHE.get("errors", []))
         else:
+            def _fetch_candle_and_pattern(ticker: str) -> Tuple[object | None, object | None, List[str]]:
+                errors: List[str] = []
+                candle_row = None
+                pattern_row = None
+                try:
+                    candle_row = analyze_candles(ticker)
+                except Exception as error:
+                    errors.append(f"{ticker} candle: {error}")
+                try:
+                    pattern_row = analyze_patterns(ticker)
+                except Exception as error:
+                    errors.append(f"{ticker} pattern: {error}")
+                return candle_row, pattern_row, errors
+
             candle_errors = []
             candle_rows = []
             pattern_rows = []
-            for ticker in analysis_tickers:
-                try:
-                    candle_rows.append(analyze_candles(ticker))
-                except Exception as error:
-                    candle_errors.append(f"{ticker} candle: {error}")
-                try:
-                    pattern_rows.append(analyze_patterns(ticker))
-                except Exception as error:
-                    candle_errors.append(f"{ticker} pattern: {error}")
+            with ThreadPoolExecutor(max_workers=max(1, len(analysis_tickers))) as executor:
+                for candle_row, pattern_row, errors in executor.map(_fetch_candle_and_pattern, analysis_tickers):
+                    if candle_row is not None:
+                        candle_rows.append(candle_row)
+                    if pattern_row is not None:
+                        pattern_rows.append(pattern_row)
+                    candle_errors.extend(errors)
             CANDLE_CACHE.update(
                 {
                     "ticker_key": ticker_key,
@@ -676,17 +693,32 @@ def _build_page_context(
 
     intelligence_tickers = _resolve_analysis_tickers(watchlist_tickers, scanner_rows, limit=6)
     scanner_map = {str(row.get("ticker", "")).upper(): row for row in scanner_rows}
+
+    def _fetch_ticker_intelligence(ticker: str) -> Tuple[str, Dict[str, object], Dict[str, object], Dict[str, object]]:
+        extended_hours = build_extended_hours_intelligence(ticker)
+        strategy = get_strategy_data_for_ticker(ticker=ticker, force_refresh=force_refresh, extended_hours=extended_hours)
+        chart = get_chart_levels_for_ticker(ticker=ticker, force_refresh=force_refresh, extended_hours=extended_hours)
+        return ticker, extended_hours, strategy, chart
+
     extended_hours_map: Dict[str, Dict[str, object]] = {}
     strategy_map: Dict[str, Dict[str, object]] = {}
     chart_levels_map: Dict[str, Dict[str, object]] = {}
-    for ticker in intelligence_tickers:
-        extended_hours_map[ticker] = build_extended_hours_intelligence(ticker)
-        strategy_map[ticker] = get_strategy_data_for_ticker(
-            ticker=ticker, force_refresh=force_refresh, extended_hours=extended_hours_map[ticker]
-        )
-        chart_levels_map[ticker] = get_chart_levels_for_ticker(
-            ticker=ticker, force_refresh=force_refresh, extended_hours=extended_hours_map[ticker]
-        )
+    if intelligence_tickers:
+        with ThreadPoolExecutor(max_workers=len(intelligence_tickers)) as executor:
+            for ticker, extended_hours, strategy, chart in executor.map(_fetch_ticker_intelligence, intelligence_tickers):
+                extended_hours_map[ticker] = extended_hours
+                strategy_map[ticker] = strategy
+                chart_levels_map[ticker] = chart
+
+        with ThreadPoolExecutor(max_workers=len(intelligence_tickers)) as executor:
+            options_map = dict(
+                zip(
+                    intelligence_tickers,
+                    executor.map(lambda t: get_options_data_for_ticker(t, force_refresh=force_refresh), intelligence_tickers),
+                )
+            )
+    else:
+        options_map = {}
 
     upcoming_opportunities: List[Dict[str, object]] = []
     mission_queue: List[Dict[str, object]] = []
@@ -694,7 +726,7 @@ def _build_page_context(
         strategy = strategy_map.get(ticker, {})
         chart = chart_levels_map.get(ticker, {})
         extended_hours = extended_hours_map.get(ticker, {})
-        options_payload = get_options_data_for_ticker(ticker, force_refresh=force_refresh)
+        options_payload = options_map.get(ticker, {})
         scanner_row = scanner_map.get(ticker, {})
         if strategy.get("insufficient_data") or chart.get("insufficient_data"):
             continue
