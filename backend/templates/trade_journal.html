@@ -6,7 +6,7 @@
         <h3>Trade Journal</h3>
         <span>Execution Log · Paper Trades Only</span>
     </div>
-    <p class="muted">Paper trades fill at live market price via Yahoo Finance. No real money or broker order is ever placed here.</p>
+    <p class="muted">Paper trades fill at live market price via Yahoo Finance by default, or enter your own fill price to log a trade you placed elsewhere (e.g. Webull). No real money or broker order is ever placed here.</p>
     <div class="price-map-grid">
         <div><small>Entries Today</small><b>{{ paper_trade_summary.entries_today }}</b></div>
         <div><small>Win Rate</small><b>{{ paper_trade_summary.win_rate }}</b></div>
@@ -26,6 +26,7 @@
             <option value="SELL">Sell</option>
         </select>
         <input type="number" name="quantity" placeholder="Quantity" value="1" min="0.01" step="0.01">
+        <input type="number" name="entry_price" placeholder="Entry price (optional, defaults to live)" min="0.01" step="0.01">
         <input type="text" name="reason" placeholder="Reason (optional)">
         <button type="submit">Execute Paper Trade</button>
     </form>

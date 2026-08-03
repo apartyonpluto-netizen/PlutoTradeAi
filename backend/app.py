@@ -1295,6 +1295,7 @@ def api_paper_trade_execute():
             quantity=payload.get("quantity", 1),
             reason=payload.get("reason", ""),
             confidence=payload.get("confidence"),
+            entry_price=payload.get("entry_price") or None,
         )
     except ValueError as error:
         raise ValidationError(str(error)) from error
@@ -1306,7 +1307,7 @@ def api_paper_trade_execute():
 def api_paper_trade_close():
     payload = request.get_json(silent=True) or {}
     try:
-        trade = close_paper_trade(_current_user_id(), payload.get("trade_id", ""))
+        trade = close_paper_trade(_current_user_id(), payload.get("trade_id", ""), payload.get("exit_price") or None)
     except ValueError as error:
         raise ValidationError(str(error)) from error
     return _api_success({"trade": trade}, trade=trade, ok=True)

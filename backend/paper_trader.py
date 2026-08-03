@@ -85,6 +85,7 @@ def open_trade(
     quantity: float = 1,
     reason: str = "",
     confidence: Optional[int] = None,
+    entry_price: Optional[float] = None,
 ) -> Dict[str, Any]:
     symbol = ticker.strip().upper()
     if not symbol:
@@ -99,7 +100,15 @@ def open_trade(
     if quantity <= 0:
         raise ValueError("Quantity must be positive.")
 
-    entry_price = _get_live_price(symbol)
+    if entry_price is not None:
+        try:
+            entry_price = float(entry_price)
+        except (TypeError, ValueError):
+            raise ValueError("Entry price must be a number.")
+        if entry_price <= 0:
+            raise ValueError("Entry price must be positive.")
+    else:
+        entry_price = _get_live_price(symbol)
     row: Dict[str, Any] = {
         "id": uuid.uuid4().hex[:12],
         "opened_at": datetime.now(timezone.utc).isoformat(),
@@ -120,7 +129,7 @@ def open_trade(
     return row
 
 
-def close_trade(user_id: str, trade_id: str) -> Dict[str, Any]:
+def close_trade(user_id: str, trade_id: str, exit_price: Optional[float] = None) -> Dict[str, Any]:
     rows = _read_all(user_id)
     target = next((row for row in rows if row.get("id") == trade_id), None)
     if target is None:
@@ -128,7 +137,15 @@ def close_trade(user_id: str, trade_id: str) -> Dict[str, Any]:
     if target.get("status") != "Open":
         raise ValueError("Paper trade is already closed.")
 
-    exit_price = _get_live_price(target["ticker"])
+    if exit_price is not None:
+        try:
+            exit_price = float(exit_price)
+        except (TypeError, ValueError):
+            raise ValueError("Exit price must be a number.")
+        if exit_price <= 0:
+            raise ValueError("Exit price must be positive.")
+    else:
+        exit_price = _get_live_price(target["ticker"])
     entry_price = float(target["entry_price"])
     quantity = float(target["quantity"])
     direction_sign = 1 if target["direction"] in _LONG_DIRECTIONS else -1

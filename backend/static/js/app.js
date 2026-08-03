@@ -1099,6 +1099,7 @@ const bindPaperTradePage = () => {
     event.preventDefault();
     const data = new FormData(form);
     try {
+      const entryPrice = data.get("entry_price");
       await requestJson("/api/paper-trade/execute", {
         method: "POST",
         body: JSON.stringify({
@@ -1106,11 +1107,12 @@ const bindPaperTradePage = () => {
           direction: data.get("direction"),
           quantity: data.get("quantity"),
           reason: data.get("reason"),
+          entry_price: entryPrice || null,
         }),
       });
       form.reset();
       await loadTrades();
-      showToast("Paper trade executed at live price.", "success");
+      showToast(entryPrice ? "Paper trade logged at your entry price." : "Paper trade executed at live price.", "success");
     } catch (error) {
       showToast(error.message, "error");
     }
@@ -1121,10 +1123,12 @@ const bindPaperTradePage = () => {
     if (!(target instanceof HTMLElement) || !target.classList.contains("close-paper-trade")) return;
     const row = target.closest("tr[data-trade-id]");
     if (!(row instanceof HTMLElement)) return;
+    const exitPriceInput = window.prompt("Exit price (leave blank to use live market price):", "");
+    if (exitPriceInput === null) return;
     try {
       await requestJson("/api/paper-trade/close", {
         method: "POST",
-        body: JSON.stringify({ trade_id: row.dataset.tradeId }),
+        body: JSON.stringify({ trade_id: row.dataset.tradeId, exit_price: exitPriceInput || null }),
       });
       await loadTrades();
       showToast("Paper trade closed.", "success");
