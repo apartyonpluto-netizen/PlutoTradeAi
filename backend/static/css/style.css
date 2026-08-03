@@ -1591,6 +1591,109 @@ select:focus {
     box-shadow: 0 0 18px rgba(180, 110, 255, 0.5);
 }
 
+/* Nav group (Analysis dropdown) */
+.nav-group-toggle {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    font-size: 0.82rem;
+    letter-spacing: 0.02em;
+    padding: 10px 12px;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    text-align: left;
+}
+
+.nav-group-toggle:hover,
+.nav-group-toggle.active {
+    color: var(--text-primary);
+}
+
+.nav-group-toggle:hover .nav-glyph,
+.nav-group-toggle.active .nav-glyph {
+    color: #ffffff;
+    text-shadow: 0 0 14px rgba(185, 124, 255, 0.8);
+}
+
+.nav-chevron {
+    margin-left: auto;
+    color: var(--text-muted);
+    transition: transform 0.2s ease;
+    font-size: 0.7rem;
+}
+
+.nav-group-toggle[aria-expanded="true"] .nav-chevron {
+    transform: rotate(180deg);
+}
+
+.nav-group {
+    display: grid;
+    grid-template-rows: 0fr;
+    overflow: hidden;
+    transition: grid-template-rows 0.25s ease;
+    padding-left: 14px;
+    border-left: 1px solid rgba(177, 110, 255, 0.18);
+    margin-left: 20px;
+}
+
+.nav-group.open {
+    grid-template-rows: 1fr;
+}
+
+.nav-group-inner {
+    min-height: 0;
+    overflow: hidden;
+}
+
+.nav-group a {
+    font-size: 0.78rem;
+    padding: 8px 10px;
+}
+
+/* Pluto-shaped News Intelligence tab, next to the mobile hamburger */
+.topbar-left-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.pluto-tab {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    flex: 0 0 auto;
+    background:
+        radial-gradient(circle at 30% 26%, rgba(255, 255, 255, 0.5), transparent 30%),
+        radial-gradient(circle at 62% 58%, rgba(210, 165, 130, 0.55), transparent 45%),
+        radial-gradient(circle at 40% 55%, #cbb8d8, #7d6f97 55%, #4a4160 85%);
+    border: 1px solid rgba(200, 170, 220, 0.4);
+    box-shadow: 0 0 12px rgba(150, 120, 190, 0.4);
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.pluto-tab:hover,
+.pluto-tab.active {
+    box-shadow: 0 0 18px rgba(190, 150, 230, 0.7);
+    transform: translateY(-1px);
+}
+
+.pluto-tab-moon {
+    position: absolute;
+    top: -3px;
+    right: -4px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #f2e9ff, #a293b8 70%);
+    box-shadow: 0 0 5px rgba(200, 180, 230, 0.7);
+}
+
 .mission-control-layout {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 356px;

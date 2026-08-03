@@ -31,26 +31,53 @@
                 <span class="badge">PRO</span>
             </div>
 
-            {% set mission_nav = [
+            {% set ticker_qs = ('?ticker=' ~ focus_ticker) if focus_ticker else '' %}
+            {% set top_nav = [
                 {"label": "Mission Control", "path": "/dashboard", "paths": ["/dashboard", "/mission-control"], "icon": "✦"},
                 {"label": "Watchlist", "path": "/watchlist", "paths": ["/watchlist"], "icon": "◉"},
-                {"label": "Market Scanner", "path": "/scanner", "paths": ["/scanner", "/market-scanner"], "icon": "⌁"},
+                {"label": "Market Scanner", "path": "/scanner", "paths": ["/scanner", "/market-scanner"], "icon": "⌁"}
+            ] %}
+            {% set analysis_nav = [
                 {"label": "Candle Brain", "path": "/candle-brain", "paths": ["/candle-brain"], "icon": "◌"},
                 {"label": "Pattern Brain", "path": "/pattern-brain", "paths": ["/pattern-brain"], "icon": "⌬"},
                 {"label": "Volume Intelligence", "path": "/volume-scanner", "paths": ["/volume-scanner", "/trend-detection"], "icon": "⟐"},
                 {"label": "Support & Resistance", "path": "/support-resistance", "paths": ["/support-resistance", "/reversal-map"], "icon": "⌖"},
-                {"label": "News Intelligence", "path": "/news-intelligence", "paths": ["/news-intelligence"], "icon": "☰"},
                 {"label": "Confidence Engine", "path": "/neural-engine", "paths": ["/neural-engine"], "icon": "◎"},
-                {"label": "Options Brain", "path": "/options", "paths": ["/options"], "icon": "◈"},
+                {"label": "Options Brain", "path": "/options", "paths": ["/options"], "icon": "◈"}
+            ] %}
+            {% set bottom_nav = [
                 {"label": "Trade Journal", "path": "/trade-journal", "paths": ["/trade-journal"], "icon": "✎"},
-                {"label": "Paper Trader", "path": "/trade-journal", "paths": ["/trade-journal"], "icon": "△"},
-                {"label": "Risk Manager", "path": "/support-resistance", "paths": ["/support-resistance", "/reversal-map"], "icon": "⬡"},
-                {"label": "Trade Router", "path": "/account-hub", "paths": ["/account-hub"], "icon": "↠"},
                 {"label": "Account Hub", "path": "/account-hub", "paths": ["/account-hub"], "icon": "⌂"},
                 {"label": "Settings", "path": "/settings", "paths": ["/settings"], "icon": "⚙"}
             ] %}
+            {% set analysis_paths = [] %}
+            {% for item in analysis_nav %}{% for p in item.paths %}{% set _ = analysis_paths.append(p) %}{% endfor %}{% endfor %}
+            {% set analysis_active = request.path in analysis_paths %}
             <nav class="nav-menu">
-                {% for item in mission_nav %}
+                {% for item in top_nav %}
+                <a href="{{ item.path }}" class="{{ 'active' if request.path in item.paths else '' }}">
+                    <span class="nav-glyph" aria-hidden="true">{{ item.icon }}</span>
+                    <span>{{ item.label }}</span>
+                </a>
+                {% endfor %}
+
+                <button type="button" class="nav-group-toggle {{ 'active' if analysis_active else '' }}" id="analysisNavToggle" aria-expanded="{{ 'true' if analysis_active else 'false' }}">
+                    <span class="nav-glyph" aria-hidden="true">☄</span>
+                    <span>Analysis</span>
+                    <span class="nav-chevron" aria-hidden="true">⌄</span>
+                </button>
+                <div class="nav-group {{ 'open' if analysis_active else '' }}" id="analysisNavGroup">
+                    <div class="nav-group-inner">
+                        {% for item in analysis_nav %}
+                        <a href="{{ item.path }}{{ ticker_qs }}" class="{{ 'active' if request.path in item.paths else '' }}">
+                            <span class="nav-glyph" aria-hidden="true">{{ item.icon }}</span>
+                            <span>{{ item.label }}</span>
+                        </a>
+                        {% endfor %}
+                    </div>
+                </div>
+
+                {% for item in bottom_nav %}
                 <a href="{{ item.path }}" class="{{ 'active' if request.path in item.paths else '' }}">
                     <span class="nav-glyph" aria-hidden="true">{{ item.icon }}</span>
                     <span>{{ item.label }}</span>
@@ -84,7 +111,12 @@
 
     <main class="main">
         <header class="topbar topbar-with-alerts">
-            <button class="mobile-nav-toggle" id="mobileNavToggle" type="button" aria-label="Open menu">☰</button>
+            <div class="topbar-left-controls">
+                <button class="mobile-nav-toggle" id="mobileNavToggle" type="button" aria-label="Open menu">☰</button>
+                <a href="/news-intelligence" class="pluto-tab {{ 'active' if request.path == '/news-intelligence' else '' }}" title="News Intelligence" aria-label="News Intelligence">
+                    <span class="pluto-tab-moon" aria-hidden="true"></span>
+                </a>
+            </div>
             <div class="global-search-wrap">
                 <input type="search" placeholder="Search signals, tickers, modules" id="globalSearch" autocomplete="off">
                 <div class="global-search-results" id="globalSearchResults" hidden></div>

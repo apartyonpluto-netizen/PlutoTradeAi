@@ -361,11 +361,16 @@ def get_market_data(force_refresh: bool = False) -> Tuple[List[Dict[str, object]
 
 
 def get_reversal_and_trend_data(
-    scanner_rows: List[Dict[str, object]], watchlist_tickers: List[str], force_refresh: bool = False
+    scanner_rows: List[Dict[str, object]],
+    watchlist_tickers: List[str],
+    force_refresh: bool = False,
+    focus_ticker: str = "",
 ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]], List[str]]:
     analysis_tickers = [ticker for ticker in watchlist_tickers if ticker in CORE_SCAN_UNIVERSE] or [
         row["ticker"] for row in scanner_rows[:8]
     ]
+    if focus_ticker:
+        analysis_tickers = [focus_ticker] + [ticker for ticker in analysis_tickers if ticker != focus_ticker]
     ticker_key = _ticker_key(analysis_tickers)
     if (
         not force_refresh
@@ -603,7 +608,9 @@ def _build_page_context(
     include_trusted_accounts: bool = False,
     include_patterns: bool = False,
     force_refresh: bool = False,
+    focus_ticker: str = "",
 ) -> Dict[str, object]:
+    focus_ticker = focus_ticker.strip().upper()
     watchlist = get_watchlist()
     watchlist_tickers = [row["ticker"] for row in watchlist]
     scanner_rows, scanner_errors, scanner_last_updated = get_market_data(force_refresh=force_refresh)
@@ -621,6 +628,7 @@ def _build_page_context(
             scanner_rows=scanner_rows,
             watchlist_tickers=watchlist_tickers,
             force_refresh=force_refresh,
+            focus_ticker=focus_ticker,
         )
 
     news_rows: List[Dict[str, object]] = []
@@ -633,6 +641,8 @@ def _build_page_context(
     pattern_errors: List[str] = []
     if include_patterns:
         analysis_tickers = watchlist_tickers[:6] or CORE_SCAN_UNIVERSE[:6]
+        if focus_ticker:
+            analysis_tickers = [focus_ticker] + [ticker for ticker in analysis_tickers if ticker != focus_ticker]
         ticker_key = _ticker_key(analysis_tickers)
         if (
             not force_refresh
@@ -850,7 +860,12 @@ def _build_page_context(
         "settings_payload": settings_payload,
         "settings_themes": available_themes(),
         "future_news_roadmap": get_future_news_roadmap(),
-        "options_tickers": sorted(set(watchlist_tickers + [row["ticker"] for row in scanner_rows])),
+        "focus_ticker": focus_ticker,
+        "options_tickers": (
+            [focus_ticker] + [t for t in sorted(set(watchlist_tickers + [row["ticker"] for row in scanner_rows])) if t != focus_ticker]
+            if focus_ticker
+            else sorted(set(watchlist_tickers + [row["ticker"] for row in scanner_rows]))
+        ),
         "strategy_map": strategy_map,
         "chart_levels_map": chart_levels_map,
         "extended_hours_map": extended_hours_map,
@@ -917,13 +932,19 @@ def scanner_page() -> str:
 @app.route("/reversal-map")
 @app.route("/support-resistance")
 def reversal_map_page() -> str:
-    return render_template("reversal_map.html", **_build_page_context(include_reversal=True, include_trend=True))
+    focus_ticker = request.args.get("ticker", "").strip().upper()
+    return render_template(
+        "reversal_map.html", **_build_page_context(include_reversal=True, include_trend=True, focus_ticker=focus_ticker)
+    )
 
 
 @app.route("/trend-detection")
 @app.route("/volume-scanner")
 def trend_detection_page() -> str:
-    return render_template("trend_detection.html", **_build_page_context(include_reversal=True, include_trend=True))
+    focus_ticker = request.args.get("ticker", "").strip().upper()
+    return render_template(
+        "trend_detection.html", **_build_page_context(include_reversal=True, include_trend=True, focus_ticker=focus_ticker)
+    )
 
 
 def _build_price_chart(ticker: str) -> Dict[str, object]:
@@ -965,8 +986,8 @@ def _build_price_chart(ticker: str) -> Dict[str, object]:
 @app.route("/lookup")
 @app.route("/lookup/<ticker>")
 def ticker_lookup_page(ticker: str = "") -> str:
-    context = _build_page_context()
     symbol = (ticker or request.args.get("ticker", "")).strip().upper()
+    context = _build_page_context(focus_ticker=symbol)
     context["searched_ticker"] = symbol
     if not symbol:
         return render_template("ticker_lookup.html", **context)
@@ -999,12 +1020,9 @@ def ticker_lookup_page(ticker: str = "") -> str:
 
 @app.route("/options")
 def options_page() -> str:
-    context = _build_page_context()
     searched_ticker = request.args.get("ticker", "").strip().upper()
+    context = _build_page_context(focus_ticker=searched_ticker)
     if searched_ticker:
-        context["options_tickers"] = [searched_ticker] + [
-            ticker for ticker in context["options_tickers"] if ticker != searched_ticker
-        ]
         context["searched_ticker"] = searched_ticker
     return render_template("options.html", **context)
 
@@ -1041,12 +1059,14 @@ def trade_journal_page() -> str:
 
 @app.route("/candle-brain")
 def candle_brain_page() -> str:
-    return render_template("candle_brain.html", **_build_page_context(include_patterns=True))
+    focus_ticker = request.args.get("ticker", "").strip().upper()
+    return render_template("candle_brain.html", **_build_page_context(include_patterns=True, focus_ticker=focus_ticker))
 
 
 @app.route("/pattern-brain")
 def pattern_brain_page() -> str:
-    return render_template("pattern_brain.html", **_build_page_context(include_patterns=True))
+    focus_ticker = request.args.get("ticker", "").strip().upper()
+    return render_template("pattern_brain.html", **_build_page_context(include_patterns=True, focus_ticker=focus_ticker))
 
 
 @app.route("/neural-engine")

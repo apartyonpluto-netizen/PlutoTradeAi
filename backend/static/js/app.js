@@ -1254,8 +1254,19 @@ const bindMobileNav = () => {
   });
 };
 
+const bindNavGroups = () => {
+  const toggle = document.getElementById("analysisNavToggle");
+  const group = document.getElementById("analysisNavGroup");
+  if (!toggle || !group) return;
+  toggle.addEventListener("click", () => {
+    const isOpen = group.classList.toggle("open");
+    toggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
+  });
+};
+
 onReady(() => {
   bindMobileNav();
+  bindNavGroups();
   bindAlertDrawer();
   bindGlobalSearch();
   bindWatchlistPage();
