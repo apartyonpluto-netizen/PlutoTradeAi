@@ -244,9 +244,18 @@ def build_system_alerts(
         )
 
     if tradingview_alert:
-        symbol = str(tradingview_alert.get("symbol", tradingview_alert.get("ticker", "")) or "").upper()
-        action = str(tradingview_alert.get("action", tradingview_alert.get("message", "Signal received")))
-        message = f"TradingView alert received: {action}"
+        symbol = str(tradingview_alert.get("ticker", "") or "").upper()
+        signal = str(tradingview_alert.get("signal", "") or "").upper()
+        raw_message = str(tradingview_alert.get("raw_message", "") or "").strip()
+        if symbol and signal and signal != "WAIT":
+            action = f"{signal} signal for {symbol}"
+        elif raw_message:
+            action = raw_message[:140]
+        elif symbol:
+            action = f"Signal received for {symbol}"
+        else:
+            action = "Signal received (no ticker/signal parsed from payload)"
+        message = f"TradingView alert: {action}"
         alerts.append(
             {
                 "id": _build_alert_id("tradingview-alert", symbol, message),

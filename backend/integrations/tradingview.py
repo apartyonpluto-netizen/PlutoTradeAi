@@ -46,6 +46,7 @@ def normalize_alert_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "timeframe": str(payload.get("timeframe", "data unavailable")).strip() or "data unavailable",
         "strategy": str(payload.get("strategy", "TradingView Alert")).strip() or "TradingView Alert",
         "confidence": payload.get("confidence", payload.get("score", "data unavailable")),
+        "raw_message": str(payload.get("message", "")).strip(),
         "received_at": _now_iso(),
     }
 
@@ -69,6 +70,7 @@ def get_latest_alert() -> Dict[str, Any]:
         "timeframe": "data unavailable",
         "strategy": "TradingView Alert",
         "confidence": "data unavailable",
+        "raw_message": "",
         "received_at": "",
     }
 

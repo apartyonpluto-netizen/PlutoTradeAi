@@ -100,6 +100,17 @@
             <button type="button" class="ghost-button account-disconnect">Disconnect</button>
             <button type="button" class="ghost-button open-setup-modal">Setup Guide</button>
         </div>
+        <div class="webhook-template-block">
+            <p class="muted">In TradingView, when creating an alert, set the webhook URL above, then paste this into the alert's <b>Message</b> field so the fields below actually get filled in (TradingView's default plain-text message won't parse):</p>
+            <pre class="webhook-template-code">{
+  "ticker": "{{ '{{ticker}}' }}",
+  "signal": "{{ '{{strategy.order.action}}' }}",
+  "price": "{{ '{{close}}' }}",
+  "timeframe": "{{ '{{interval}}' }}",
+  "strategy": "My strategy name"
+}</pre>
+            <p class="muted">The <code>{{ '{{...}}' }}</code> parts are TradingView placeholders it fills in automatically when the alert fires. <code>signal</code> should read <code>BUY</code>/<code>SELL</code> (or your own text) — anything else is stored as <code>WAIT</code>.</p>
+        </div>
     </article>
 </section>
 

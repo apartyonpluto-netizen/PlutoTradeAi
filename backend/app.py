@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from datetime import datetime, timedelta, timezone
@@ -1569,7 +1570,20 @@ def api_tradingview_webhook():
             error_code="invalid_webhook_token",
             ok=False,
         )
-    payload = request.get_json(silent=True) or {}
+    # TradingView's default alert message is plain text unless the user's alert
+    # is configured to send JSON, and it doesn't always set Content-Type:
+    # application/json even then - so parse defensively instead of trusting
+    # get_json() to succeed. force=True skips the content-type check; if the
+    # body still isn't valid JSON, fall back to capturing it as free text so
+    # the alert isn't silently dropped into an empty payload.
+    payload = request.get_json(silent=True, force=True)
+    if not isinstance(payload, dict):
+        raw_text = request.get_data(as_text=True) or ""
+        try:
+            parsed = json.loads(raw_text) if raw_text else {}
+            payload = parsed if isinstance(parsed, dict) else {"message": raw_text}
+        except ValueError:
+            payload = {"message": raw_text} if raw_text else {}
     stored_alert = save_alert(payload)
     account_result = record_tradingview_signal(payload=payload)
     result = {
