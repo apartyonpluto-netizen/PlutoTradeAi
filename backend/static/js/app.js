@@ -1230,7 +1230,32 @@ const bindGlobalSearch = () => {
   });
 };
 
+const bindMobileNav = () => {
+  const sidebar = document.getElementById("sidebar");
+  const backdrop = document.getElementById("sidebarBackdrop");
+  const openBtn = document.getElementById("mobileNavToggle");
+  const closeBtn = document.getElementById("sidebarClose");
+  if (!sidebar || !backdrop || !openBtn) return;
+
+  const open = () => {
+    sidebar.classList.add("open");
+    backdrop.classList.add("open");
+  };
+  const close = () => {
+    sidebar.classList.remove("open");
+    backdrop.classList.remove("open");
+  };
+
+  openBtn.addEventListener("click", open);
+  if (closeBtn) closeBtn.addEventListener("click", close);
+  backdrop.addEventListener("click", close);
+  sidebar.querySelectorAll(".nav-menu a").forEach((link) => {
+    link.addEventListener("click", close);
+  });
+};
+
 onReady(() => {
+  bindMobileNav();
   bindAlertDrawer();
   bindGlobalSearch();
   bindWatchlistPage();

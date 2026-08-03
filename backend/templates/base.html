@@ -14,8 +14,9 @@
 <div class="bg-planets" aria-hidden="true"></div>
 <div class="bg-warp" aria-hidden="true"></div>
 
+<div class="sidebar-backdrop" id="sidebarBackdrop"></div>
 <div class="dashboard-shell">
-    <aside class="sidebar">
+    <aside class="sidebar" id="sidebar">
         <div class="sidebar-frame">
             <div class="brand">
                 <div class="brand-mark" aria-hidden="true"></div>
@@ -23,6 +24,7 @@
                     <h1>PlutoTrade AI</h1>
                     <span>Captain Curtis</span>
                 </div>
+                <button class="sidebar-close" id="sidebarClose" type="button" aria-label="Close menu">✕</button>
             </div>
             <div class="brand-badges">
                 <span class="badge badge-soft">v1.0.0</span>
@@ -82,6 +84,7 @@
 
     <main class="main">
         <header class="topbar topbar-with-alerts">
+            <button class="mobile-nav-toggle" id="mobileNavToggle" type="button" aria-label="Open menu">☰</button>
             <div class="global-search-wrap">
                 <input type="search" placeholder="Search signals, tickers, modules" id="globalSearch" autocomplete="off">
                 <div class="global-search-results" id="globalSearchResults" hidden></div>
@@ -93,7 +96,7 @@
             <div class="top-chip">Eastern Time<b>{{ status_summary.current_time }}</b></div>
             <div class="top-chip">System Status<b>{{ status_summary.ai_status }}</b></div>
             <button class="alert-button" id="alertDrawerToggle" type="button">
-                Notifications <b id="alertCount">{{ unread_alert_count }}</b>
+                <span class="alert-button-label">Notifications</span> <b id="alertCount">{{ unread_alert_count }}</b>
             </button>
             <div class="topbar-avatar" aria-hidden="true"></div>
         </header>

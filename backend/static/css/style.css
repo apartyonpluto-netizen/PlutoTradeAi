@@ -197,6 +197,15 @@ body {
     gap: var(--space-3);
 }
 
+.sidebar-close,
+.mobile-nav-toggle {
+    display: none;
+}
+
+.sidebar-backdrop {
+    display: none;
+}
+
 .brand-mark {
     width: 36px;
     height: 36px;
@@ -2499,6 +2508,141 @@ select:focus {
 
     .donut-wrap {
         grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 720px) {
+    .dashboard-shell {
+        padding: var(--space-3);
+        gap: var(--space-3);
+    }
+
+    /* Sidebar becomes an off-canvas drawer instead of stacking inline */
+    .sidebar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        z-index: 210;
+        width: 84%;
+        max-width: 320px;
+        height: 100vh;
+        border-radius: 0;
+        transform: translateX(-105%);
+        transition: transform 0.25s ease;
+        overflow-y: auto;
+    }
+
+    .sidebar.open {
+        transform: translateX(0);
+    }
+
+    .sidebar-backdrop {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 200;
+        background: rgba(4, 2, 10, 0.6);
+        backdrop-filter: blur(2px);
+    }
+
+    .sidebar-backdrop.open {
+        display: block;
+    }
+
+    .brand {
+        justify-content: space-between;
+    }
+
+    .sidebar-close {
+        display: block;
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--text-primary);
+        border-radius: 50%;
+        width: 32px;
+        height: 32px;
+        line-height: 1;
+        padding: 0;
+    }
+
+    .mobile-nav-toggle {
+        display: grid;
+        place-items: center;
+        width: 40px;
+        height: 40px;
+        padding: 0;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--border);
+        background: var(--bg-elevated);
+        color: var(--text-primary);
+        font-size: 1.1rem;
+    }
+
+    /* Topbar collapses to a single compact row: hamburger, brand, notifications */
+    .topbar-with-alerts {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        flex-wrap: wrap;
+    }
+
+    .topbar-with-alerts .global-search-wrap {
+        order: 4;
+        flex: 1 1 100%;
+    }
+
+    .topbar-brand {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+
+    .topbar-brand-title {
+        font-size: 0.72rem;
+    }
+
+    .topbar-brand-tagline {
+        display: none;
+    }
+
+    .top-chip,
+    .topbar-avatar {
+        display: none;
+    }
+
+    .alert-button {
+        padding: 8px 10px;
+    }
+
+    .alert-button-label {
+        display: none;
+    }
+
+    /* Tables scroll horizontally inside their card instead of squeezing columns unreadably */
+    .panel,
+    .glass-panel {
+        overflow-x: auto;
+    }
+
+    .panel table,
+    .glass-panel table {
+        min-width: 480px;
+    }
+
+    .metric-cards,
+    .price-map-grid,
+    .account-hub-grid,
+    .future-platform-grid,
+    .lower-center-grid,
+    .module-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .orbital-command-grid {
+        min-height: 0;
+    }
+
+    h2 {
+        font-size: 1.4rem;
     }
 }
 
