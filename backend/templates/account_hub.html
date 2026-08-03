@@ -62,14 +62,15 @@
             <span>Paper Insurance</span>
         </div>
         <div class="status-line">
-            <i class="status-light {{ 'status-green' if state.webull.status == 'Connected' else ('status-yellow' if state.webull.status == 'Paper Mode' else 'status-red') }}"></i>
+            <i class="status-light {{ 'status-green' if state.webull.status == 'Connected' else 'status-red' }}"></i>
             <b data-account-field="status">{{ state.webull.status }}</b>
         </div>
         <p class="muted">{{ state.webull.purpose }}</p>
         <div class="account-meta-grid">
-            <div><small>Paper mode enabled</small><strong data-account-field="paper_mode">{{ "Yes" if state.webull.paper_mode else "No" }}</strong></div>
+            <div><small>Account number</small><strong data-account-field="account_number">{{ state.webull.account_number or "—" }}</strong></div>
+            <div><small>Cash balance</small><strong data-account-field="cash_balance">{{ state.webull.cash_balance and "$" ~ state.webull.cash_balance or "—" }}</strong></div>
+            <div><small>Buying power</small><strong data-account-field="buying_power">{{ state.webull.buying_power and "$" ~ state.webull.buying_power or "—" }}</strong></div>
             <div><small>Last sync</small><strong data-account-field="last_sync">{{ state.webull.last_sync or "Never" }}</strong></div>
-            <div><small>Risk simulation enabled</small><strong data-account-field="risk_simulation_enabled">{{ "Yes" if state.webull.risk_simulation_enabled else "No" }}</strong></div>
         </div>
         <div class="account-actions">
             <button type="button" class="account-connect">Connect</button>

@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 from urllib.parse import parse_qs, urlparse
 
+if __package__:
+    from .integrations import webull as webull_api
+else:
+    from integrations import webull as webull_api
+
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
 USER_DATA_ROOT = DATA_DIR / "users"
@@ -55,14 +60,18 @@ def _default_accounts() -> List[Dict[str, Any]]:
         {
             "platform": "webull",
             "display_name": "Webull",
-            "status": "Paper Mode",
-            "purpose": "paper trade / insurance lane",
+            "status": STATUS_NOT_CONNECTED,
+            "purpose": "paper trade / insurance lane (Webull OpenAPI sandbox)",
             "last_sync": "",
             "permissions": ["paper_trade", "market_data"],
             "paper_mode": True,
             "trading_enabled": False,
             "webhook_url": "",
             "risk_simulation_enabled": True,
+            "account_number": "",
+            "cash_balance": "",
+            "buying_power": "",
+            "net_liquidation_value": "",
         },
         {
             "platform": "tradingview",
@@ -98,6 +107,10 @@ def _coerce_account(raw: Dict[str, Any]) -> Dict[str, Any]:
             account["trading_enabled"] = False
     if account["platform"] == "webull":
         account.setdefault("risk_simulation_enabled", True)
+        account.setdefault("account_number", "")
+        account.setdefault("cash_balance", "")
+        account.setdefault("buying_power", "")
+        account.setdefault("net_liquidation_value", "")
         account["paper_mode"] = bool(account.get("paper_mode", True))
         account["trading_enabled"] = False
     if account["platform"] == "tradingview":
@@ -172,6 +185,30 @@ def _extract_token(webhook_url: str) -> str:
     return (query.get("token") or [""])[0]
 
 
+def _sync_webull_account(account: Dict[str, Any]) -> None:
+    """Connect/refresh a webull account record against the real Webull OpenAPI
+    paper-trading sandbox. Raises ValueError (surfaced to the UI) if
+    credentials aren't configured or the API call fails - never leaves the
+    account silently marked as connected without a verified round trip."""
+    if not webull_api.is_configured():
+        raise ValueError("Webull API credentials are not configured on the server (WEBULL_APP_KEY / WEBULL_APP_SECRET).")
+
+    accounts = webull_api.get_paper_accounts()
+    cash_account = webull_api.find_individual_cash_account(accounts)
+    if not cash_account:
+        raise ValueError("No Webull paper trading account found for these credentials.")
+
+    balance = webull_api.get_account_balance(cash_account["account_id"])
+    account["status"] = "Connected"
+    account["paper_mode"] = True
+    account["risk_simulation_enabled"] = True
+    account["trading_enabled"] = False
+    account["account_number"] = cash_account.get("account_number", "")
+    account["cash_balance"] = balance.get("total_cash_balance", "")
+    account["buying_power"] = (balance.get("account_currency_assets") or [{}])[0].get("buying_power", "")
+    account["net_liquidation_value"] = balance.get("total_net_liquidation_value", "")
+
+
 def verify_tradingview_token(user_id: str, token: str) -> bool:
     """Constant-time check of an incoming webhook token against this user's stored one.
 
@@ -199,10 +236,7 @@ def connect_account(user_id: str, platform: str) -> Dict[str, Any]:
         account["approval_mode"] = True
         account["trading_enabled"] = False
     elif normalized_platform == "webull":
-        account["status"] = "Paper Mode"
-        account["paper_mode"] = True
-        account["risk_simulation_enabled"] = True
-        account["trading_enabled"] = False
+        _sync_webull_account(account)
     elif normalized_platform == "tradingview":
         account["status"] = "Webhook Ready"
         if not account.get("webhook_url"):
@@ -227,6 +261,10 @@ def disconnect_account(user_id: str, platform: str) -> Dict[str, Any]:
     if normalized_platform == "webull":
         account["paper_mode"] = True
         account["risk_simulation_enabled"] = True
+        account["account_number"] = ""
+        account["cash_balance"] = ""
+        account["buying_power"] = ""
+        account["net_liquidation_value"] = ""
     if normalized_platform == "tradingview":
         account["webhook_url"] = ""
         account["alert_status"] = "Idle"
@@ -248,6 +286,8 @@ def test_account(user_id: str, platform: str) -> Dict[str, Any]:
     account["last_sync"] = _now_iso()
     if normalized_platform == "etrade":
         account["status"] = "Connected"
+    if normalized_platform == "webull":
+        _sync_webull_account(account)
     if normalized_platform == "tradingview":
         account["alert_status"] = "Webhook Ready"
 

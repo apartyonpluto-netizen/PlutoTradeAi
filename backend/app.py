@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 
 if __package__:
