@@ -16,7 +16,7 @@
 </section>
 
 <section class="panel">
-    <div class="panel-head"><h3>Open a paper trade</h3><span>Simulated fill at live price</span></div>
+    <div class="panel-head"><h3>Open a paper trade</h3><span>Market fills at live price &middot; Limit fills at your price</span></div>
     <form id="paperTradeForm" class="grid-form">
         <input type="text" name="ticker" placeholder="Ticker" required>
         <select name="direction">
@@ -25,8 +25,12 @@
             <option value="BUY">Buy</option>
             <option value="SELL">Sell</option>
         </select>
+        <select name="order_type" id="paperTradeOrderType">
+            <option value="MARKET">Market</option>
+            <option value="LIMIT">Limit</option>
+        </select>
         <input type="number" name="quantity" placeholder="Quantity" value="1" min="0.01" step="0.01">
-        <input type="number" name="entry_price" placeholder="Entry price (optional, defaults to live)" min="0.01" step="0.01">
+        <input type="number" name="entry_price" id="paperTradeEntryPrice" placeholder="Limit price" min="0.01" step="0.01" disabled>
         <input type="text" name="reason" placeholder="Reason (optional)">
         <button type="submit">Execute Paper Trade</button>
     </form>
@@ -72,12 +76,13 @@
 <section class="panel panel-table">
     <div class="panel-head"><h3>Positions</h3><span id="paperTradeCount">{{ paper_trades|length }} entries</span></div>
     <table id="paperTradeTable">
-        <thead><tr><th>Ticker</th><th>Direction</th><th>Qty</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Status</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Ticker</th><th>Direction</th><th>Order Type</th><th>Qty</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody>
         {% for trade in paper_trades %}
         <tr data-trade-id="{{ trade.id }}">
             <td>{{ trade.ticker }}</td>
             <td>{{ trade.direction }}</td>
+            <td>{{ trade.order_type or "MARKET" }}</td>
             <td>{{ trade.quantity }}</td>
             <td>${{ trade.entry_price }}</td>
             <td>{{ trade.exit_price and "$" ~ trade.exit_price or "—" }}</td>
@@ -92,7 +97,7 @@
             </td>
         </tr>
         {% else %}
-        <tr><td colspan="8" class="muted">No paper trades yet. Execute one above to get started.</td></tr>
+        <tr><td colspan="9" class="muted">No paper trades yet. Execute one above to get started.</td></tr>
         {% endfor %}
         </tbody>
     </table>

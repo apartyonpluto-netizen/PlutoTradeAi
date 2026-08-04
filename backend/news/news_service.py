@@ -6,6 +6,11 @@ from typing import Any, Dict, List, Sequence, Tuple
 
 from .x_news import fetch_x_news_for_watchlist
 
+try:
+    from ..integrations import alpaca as alpaca_api
+except ImportError:
+    from integrations import alpaca as alpaca_api
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -48,16 +53,49 @@ class XNewsProvider:
         return ProviderResult(provider=self.provider_name, items=enriched, errors=errors)
 
 
+class AlpacaNewsProvider:
+    provider_name = "alpaca_news"
+
+    def fetch(self, tickers: Sequence[str], limit: int = 20) -> ProviderResult:
+        if not alpaca_api.is_configured():
+            return ProviderResult(provider=self.provider_name, items=[], errors=["Alpaca API credentials are not configured."])
+        try:
+            articles = alpaca_api.get_news(symbols=list(tickers), limit=limit)
+        except ValueError as error:
+            return ProviderResult(provider=self.provider_name, items=[], errors=[str(error)])
+
+        items: List[Dict[str, Any]] = []
+        for article in articles:
+            symbols = article.get("symbols") or []
+            items.append(
+                {
+                    "id": f"alpaca-{article.get('id', '')}",
+                    "ticker": symbols[0] if symbols else (tickers[0] if tickers else ""),
+                    "symbols": symbols,
+                    "source": article.get("source", "alpaca"),
+                    "provider": self.provider_name,
+                    "headline": article.get("headline", ""),
+                    "text": article.get("summary", ""),
+                    "url": article.get("url", ""),
+                    "sentiment": "neutral",
+                    "created_at": article.get("created_at", _now_iso()),
+                    "never_auto_trade": True,
+                }
+            )
+        return ProviderResult(provider=self.provider_name, items=items, errors=[])
+
+
 class NewsService:
     def __init__(self) -> None:
         self.providers = [
             XNewsProvider(),
-            MockNewsProvider(),
+            AlpacaNewsProvider(),
         ]
+        self.fallback_provider = MockNewsProvider()
         self.provider_roadmap = [
             {"name": "official_x_api", "status": "ready"},
+            {"name": "alpaca_news", "status": "ready"},
             {"name": "rss_adapter", "status": "planned"},
-            {"name": "yahoo_finance_news", "status": "planned"},
             {"name": "future_provider_slot", "status": "planned"},
         ]
 
@@ -75,6 +113,20 @@ class NewsService:
                     "ok": len(result.errors) == 0,
                     "item_count": len(result.items),
                     "errors": result.errors,
+                }
+            )
+
+        if not items:
+            # No real provider configured/returned anything - fall back to
+            # obviously-labeled demo content rather than showing an empty feed.
+            fallback = self.fallback_provider.fetch(tickers=tickers, limit=limit)
+            items.extend(fallback.items)
+            provider_status.append(
+                {
+                    "provider": fallback.provider,
+                    "ok": True,
+                    "item_count": len(fallback.items),
+                    "errors": [],
                 }
             )
 

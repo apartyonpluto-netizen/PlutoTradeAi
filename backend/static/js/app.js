@@ -1066,6 +1066,7 @@ const buildPaperTradeRow = (trade) => `
   <tr data-trade-id="${escapeHtml(trade.id)}">
     <td>${escapeHtml(trade.ticker)}</td>
     <td>${escapeHtml(trade.direction)}</td>
+    <td>${escapeHtml(trade.order_type || "MARKET")}</td>
     <td>${escapeHtml(trade.quantity)}</td>
     <td>$${escapeHtml(trade.entry_price)}</td>
     <td>${trade.exit_price ? `$${escapeHtml(trade.exit_price)}` : "—"}</td>
@@ -1082,11 +1083,22 @@ const bindPaperTradePage = () => {
   if (!(tbody instanceof HTMLElement)) return;
   const countNode = document.getElementById("paperTradeCount");
   const entriesNode = document.querySelector('[data-summary="entries_today"]');
+  const orderTypeSelect = document.getElementById("paperTradeOrderType");
+  const entryPriceInput = document.getElementById("paperTradeEntryPrice");
+
+  if (orderTypeSelect instanceof HTMLSelectElement && entryPriceInput instanceof HTMLInputElement) {
+    orderTypeSelect.addEventListener("change", () => {
+      const isLimit = orderTypeSelect.value === "LIMIT";
+      entryPriceInput.disabled = !isLimit;
+      entryPriceInput.required = isLimit;
+      if (!isLimit) entryPriceInput.value = "";
+    });
+  }
 
   const renderRows = (rows) => {
     tbody.innerHTML = rows.length
       ? rows.map((trade) => buildPaperTradeRow(trade)).join("")
-      : '<tr><td colspan="8" class="muted">No paper trades yet. Execute one above to get started.</td></tr>';
+      : '<tr><td colspan="9" class="muted">No paper trades yet. Execute one above to get started.</td></tr>';
     if (countNode) countNode.textContent = `${rows.length} entries`;
   };
 
@@ -1099,7 +1111,8 @@ const bindPaperTradePage = () => {
     event.preventDefault();
     const data = new FormData(form);
     try {
-      const entryPrice = data.get("entry_price");
+      const orderType = data.get("order_type") || "MARKET";
+      const entryPrice = orderType === "LIMIT" ? data.get("entry_price") : null;
       await requestJson("/api/paper-trade/execute", {
         method: "POST",
         body: JSON.stringify({
@@ -1107,12 +1120,14 @@ const bindPaperTradePage = () => {
           direction: data.get("direction"),
           quantity: data.get("quantity"),
           reason: data.get("reason"),
+          order_type: orderType,
           entry_price: entryPrice || null,
         }),
       });
       form.reset();
+      if (entryPriceInput instanceof HTMLInputElement) entryPriceInput.disabled = true;
       await loadTrades();
-      showToast(entryPrice ? "Paper trade logged at your entry price." : "Paper trade executed at live price.", "success");
+      showToast(orderType === "LIMIT" ? "Limit order logged at your entry price." : "Market order executed at live price.", "success");
     } catch (error) {
       showToast(error.message, "error");
     }

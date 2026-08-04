@@ -26,6 +26,7 @@ FIELDNAMES = [
     "ticker",
     "direction",
     "quantity",
+    "order_type",
     "entry_price",
     "exit_price",
     "pnl",
@@ -33,6 +34,8 @@ FIELDNAMES = [
     "reason",
     "confidence",
 ]
+
+_VALID_ORDER_TYPES = {"MARKET", "LIMIT"}
 
 _LONG_DIRECTIONS = {"CALL", "BUY"}
 _VALID_DIRECTIONS = {"CALL", "PUT", "BUY", "SELL"}
@@ -86,6 +89,7 @@ def open_trade(
     reason: str = "",
     confidence: Optional[int] = None,
     entry_price: Optional[float] = None,
+    order_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     symbol = ticker.strip().upper()
     if not symbol:
@@ -99,6 +103,12 @@ def open_trade(
         raise ValueError("Quantity must be a number.")
     if quantity <= 0:
         raise ValueError("Quantity must be positive.")
+
+    order_type = (order_type or ("LIMIT" if entry_price is not None else "MARKET")).strip().upper()
+    if order_type not in _VALID_ORDER_TYPES:
+        raise ValueError("Order type must be MARKET or LIMIT.")
+    if order_type == "LIMIT" and entry_price is None:
+        raise ValueError("Limit orders require an entry price.")
 
     if entry_price is not None:
         try:
@@ -116,6 +126,7 @@ def open_trade(
         "ticker": symbol,
         "direction": direction,
         "quantity": quantity,
+        "order_type": order_type,
         "entry_price": round(entry_price, 4),
         "exit_price": "",
         "pnl": "",

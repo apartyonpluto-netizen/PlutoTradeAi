@@ -1338,6 +1338,7 @@ def api_paper_trade_execute():
             reason=payload.get("reason", ""),
             confidence=payload.get("confidence"),
             entry_price=payload.get("entry_price") or None,
+            order_type=payload.get("order_type") or None,
         )
     except ValueError as error:
         raise ValidationError(str(error)) from error
