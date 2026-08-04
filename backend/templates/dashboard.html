@@ -3,6 +3,21 @@
 {% block body_class %}mission-control-page{% endblock %}
 
 {% block content %}
+{% set webull_account = (accounts | selectattr("platform", "equalto", "webull") | first) %}
+<section class="glass-panel account-balance-topbar">
+    <div class="panel-head"><h3>Account Balance</h3><span>{{ "Webull Sandbox" if webull_account and webull_account.status == "Connected" else "Not Connected" }}</span></div>
+    {% if webull_account and webull_account.status == "Connected" %}
+    <div class="price-map-grid">
+        <div><small>Net Liquidation Value</small><b>${{ webull_account.net_liquidation_value }}</b></div>
+        <div><small>Cash Balance</small><b>${{ webull_account.cash_balance }}</b></div>
+        <div><small>Buying Power</small><b>${{ webull_account.buying_power }}</b></div>
+        <div><small>Account</small><b>{{ webull_account.account_number }}</b></div>
+    </div>
+    {% else %}
+    <p class="muted">Connect Webull in Account Hub to show your real sandbox balance here.</p>
+    {% endif %}
+</section>
+
 <section class="mission-control-layout">
     <section class="center-command">
         <section class="glass-panel orbital-command-stage">
@@ -38,7 +53,8 @@
                     <p>{{ status_summary.account_status }} account stack</p>
                 </article>
 
-                <div class="orbital-core-cinematic" aria-hidden="true">
+                {% set autonomy_active = autonomy_status and autonomy_status.current_mode == "AUTONOMOUS" %}
+                <div class="orbital-core-cinematic {{ 'orbital-core-active' if autonomy_active else '' }}">
                     <span class="core-atmosphere"></span>
                     <span class="core-ring ring-a"></span>
                     <span class="core-ring ring-b"></span>
@@ -46,11 +62,11 @@
                     <span class="core-satellite sat-a"></span>
                     <span class="core-satellite sat-b"></span>
                     <span class="core-satellite sat-c"></span>
-                    <div class="planetary-core">
-                        <small>Orbital Core</small>
-                        <h3>{{ status_summary.ai_confidence }}</h3>
-                        <p>trade confidence lock</p>
-                    </div>
+                    <button type="button" class="planetary-core activate-planet-button" id="activatePlanetButton" data-active="{{ 'true' if autonomy_active else 'false' }}" aria-pressed="{{ 'true' if autonomy_active else 'false' }}">
+                        <small id="activatePlanetLabel">{{ "Autonomous" if autonomy_active else "Orbital Core" }}</small>
+                        <h3 id="activatePlanetMain">{{ "ACTIVE" if autonomy_active else "ACTIVATE" }}</h3>
+                        <p id="activatePlanetSub">{{ status_summary.ai_confidence }} confidence{% if autonomy_active %} · sandbox only{% endif %}</p>
+                    </button>
                 </div>
             </div>
         </section>
@@ -158,20 +174,6 @@
                 <ul class="chart-labels">
                     <li>9:30</li><li>11:00</li><li>1:00</li><li>3:30</li>
                 </ul>
-            </article>
-            {% set webull_account = (accounts | selectattr("platform", "equalto", "webull") | first) %}
-            <article class="glass-panel mini-panel">
-                <div class="panel-head"><h3>Account Balance</h3><span>{{ "Webull Sandbox" if webull_account and webull_account.status == "Connected" else "Not Connected" }}</span></div>
-                {% if webull_account and webull_account.status == "Connected" %}
-                <div class="price-map-grid">
-                    <div><small>Net Liquidation Value</small><b>${{ webull_account.net_liquidation_value }}</b></div>
-                    <div><small>Cash Balance</small><b>${{ webull_account.cash_balance }}</b></div>
-                    <div><small>Buying Power</small><b>${{ webull_account.buying_power }}</b></div>
-                    <div><small>Account</small><b>{{ webull_account.account_number }}</b></div>
-                </div>
-                {% else %}
-                <p class="muted">Connect Webull in Account Hub to show your real sandbox balance here.</p>
-                {% endif %}
             </article>
         </section>
 
@@ -397,6 +399,57 @@
             } catch (_) {}
         });
     }
+})();
+
+(() => {
+    const button = document.getElementById("activatePlanetButton");
+    const core = document.querySelector(".orbital-core-cinematic");
+    const label = document.getElementById("activatePlanetLabel");
+    const main = document.getElementById("activatePlanetMain");
+    const sub = document.getElementById("activatePlanetSub");
+    if (!button || !core || !label || !main || !sub) return;
+
+    const setActiveUi = (active) => {
+        core.classList.toggle("orbital-core-active", active);
+        button.dataset.active = active ? "true" : "false";
+        button.setAttribute("aria-pressed", active ? "true" : "false");
+        label.textContent = active ? "Autonomous" : "Orbital Core";
+        main.textContent = active ? "ACTIVE" : "ACTIVATE";
+    };
+
+    button.addEventListener("click", async () => {
+        const goingActive = button.dataset.active !== "true";
+        button.disabled = true;
+        const previousSub = sub.textContent;
+        sub.textContent = goingActive ? "Activating..." : "Deactivating...";
+        try {
+            const response = await fetch(goingActive ? "/api/autonomy/activate" : "/api/autonomy/deactivate", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: "{}",
+            });
+            const payload = await response.json();
+            if (!response.ok || payload.ok === false) {
+                throw new Error(payload.error || "Request failed.");
+            }
+            setActiveUi(goingActive);
+            if (goingActive) {
+                const scan = payload.scan || {};
+                const placed = scan.placed_count ?? 0;
+                const skipped = scan.skipped_count ?? 0;
+                sub.textContent = `${placed} placed / ${skipped} skipped`;
+                showToast(`Autonomous mode activated - ${placed} order(s) placed, ${skipped} skipped.`, "success");
+            } else {
+                sub.textContent = `${"{{ status_summary.ai_confidence }}"} confidence`;
+                showToast("Autonomous mode deactivated. Everything is manual again.", "info");
+            }
+        } catch (error) {
+            sub.textContent = previousSub;
+            showToast(`Autonomy toggle failed: ${error.message}`, "error");
+        } finally {
+            button.disabled = false;
+        }
+    });
 })();
 </script>
 {% endblock %}

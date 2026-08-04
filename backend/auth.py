@@ -95,6 +95,12 @@ def get_user_by_id(user_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def list_all_user_ids() -> List[str]:
+    """For scheduled/cron jobs that have no session to resolve a single user
+    from - they need to check every registered account for autonomy state."""
+    return [user["id"] for user in _read_users() if user.get("id")]
+
+
 def user_dir(user_id: str) -> Path:
     path = USER_DATA_ROOT / user_id
     path.mkdir(parents=True, exist_ok=True)

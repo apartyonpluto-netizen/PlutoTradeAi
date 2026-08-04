@@ -67,7 +67,9 @@ def _derived(payload: Dict[str, object]) -> Dict[str, object]:
         "live_trading_locked": True,
         "paper_trading_active": current_mode == "PAPER" and not emergency_stop_enabled,
         "approval_required_status": current_mode == "APPROVAL" and bool(payload.get("approval_required", False)),
-        "autonomous_mode_locked_message": "Locked until future release" if current_mode == "AUTONOMOUS" else "",
+        "autonomous_mode_locked_message": (
+            "Sandbox only - real-money live execution stays locked regardless of this mode." if current_mode == "AUTONOMOUS" else ""
+        ),
     }
 
 
@@ -81,11 +83,6 @@ def set_mode(user_id: str, mode: str, reason: str = "") -> Dict[str, object]:
         raise ValueError("Unsupported autonomy mode.")
 
     settings = _load(user_id)
-    if normalized_mode == "AUTONOMOUS":
-        settings["mode_change_reason"] = "Locked until future release"
-        settings["last_mode_change"] = _now_iso()
-        return _derived(_save(user_id, settings))
-
     settings["current_mode"] = normalized_mode
     settings["last_mode_change"] = _now_iso()
     settings["mode_change_reason"] = reason or f"Mode changed to {normalized_mode}"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import secrets as secrets_module
@@ -22,6 +23,7 @@ if __package__:
         authenticate_user,
         find_user_by_webhook_token,
         get_user_by_id,
+        list_all_user_ids,
         public_user,
         register_user,
     )
@@ -94,6 +96,7 @@ else:
         authenticate_user,
         find_user_by_webhook_token,
         get_user_by_id,
+        list_all_user_ids,
         public_user,
         register_user,
     )
@@ -297,7 +300,7 @@ def _log_response(response):
 
 _PUBLIC_PATHS = {"/login", "/register", "/logout"}
 _PUBLIC_PATH_PREFIXES = ("/static/",)
-_TOKEN_AUTH_PATHS = {"/api/tradingview/webhook"}
+_TOKEN_AUTH_PATHS = {"/api/tradingview/webhook", "/api/autonomy/cron-trigger"}
 
 
 @app.before_request
@@ -1674,22 +1677,22 @@ def api_autonomy_overnight_orders():
     return _api_success({"orders": orders}, orders=orders, ok=True)
 
 
-@app.route("/api/autonomy/run-overnight-scan", methods=["POST"])
-@api_guard
-def api_autonomy_run_overnight_scan():
+def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
     """Scans current setups the same way the dashboard does, and for the
     highest-confidence bullish ones places real (sandbox) DAY limit orders on
-    Webull - placed after-hours these queue and fill at the next market open
-    rather than executing immediately. Every order, and every skip, is logged
-    with the reasoning behind it so it can be reviewed later."""
-    user_id = _current_user_id()
+    Webull - the trading session (CORE/ALL/NIGHT) is picked automatically by
+    time of day, so outside market hours these queue and fill at the next
+    market open rather than executing immediately. Every order, and every
+    skip, is logged with the reasoning behind it so it can be reviewed later.
+    Pure function of user_id - safe to call from a real request or from the
+    cron trigger's simulated per-user request context."""
     if not webull_api.is_configured():
         raise ValidationError("Webull API credentials are not configured on the server.")
 
     accounts = get_accounts(user_id)
     webull_account = next((a for a in accounts if a.get("platform") == "webull"), None)
     if not webull_account or webull_account.get("status") != "Connected":
-        raise ValidationError("Connect Webull in Account Hub before running the overnight scan.")
+        raise ValidationError("Connect Webull in Account Hub before running the trade scan.")
 
     sandbox_accounts = webull_api.get_paper_accounts()
     cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
@@ -1783,15 +1786,70 @@ def api_autonomy_run_overnight_scan():
             skipped.append(entry)
         record_overnight_order(user_id, entry)
 
-    summary = {
+    return {
         "ok": True,
         "placed_count": len(placed),
         "skipped_count": len(skipped),
         "placed": placed,
         "skipped": skipped,
-        "guardrail": "DAY limit orders in the Webull sandbox only. Queue after-hours, fill at next market open.",
+        "guardrail": "DAY limit orders in the Webull sandbox only. Session auto-selected by time of day.",
     }
+
+
+@app.route("/api/autonomy/run-overnight-scan", methods=["POST"])
+@api_guard
+def api_autonomy_run_overnight_scan():
+    summary = _run_autonomous_trade_scan(_current_user_id())
     return _api_success(summary, **summary)
+
+
+@app.route("/api/autonomy/activate", methods=["POST"])
+@api_guard
+def api_autonomy_activate():
+    user_id = _current_user_id()
+    autonomy_result = set_mode(user_id, mode="AUTONOMOUS", reason="Activated from the Mission Control planet button.")
+    try:
+        scan_result = _run_autonomous_trade_scan(user_id)
+    except ValidationError as error:
+        scan_result = {"ok": False, "error": str(error), "placed_count": 0, "skipped_count": 0}
+    payload = {"ok": True, "autonomy": autonomy_result, "scan": scan_result}
+    return _api_success(payload, **payload)
+
+
+@app.route("/api/autonomy/deactivate", methods=["POST"])
+@api_guard
+def api_autonomy_deactivate():
+    user_id = _current_user_id()
+    autonomy_result = set_mode(user_id, mode="OFF", reason="Deactivated from the Mission Control planet button.")
+    payload = {"ok": True, "autonomy": autonomy_result}
+    return _api_success(payload, **payload)
+
+
+@app.route("/api/autonomy/cron-trigger", methods=["POST"])
+def api_autonomy_cron_trigger():
+    """Called on a timer by a Render Cron Job, not by a logged-in browser -
+    authenticated by a shared secret instead of a session cookie. Runs the
+    scan for every registered user currently in AUTONOMOUS mode; does nothing
+    for everyone else."""
+    expected_secret = os.environ.get("CRON_SECRET", "").strip()
+    provided_secret = request.headers.get("X-Cron-Secret", "").strip()
+    if not expected_secret or not hmac.compare_digest(expected_secret, provided_secret):
+        return _api_failure("Invalid or missing cron secret.", status_code=401, error_code="unauthorized", ok=False)
+
+    results = []
+    for user_id in list_all_user_ids():
+        status = get_autonomy_status(user_id)
+        if str(status.get("current_mode", status.get("mode", "OFF"))).upper() != "AUTONOMOUS":
+            continue
+        with app.test_request_context():
+            session["user_id"] = user_id
+            try:
+                scan_result = _run_autonomous_trade_scan(user_id)
+                results.append({"user_id": user_id, "ok": True, **scan_result})
+            except Exception as error:  # noqa: BLE001 - one user's failure shouldn't block others
+                results.append({"user_id": user_id, "ok": False, "error": str(error)})
+
+    return _api_success({"ran_for_users": len(results), "results": results}, ok=True, ran_for_users=len(results))
 
 
 @app.route("/api/accounts", methods=["GET"])

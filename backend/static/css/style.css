@@ -1974,6 +1974,48 @@ select:focus {
     color: rgba(255, 233, 212, 0.86);
 }
 
+.activate-planet-button {
+    font-family: inherit;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.activate-planet-button:hover {
+    transform: scale(1.03);
+}
+
+.activate-planet-button:focus-visible {
+    outline: 2px solid rgba(255, 233, 212, 0.9);
+    outline-offset: 6px;
+}
+
+.activate-planet-button:disabled {
+    cursor: wait;
+    opacity: 0.72;
+}
+
+.orbital-core-active .core-ring {
+    border-color: rgba(88, 240, 175, 0.5);
+    box-shadow: inset 0 0 24px rgba(88, 240, 175, 0.14);
+}
+
+.orbital-core-active .core-atmosphere {
+    background: radial-gradient(circle at 50% 50%, rgba(165, 255, 210, 0.2), rgba(87, 241, 168, 0.06) 45%, transparent 72%);
+}
+
+.orbital-core-active .core-satellite {
+    background: rgba(125, 250, 190, 0.94);
+    box-shadow: 0 0 14px rgba(125, 250, 190, 0.85);
+}
+
+.orbital-core-active .planetary-core {
+    background: radial-gradient(circle at 30% 28%, rgba(214, 255, 232, 0.82), rgba(58, 209, 143, 0.68) 42%, rgba(15, 82, 58, 0.94) 85%);
+    box-shadow: 0 0 54px rgba(88, 240, 175, 0.6), inset 0 -10px 22px rgba(12, 58, 40, 0.56);
+    animation: nebula-pulse 2.6s ease-in-out infinite;
+}
+
 .core-satellite {
     width: 10px;
     height: 10px;
