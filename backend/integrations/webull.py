@@ -75,6 +75,7 @@ def preview_stock_order(
     side: str,
     quantity: float,
     limit_price: float,
+    trading_session: str = "CORE",
 ) -> Dict[str, Any]:
     trade_client = _get_trade_client()
     order = {
@@ -86,7 +87,7 @@ def preview_stock_order(
         "order_type": "LIMIT",
         "limit_price": str(limit_price),
         "quantity": str(quantity),
-        "support_trading_session": "N",
+        "support_trading_session": trading_session,
         "side": side,
         "time_in_force": "DAY",
         "entrust_type": "QTY",
@@ -103,9 +104,13 @@ def place_stock_order(
     side: str,
     quantity: float,
     limit_price: float,
+    trading_session: str = "CORE",
 ) -> Dict[str, Any]:
-    """Places a real (sandbox) DAY limit order. Placed after-hours, it queues at
-    Webull and fills at the next market open rather than executing immediately."""
+    """Places a real (sandbox) DAY limit order. trading_session must be CORE
+    (regular hours), ALL (extended hours), or NIGHT (Webull's 24-hour session -
+    the only one accepted outside pre-market/after-hours windows, and it draws
+    from a separate night_trading_buying_power pool rather than the account's
+    regular buying power)."""
     trade_client = _get_trade_client()
     client_order_id = uuid.uuid4().hex
     order = {
@@ -117,7 +122,7 @@ def place_stock_order(
         "order_type": "LIMIT",
         "limit_price": str(limit_price),
         "quantity": str(quantity),
-        "support_trading_session": "N",
+        "support_trading_session": trading_session,
         "side": side,
         "time_in_force": "DAY",
         "entrust_type": "QTY",

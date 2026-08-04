@@ -1653,6 +1653,18 @@ OVERNIGHT_MAX_ORDERS_PER_RUN = 5
 OVERNIGHT_ORDER_QUANTITY = 1
 
 
+def _current_webull_trading_session() -> str:
+    """Webull only accepts orders under the session type that's actually active
+    right now - CORE during 9:30-16:00 ET, ALL during pre/after-market, NIGHT
+    from 20:00-04:00 ET (and NIGHT draws from a separate buying-power pool)."""
+    now_et = datetime.now(ZoneInfo("America/New_York")).time()
+    if datetime.strptime("09:30", "%H:%M").time() <= now_et <= datetime.strptime("16:00", "%H:%M").time():
+        return "CORE"
+    if now_et >= datetime.strptime("20:00", "%H:%M").time() or now_et < datetime.strptime("04:00", "%H:%M").time():
+        return "NIGHT"
+    return "ALL"
+
+
 @app.route("/api/autonomy/overnight-orders", methods=["GET"])
 @api_guard
 def api_autonomy_overnight_orders():
@@ -1740,6 +1752,7 @@ def api_autonomy_run_overnight_scan():
                 side="BUY",
                 quantity=OVERNIGHT_ORDER_QUANTITY,
                 limit_price=limit_price,
+                trading_session=_current_webull_trading_session(),
             )
             entry["status"] = "placed"
             entry["webull_response"] = result
