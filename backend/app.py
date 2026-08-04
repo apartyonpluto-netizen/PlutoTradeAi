@@ -1700,10 +1700,26 @@ def api_autonomy_run_overnight_scan():
     context = _build_page_context(include_reversal=True, include_trend=True)
     opportunities = context.get("upcoming_opportunities", [])
 
+    today_key = _trading_day_key()
+
+    def _order_trading_day(order: Dict[str, object]) -> str:
+        try:
+            return _trading_day_key(datetime.fromisoformat(str(order.get("logged_at", ""))))
+        except ValueError:
+            return ""
+
+    already_placed_today = {
+        str(order.get("ticker", "")).upper()
+        for order in list_overnight_orders(user_id)
+        if order.get("status") == "placed" and _order_trading_day(order) == today_key
+    }
+
     candidates = [
         opp
         for opp in opportunities
-        if str(opp.get("recommendation", "")).upper() == "CALL" and int(opp.get("confidence", 0) or 0) >= OVERNIGHT_MIN_CONFIDENCE
+        if str(opp.get("recommendation", "")).upper() == "CALL"
+        and int(opp.get("confidence", 0) or 0) >= OVERNIGHT_MIN_CONFIDENCE
+        and str(opp.get("ticker", "")).upper() not in already_placed_today
     ]
     candidates.sort(key=lambda opp: int(opp.get("confidence", 0) or 0), reverse=True)
     candidates = candidates[:OVERNIGHT_MAX_ORDERS_PER_RUN]
