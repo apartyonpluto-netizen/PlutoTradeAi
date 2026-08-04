@@ -59,6 +59,8 @@ if __package__:
     from .brains.extended_hours_brain import build_extended_hours_intelligence
     from .brains.strategy_brain import build_strategy_intelligence
     from .integrations.tradingview import get_tradingview_status, save_alert
+    from .integrations import webull as webull_api
+    from .autonomy.overnight_orders import list_overnight_orders, record_overnight_order
     from .market_scanner import scan_market
     from .news.future_news import get_future_news_roadmap
     from .news.news_service import fetch_news_bundle
@@ -124,6 +126,8 @@ else:
     from brains.extended_hours_brain import build_extended_hours_intelligence
     from brains.strategy_brain import build_strategy_intelligence
     from integrations.tradingview import get_tradingview_status, save_alert
+    from integrations import webull as webull_api
+    from autonomy.overnight_orders import list_overnight_orders, record_overnight_order
     from market_scanner import scan_market
     from news.future_news import get_future_news_roadmap
     from news.news_service import fetch_news_bundle
@@ -1203,6 +1207,7 @@ def trade_journal_page() -> str:
     user_id = _current_user_id()
     context["paper_trades"] = list_paper_trades(user_id)
     context["paper_trade_summary"] = get_paper_trade_summary(user_id)
+    context["overnight_orders"] = list_overnight_orders(user_id)
     return render_template("trade_journal.html", **context)
 
 
@@ -1641,6 +1646,119 @@ def api_autonomy_reset_stop():
     payload = request.get_json(silent=True) or {}
     result = reset_emergency_stop(_current_user_id(), reason=str(payload.get("mode_change_reason", "")))
     return _api_success(result, autonomy=result, ok=True)
+
+
+OVERNIGHT_MIN_CONFIDENCE = 55  # matches the confidence floor the dashboard itself uses to call something a real opportunity vs WAIT
+OVERNIGHT_MAX_ORDERS_PER_RUN = 5
+OVERNIGHT_ORDER_QUANTITY = 1
+
+
+@app.route("/api/autonomy/overnight-orders", methods=["GET"])
+@api_guard
+def api_autonomy_overnight_orders():
+    orders = list_overnight_orders(_current_user_id())
+    return _api_success({"orders": orders}, orders=orders, ok=True)
+
+
+@app.route("/api/autonomy/run-overnight-scan", methods=["POST"])
+@api_guard
+def api_autonomy_run_overnight_scan():
+    """Scans current setups the same way the dashboard does, and for the
+    highest-confidence bullish ones places real (sandbox) DAY limit orders on
+    Webull - placed after-hours these queue and fill at the next market open
+    rather than executing immediately. Every order, and every skip, is logged
+    with the reasoning behind it so it can be reviewed later."""
+    user_id = _current_user_id()
+    if not webull_api.is_configured():
+        raise ValidationError("Webull API credentials are not configured on the server.")
+
+    accounts = get_accounts(user_id)
+    webull_account = next((a for a in accounts if a.get("platform") == "webull"), None)
+    if not webull_account or webull_account.get("status") != "Connected":
+        raise ValidationError("Connect Webull in Account Hub before running the overnight scan.")
+
+    sandbox_accounts = webull_api.get_paper_accounts()
+    cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
+    if not cash_account:
+        raise ValidationError("No Webull sandbox account found for these credentials.")
+    account_id = cash_account["account_id"]
+
+    context = _build_page_context(include_reversal=True, include_trend=True)
+    opportunities = context.get("upcoming_opportunities", [])
+
+    candidates = [
+        opp
+        for opp in opportunities
+        if str(opp.get("recommendation", "")).upper() == "CALL" and int(opp.get("confidence", 0) or 0) >= OVERNIGHT_MIN_CONFIDENCE
+    ]
+    candidates.sort(key=lambda opp: int(opp.get("confidence", 0) or 0), reverse=True)
+    candidates = candidates[:OVERNIGHT_MAX_ORDERS_PER_RUN]
+
+    placed: List[Dict[str, object]] = []
+    skipped: List[Dict[str, object]] = []
+
+    for opp in opportunities:
+        if opp not in candidates:
+            skipped.append(
+                {
+                    "ticker": opp.get("ticker"),
+                    "recommendation": opp.get("recommendation"),
+                    "confidence": opp.get("confidence"),
+                    "reason_skipped": (
+                        f"confidence {opp.get('confidence')} below {OVERNIGHT_MIN_CONFIDENCE} threshold"
+                        if str(opp.get("recommendation", "")).upper() == "CALL"
+                        else f"recommendation is {opp.get('recommendation')}, only CALL/bullish setups auto-order tonight"
+                    ),
+                }
+            )
+
+    for opp in candidates:
+        ticker = str(opp.get("ticker", ""))
+        limit_price = float(opp.get("ideal_entry") or 0)
+        entry = {
+            "ticker": ticker,
+            "side": "BUY",
+            "quantity": OVERNIGHT_ORDER_QUANTITY,
+            "limit_price": limit_price,
+            "confidence": opp.get("confidence"),
+            "trade_quality": opp.get("trade_quality"),
+            "trade_thesis": opp.get("trade_thesis"),
+            "why_ai_likes_it": opp.get("why_ai_likes_it"),
+            "invalidation_rule": opp.get("invalidation_rule"),
+            "risk_warning": opp.get("risk_warning"),
+            "target": opp.get("target"),
+            "stop": opp.get("stop"),
+            "account_id": account_id,
+            "status": "pending",
+        }
+        try:
+            if limit_price <= 0:
+                raise ValueError("No valid entry price computed for this ticker.")
+            result = webull_api.place_stock_order(
+                account_id=account_id,
+                symbol=ticker,
+                side="BUY",
+                quantity=OVERNIGHT_ORDER_QUANTITY,
+                limit_price=limit_price,
+            )
+            entry["status"] = "placed"
+            entry["webull_response"] = result
+            placed.append(entry)
+        except Exception as error:  # noqa: BLE001 - one bad ticker shouldn't kill the whole batch
+            entry["status"] = "failed"
+            entry["error"] = str(error)
+            skipped.append(entry)
+        record_overnight_order(user_id, entry)
+
+    summary = {
+        "ok": True,
+        "placed_count": len(placed),
+        "skipped_count": len(skipped),
+        "placed": placed,
+        "skipped": skipped,
+        "guardrail": "DAY limit orders in the Webull sandbox only. Queue after-hours, fill at next market open.",
+    }
+    return _api_success(summary, **summary)
 
 
 @app.route("/api/accounts", methods=["GET"])

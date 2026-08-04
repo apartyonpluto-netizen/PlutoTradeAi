@@ -60,4 +60,31 @@
         </tbody>
     </table>
 </section>
+
+<section class="panel panel-table">
+    <div class="panel-head">
+        <h3>Overnight Autonomous Orders</h3>
+        <span>{{ overnight_orders|length }} logged &middot; Webull sandbox &middot; DAY limit orders</span>
+    </div>
+    <p class="muted">Placed automatically overnight for the highest-confidence bullish setups, no approval required (sandbox only, never real money). Queue after-hours and fill at the next market open. Every skip is logged too, with the reason.</p>
+    <table id="overnightOrdersTable">
+        <thead><tr><th>Ticker</th><th>Status</th><th>Qty</th><th>Limit</th><th>Confidence</th><th>Thesis</th><th>Invalidation</th><th>Logged</th></tr></thead>
+        <tbody>
+        {% for order in overnight_orders %}
+        <tr>
+            <td>{{ order.ticker }}</td>
+            <td>{{ order.status }}{{ order.error and " — " ~ order.error or "" }}{{ order.reason_skipped and " — " ~ order.reason_skipped or "" }}</td>
+            <td>{{ order.quantity or "—" }}</td>
+            <td>{{ order.limit_price and "$" ~ order.limit_price or "—" }}</td>
+            <td>{{ order.confidence and order.confidence ~ "%" or "—" }}</td>
+            <td>{{ order.trade_thesis or order.why_ai_likes_it or "—" }}</td>
+            <td>{{ order.invalidation_rule or "—" }}</td>
+            <td class="alert-time" data-timestamp="{{ order.logged_at or '' }}">--</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8" class="muted">No overnight scans logged yet.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
 {% endblock %}

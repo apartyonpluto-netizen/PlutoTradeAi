@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from typing import Any, Dict, List, Optional
 
 # Paper-trading OpenAPI apps authenticate against a separate sandbox host from
@@ -66,3 +67,62 @@ def get_account_positions(account_id: str) -> List[Dict[str, Any]]:
         raise ValueError(f"Webull API error (positions): HTTP {response.status_code}")
     positions = response.json()
     return positions if isinstance(positions, list) else []
+
+
+def preview_stock_order(
+    account_id: str,
+    symbol: str,
+    side: str,
+    quantity: float,
+    limit_price: float,
+) -> Dict[str, Any]:
+    trade_client = _get_trade_client()
+    order = {
+        "client_order_id": uuid.uuid4().hex,
+        "symbol": symbol,
+        "instrument_type": "EQUITY",
+        "market": "US",
+        "order_type": "LIMIT",
+        "limit_price": str(limit_price),
+        "quantity": str(quantity),
+        "support_trading_session": "CORE",
+        "side": side,
+        "time_in_force": "DAY",
+        "entrust_type": "QTY",
+    }
+    response = trade_client.order_v2.preview_order(account_id, [order])
+    if response.status_code != 200:
+        raise ValueError(f"Webull API error (preview order): HTTP {response.status_code} {response.text}")
+    return response.json()
+
+
+def place_stock_order(
+    account_id: str,
+    symbol: str,
+    side: str,
+    quantity: float,
+    limit_price: float,
+) -> Dict[str, Any]:
+    """Places a real (sandbox) DAY limit order. Placed after-hours, it queues at
+    Webull and fills at the next market open rather than executing immediately."""
+    trade_client = _get_trade_client()
+    client_order_id = uuid.uuid4().hex
+    order = {
+        "client_order_id": client_order_id,
+        "symbol": symbol,
+        "instrument_type": "EQUITY",
+        "market": "US",
+        "order_type": "LIMIT",
+        "limit_price": str(limit_price),
+        "quantity": str(quantity),
+        "support_trading_session": "CORE",
+        "side": side,
+        "time_in_force": "DAY",
+        "entrust_type": "QTY",
+    }
+    response = trade_client.order_v2.place_order(account_id, [order])
+    if response.status_code != 200:
+        raise ValueError(f"Webull API error (place order): HTTP {response.status_code} {response.text}")
+    result = response.json()
+    result["client_order_id"] = client_order_id
+    return result
