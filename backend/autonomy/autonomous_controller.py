@@ -95,6 +95,28 @@ def set_mode(user_id: str, mode: str, reason: str = "") -> Dict[str, object]:
     return _derived(_save(user_id, settings))
 
 
+def update_risk_settings(
+    user_id: str,
+    daily_loss_limit: float | None = None,
+    max_trade_size: float | None = None,
+    max_positions: int | None = None,
+) -> Dict[str, object]:
+    settings = _load(user_id)
+    if daily_loss_limit is not None:
+        if daily_loss_limit < 0:
+            raise ValueError("Daily loss limit must be zero or positive.")
+        settings["daily_loss_limit"] = float(daily_loss_limit)
+    if max_trade_size is not None:
+        if max_trade_size < 0:
+            raise ValueError("Max trade size must be zero or positive.")
+        settings["max_trade_size"] = float(max_trade_size)
+    if max_positions is not None:
+        if max_positions < 0:
+            raise ValueError("Max positions must be zero or positive.")
+        settings["max_positions"] = int(max_positions)
+    return _derived(_save(user_id, settings))
+
+
 def emergency_stop(user_id: str, reason: str = "") -> Dict[str, object]:
     settings = _load(user_id)
     settings["emergency_stop_enabled"] = True

@@ -166,7 +166,30 @@
         <button type="button" class="ghost-button" id="autonomyEmergencyStopButton">Emergency Stop</button>
         <button type="button" class="ghost-button" id="autonomyResetStopButton">Reset Stop</button>
     </div>
-    <p class="muted">V1 safety policy: autonomous real execution is locked until future release and risk-rule validation.</p>
+    <p class="muted">Sandbox only &mdash; live real-money execution stays locked regardless of mode.</p>
+</section>
+
+<section class="panel" data-risk-control>
+    <div class="panel-head">
+        <h3>Risk Limits</h3>
+        <span>Enforced on every autonomous scan</span>
+    </div>
+    <p class="muted">These caps are checked before any order is placed &mdash; a limit hit skips the trade (or the whole scan) with the reason logged in Trade Journal.</p>
+    <div class="grid-form">
+        <label>
+            Daily loss limit ($)
+            <input type="number" id="riskDailyLossLimit" min="0" step="1" value="{{ autonomy_status.daily_loss_limit if autonomy_status else 500 }}">
+        </label>
+        <label>
+            Max trade size ($)
+            <input type="number" id="riskMaxTradeSize" min="0" step="1" value="{{ autonomy_status.max_trade_size if autonomy_status else 250 }}">
+        </label>
+        <label>
+            Max open positions
+            <input type="number" id="riskMaxPositions" min="0" step="1" value="{{ autonomy_status.max_positions if autonomy_status else 3 }}">
+        </label>
+        <button type="button" id="saveRiskSettingsButton">Save Risk Limits</button>
+    </div>
 </section>
 
 <div class="setup-modal" id="autonomyWarningModal" aria-hidden="true">

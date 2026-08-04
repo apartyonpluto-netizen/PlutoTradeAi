@@ -33,6 +33,7 @@ if __package__:
         get_autonomy_status,
         reset_emergency_stop,
         set_mode,
+        update_risk_settings,
     )
     from .account_hub import (
         connect_account,
@@ -103,7 +104,13 @@ else:
         register_user,
         reset_password,
     )
-    from autonomy.autonomous_controller import emergency_stop, get_autonomy_status, reset_emergency_stop, set_mode
+    from autonomy.autonomous_controller import (
+        emergency_stop,
+        get_autonomy_status,
+        reset_emergency_stop,
+        set_mode,
+        update_risk_settings,
+    )
     from account_hub import (
         connect_account,
         disconnect_account,
@@ -1709,6 +1716,22 @@ def api_autonomy_reset_stop():
     return _api_success(result, autonomy=result, ok=True)
 
 
+@app.route("/api/autonomy/risk-settings", methods=["POST"])
+@api_guard
+def api_autonomy_risk_settings():
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = update_risk_settings(
+            _current_user_id(),
+            daily_loss_limit=payload.get("daily_loss_limit"),
+            max_trade_size=payload.get("max_trade_size"),
+            max_positions=payload.get("max_positions"),
+        )
+    except (ValueError, TypeError) as error:
+        raise ValidationError(str(error)) from error
+    return _api_success(result, autonomy=result, ok=True)
+
+
 OVERNIGHT_MIN_CONFIDENCE = 55  # matches the confidence floor the dashboard itself uses to call something a real opportunity vs WAIT
 OVERNIGHT_MAX_ORDERS_PER_RUN = 5
 OVERNIGHT_ORDER_QUANTITY = 1
@@ -1840,6 +1863,25 @@ def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
         raise ValidationError("No Webull sandbox account found for these credentials.")
     account_id = cash_account["account_id"]
 
+    risk_settings = get_autonomy_status(user_id)
+    if risk_settings.get("emergency_stop_enabled"):
+        raise ValidationError("Emergency stop is enabled - reset it in Account Hub before running the scan.")
+
+    daily_loss_limit = float(risk_settings.get("daily_loss_limit", 0) or 0)
+    if daily_loss_limit > 0:
+        balance = webull_api.get_account_balance(account_id)
+        day_pnl = float(balance.get("total_day_profit_loss", 0) or 0)
+        if day_pnl <= -daily_loss_limit:
+            raise ValidationError(
+                f"Daily loss limit reached (today's P/L ${day_pnl:.2f} vs -${daily_loss_limit:.2f} limit). No new trades until tomorrow."
+            )
+
+    max_positions = int(risk_settings.get("max_positions", 0) or 0)
+    open_position_count = len(webull_api.get_account_positions(account_id))
+    available_position_slots = max(0, max_positions - open_position_count) if max_positions > 0 else OVERNIGHT_MAX_ORDERS_PER_RUN
+
+    max_trade_size = float(risk_settings.get("max_trade_size", 0) or 0)
+
     context = _build_page_context(include_reversal=True, include_trend=True)
     opportunities = context.get("upcoming_opportunities", [])
 
@@ -1857,43 +1899,59 @@ def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
         if order.get("status") == "placed" and _order_trading_day(order) == today_key
     }
 
-    candidates = [
+    qualifying = [
         opp
         for opp in opportunities
         if str(opp.get("recommendation", "")).upper() == "CALL"
         and int(opp.get("confidence", 0) or 0) >= OVERNIGHT_MIN_CONFIDENCE
         and str(opp.get("ticker", "")).upper() not in already_placed_today
     ]
-    candidates.sort(key=lambda opp: int(opp.get("confidence", 0) or 0), reverse=True)
-    candidates = candidates[:OVERNIGHT_MAX_ORDERS_PER_RUN]
+    qualifying.sort(key=lambda opp: int(opp.get("confidence", 0) or 0), reverse=True)
+    candidates = qualifying[: min(OVERNIGHT_MAX_ORDERS_PER_RUN, available_position_slots)]
 
     placed: List[Dict[str, object]] = []
     skipped: List[Dict[str, object]] = []
 
     for opp in opportunities:
-        if opp not in candidates:
-            skipped.append(
-                {
-                    "ticker": opp.get("ticker"),
-                    "recommendation": opp.get("recommendation"),
-                    "confidence": opp.get("confidence"),
-                    "reason_skipped": (
-                        f"confidence {opp.get('confidence')} below {OVERNIGHT_MIN_CONFIDENCE} threshold"
-                        if str(opp.get("recommendation", "")).upper() == "CALL"
-                        else f"recommendation is {opp.get('recommendation')}, only CALL/bullish setups auto-order tonight"
-                    ),
-                }
-            )
+        if opp in candidates:
+            continue
+        if opp in qualifying:
+            reason = f"max_positions limit reached ({open_position_count}/{max_positions} open)" if max_positions > 0 else "no position slots available"
+        elif str(opp.get("recommendation", "")).upper() == "CALL":
+            reason = f"confidence {opp.get('confidence')} below {OVERNIGHT_MIN_CONFIDENCE} threshold"
+        else:
+            reason = f"recommendation is {opp.get('recommendation')}, only CALL/bullish setups auto-order tonight"
+        skipped.append(
+            {
+                "ticker": opp.get("ticker"),
+                "recommendation": opp.get("recommendation"),
+                "confidence": opp.get("confidence"),
+                "reason_skipped": reason,
+            }
+        )
 
     for candidate_index, opp in enumerate(candidates):
         if candidate_index > 0:
             time.sleep(1.0)  # spread order placements out to avoid tripping Webull's rate limiter
         ticker = str(opp.get("ticker", ""))
         limit_price = float(opp.get("ideal_entry") or 0)
+
+        if max_trade_size > 0 and limit_price > max_trade_size:
+            skipped.append(
+                {
+                    "ticker": ticker,
+                    "recommendation": opp.get("recommendation"),
+                    "confidence": opp.get("confidence"),
+                    "reason_skipped": f"share price ${limit_price:.2f} exceeds max_trade_size ${max_trade_size:.2f} risk limit",
+                }
+            )
+            continue
+
+        quantity = max(1, int(max_trade_size // limit_price)) if max_trade_size > 0 and limit_price > 0 else OVERNIGHT_ORDER_QUANTITY
         entry = {
             "ticker": ticker,
             "side": "BUY",
-            "quantity": OVERNIGHT_ORDER_QUANTITY,
+            "quantity": quantity,
             "limit_price": limit_price,
             "confidence": opp.get("confidence"),
             "trade_quality": opp.get("trade_quality"),
@@ -1913,7 +1971,7 @@ def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
                 account_id=account_id,
                 symbol=ticker,
                 side="BUY",
-                quantity=OVERNIGHT_ORDER_QUANTITY,
+                quantity=quantity,
                 limit_price=limit_price,
                 trading_session=_current_webull_trading_session(),
             )

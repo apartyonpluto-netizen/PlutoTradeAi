@@ -895,6 +895,28 @@ const bindAutonomyControls = () => {
     });
   }
 
+  const saveRiskBtn = document.getElementById("saveRiskSettingsButton");
+  const dailyLossInput = document.getElementById("riskDailyLossLimit");
+  const maxTradeSizeInput = document.getElementById("riskMaxTradeSize");
+  const maxPositionsInput = document.getElementById("riskMaxPositions");
+  if (saveRiskBtn instanceof HTMLButtonElement) {
+    saveRiskBtn.addEventListener("click", async () => {
+      try {
+        await requestJson("/api/autonomy/risk-settings", {
+          method: "POST",
+          body: JSON.stringify({
+            daily_loss_limit: dailyLossInput instanceof HTMLInputElement ? Number(dailyLossInput.value) : undefined,
+            max_trade_size: maxTradeSizeInput instanceof HTMLInputElement ? Number(maxTradeSizeInput.value) : undefined,
+            max_positions: maxPositionsInput instanceof HTMLInputElement ? Number(maxPositionsInput.value) : undefined,
+          }),
+        });
+        showToast("Risk limits saved.", "success");
+      } catch (error) {
+        showToast(error.message, "error");
+      }
+    });
+  }
+
   document.querySelectorAll(".close-autonomy-modal").forEach((button) => {
     button.addEventListener("click", () => {
       if (modal instanceof HTMLElement) {
