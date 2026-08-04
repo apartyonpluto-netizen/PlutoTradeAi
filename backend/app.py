@@ -1233,7 +1233,15 @@ def trade_journal_page() -> str:
     context["paper_trades"] = list_paper_trades(user_id)
     context["paper_trade_summary"] = get_paper_trade_summary(user_id)
     context["overnight_orders"] = list_overnight_orders(user_id)
+    context["webull_positions"] = _get_live_webull_positions(user_id)
     return render_template("trade_journal.html", **context)
+
+
+@app.route("/api/trade-journal/refresh-positions", methods=["POST"])
+@api_guard
+def api_refresh_webull_positions():
+    payload = _get_live_webull_positions(_current_user_id(), force_refresh=True)
+    return _api_success(payload, **payload)
 
 
 @app.route("/candle-brain")
@@ -1676,6 +1684,45 @@ def api_autonomy_reset_stop():
 OVERNIGHT_MIN_CONFIDENCE = 55  # matches the confidence floor the dashboard itself uses to call something a real opportunity vs WAIT
 OVERNIGHT_MAX_ORDERS_PER_RUN = 5
 OVERNIGHT_ORDER_QUANTITY = 1
+
+POSITIONS_CACHE: Dict[str, Dict[str, object]] = {}
+POSITIONS_CACHE_SECONDS = 30
+
+
+def _get_live_webull_positions(user_id: str, force_refresh: bool = False) -> Dict[str, object]:
+    """Real (sandbox) open positions from Webull, distinct from the local
+    simulated paper_trader.py trades - the two are separate systems and only
+    this one reflects orders actually placed through the autonomy pipeline."""
+    cached = POSITIONS_CACHE.get(user_id)
+    if (
+        not force_refresh
+        and isinstance(cached, dict)
+        and isinstance(cached.get("expires_at"), datetime)
+        and cached["expires_at"] > _now_utc()
+    ):
+        return cached["payload"]
+
+    accounts = get_accounts(user_id)
+    webull_account = next((a for a in accounts if a.get("platform") == "webull"), None)
+    if not webull_account or webull_account.get("status") != "Connected":
+        payload = {"connected": False, "positions": [], "error": ""}
+    else:
+        try:
+            sandbox_accounts = webull_api.get_paper_accounts()
+            cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
+            if not cash_account:
+                raise ValueError("No Webull sandbox account found for these credentials.")
+            positions = webull_api.get_account_positions(cash_account["account_id"])
+            for position in positions:
+                pnl = float(position.get("unrealized_profit_loss", 0) or 0)
+                rate = float(position.get("unrealized_profit_loss_rate", 0) or 0)
+                position["pnl_display"] = f"{'-' if pnl < 0 else ''}${abs(pnl):.2f} ({rate * 100:.2f}%)"
+            payload = {"connected": True, "positions": positions, "error": ""}
+        except Exception as error:  # noqa: BLE001 - a flaky Webull call shouldn't break the page
+            payload = {"connected": True, "positions": [], "error": str(error)}
+
+    POSITIONS_CACHE[user_id] = {"payload": payload, "expires_at": _now_utc() + timedelta(seconds=POSITIONS_CACHE_SECONDS)}
+    return payload
 
 
 def _current_webull_trading_session() -> str:

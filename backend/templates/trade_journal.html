@@ -33,6 +33,43 @@
 </section>
 
 <section class="panel panel-table">
+    <div class="panel-head">
+        <h3>Webull Sandbox &mdash; Active Positions</h3>
+        {% if not webull_positions.connected %}
+        <span>Not Connected</span>
+        {% elif webull_positions.error %}
+        <span>Error</span>
+        {% else %}
+        <span>{{ webull_positions.positions|length }} open</span>
+        {% endif %}
+    </div>
+    <p class="muted">Real (sandbox) positions currently held on Webull &mdash; separate from the simulated paper trades below.</p>
+    {% if not webull_positions.connected %}
+    <p class="muted">Connect Webull in Account Hub to see your real sandbox positions here.</p>
+    {% elif webull_positions.error %}
+    <p class="auth-error">{{ webull_positions.error }}</p>
+    {% else %}
+    <table id="webullPositionsTable">
+        <thead><tr><th>Ticker</th><th>Qty</th><th>Cost Basis</th><th>Last Price</th><th>Market Value</th><th>Unrealized P/L</th></tr></thead>
+        <tbody>
+        {% for position in webull_positions.positions %}
+        <tr>
+            <td>{{ position.symbol }}</td>
+            <td>{{ position.quantity }}</td>
+            <td>${{ position.cost_price }}</td>
+            <td>${{ position.last_price }}</td>
+            <td>${{ position.market_value }}</td>
+            <td>{{ position.pnl_display }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="muted">No open Webull sandbox positions right now.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</section>
+
+<section class="panel panel-table">
     <div class="panel-head"><h3>Positions</h3><span id="paperTradeCount">{{ paper_trades|length }} entries</span></div>
     <table id="paperTradeTable">
         <thead><tr><th>Ticker</th><th>Direction</th><th>Qty</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Status</th><th>Actions</th></tr></thead>
