@@ -159,17 +159,19 @@
                     <li>9:30</li><li>11:00</li><li>1:00</li><li>3:30</li>
                 </ul>
             </article>
+            {% set webull_account = (accounts | selectattr("platform", "equalto", "webull") | first) %}
             <article class="glass-panel mini-panel">
-                <div class="panel-head"><h3>Portfolio Allocation</h3><span>Live</span></div>
-                <div class="donut-wrap">
-                    <div class="donut" aria-hidden="true"></div>
-                    <ul>
-                        <li><b>Stocks</b><span>65%</span></li>
-                        <li><b>Cash</b><span>20%</span></li>
-                        <li><b>Options</b><span>10%</span></li>
-                        <li><b>Other</b><span>5%</span></li>
-                    </ul>
+                <div class="panel-head"><h3>Account Balance</h3><span>{{ "Webull Sandbox" if webull_account and webull_account.status == "Connected" else "Not Connected" }}</span></div>
+                {% if webull_account and webull_account.status == "Connected" %}
+                <div class="price-map-grid">
+                    <div><small>Net Liquidation Value</small><b>${{ webull_account.net_liquidation_value }}</b></div>
+                    <div><small>Cash Balance</small><b>${{ webull_account.cash_balance }}</b></div>
+                    <div><small>Buying Power</small><b>${{ webull_account.buying_power }}</b></div>
+                    <div><small>Account</small><b>{{ webull_account.account_number }}</b></div>
                 </div>
+                {% else %}
+                <p class="muted">Connect Webull in Account Hub to show your real sandbox balance here.</p>
+                {% endif %}
             </article>
         </section>
 

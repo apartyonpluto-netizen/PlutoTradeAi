@@ -1067,6 +1067,7 @@ def dashboard_page() -> str:
         include_trusted_accounts=True,
     )
     context["macro_ticker_rows"] = get_macro_ticker_tape()
+    context["accounts"] = get_accounts(_current_user_id())
     return render_template("dashboard.html", **context)
 
 
