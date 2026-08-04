@@ -54,10 +54,10 @@
     <p class="auth-error">{{ webull_positions.error }}</p>
     {% else %}
     <table id="webullPositionsTable">
-        <thead><tr><th>Ticker</th><th>Qty</th><th>Cost Basis</th><th>Last Price</th><th>Market Value</th><th>Unrealized P/L</th><th>Exit Signal</th></tr></thead>
+        <thead><tr><th>Ticker</th><th>Qty</th><th>Cost Basis</th><th>Last Price</th><th>Market Value</th><th>Unrealized P/L</th><th>Exit Signal</th><th>Actions</th></tr></thead>
         <tbody>
         {% for position in webull_positions.positions %}
-        <tr>
+        <tr data-position-ticker="{{ position.symbol }}">
             <td>{{ position.symbol }}</td>
             <td>{{ position.quantity }}</td>
             <td>${{ position.cost_price }}</td>
@@ -73,9 +73,10 @@
                 &mdash;
                 {% endif %}
             </td>
+            <td class="action-row"><button class="close-webull-position" type="button" data-ticker="{{ position.symbol }}">Close</button></td>
         </tr>
         {% else %}
-        <tr><td colspan="7" class="muted">No open Webull sandbox positions right now.</td></tr>
+        <tr><td colspan="8" class="muted">No open Webull sandbox positions right now.</td></tr>
         {% endfor %}
         </tbody>
     </table>

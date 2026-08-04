@@ -1175,6 +1175,32 @@ const bindPaperTradePage = () => {
   });
 };
 
+const bindWebullPositionsPage = () => {
+  const table = document.getElementById("webullPositionsTable");
+  if (!(table instanceof HTMLElement)) return;
+
+  table.addEventListener("click", async (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement) || !target.classList.contains("close-webull-position")) return;
+    const ticker = target.dataset.ticker || "";
+    if (!ticker) return;
+    if (!window.confirm(`Close your entire ${ticker} position at the current market price? This places a real sandbox sell order.`)) return;
+
+    target.disabled = true;
+    try {
+      await requestJson("/api/trade-journal/close-position", {
+        method: "POST",
+        body: JSON.stringify({ ticker }),
+      });
+      showToast(`${ticker} close order placed.`, "success");
+      window.location.reload();
+    } catch (error) {
+      showToast(error.message, "error");
+      target.disabled = false;
+    }
+  });
+};
+
 const bindGlobalSearch = () => {
   const input = document.getElementById("globalSearch");
   const results = document.getElementById("globalSearchResults");
@@ -1324,6 +1350,7 @@ onReady(() => {
   bindGlobalSearch();
   bindWatchlistPage();
   bindPaperTradePage();
+  bindWebullPositionsPage();
   bindAiChartMarks();
   bindScannerPage();
   bindOptionsSuggestions();

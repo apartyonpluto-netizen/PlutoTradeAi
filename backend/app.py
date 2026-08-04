@@ -1268,6 +1268,72 @@ def api_refresh_webull_positions():
     return _api_success(payload, **payload)
 
 
+@app.route("/api/trade-journal/close-position", methods=["POST"])
+@api_guard
+def api_close_webull_position():
+    """Sells a full open Webull sandbox position at its current last price
+    (a marketable limit order) - the counterpart to the Take Profit/Stop
+    Loss badges, which were previously just a static label with no action
+    behind them."""
+    payload = request.get_json(silent=True) or {}
+    ticker = str(payload.get("ticker", "")).strip().upper()
+    if not ticker:
+        raise ValidationError("Ticker is required.")
+
+    user_id = _current_user_id()
+    accounts = get_accounts(user_id)
+    webull_account = next((a for a in accounts if a.get("platform") == "webull"), None)
+    if not webull_account or webull_account.get("status") != "Connected":
+        raise ValidationError("Connect Webull in Account Hub before closing a position.")
+
+    sandbox_accounts = webull_api.get_paper_accounts()
+    cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
+    if not cash_account:
+        raise ValidationError("No Webull sandbox account found for these credentials.")
+    account_id = cash_account["account_id"]
+
+    positions = webull_api.get_account_positions(account_id)
+    position = next((p for p in positions if str(p.get("symbol", "")).upper() == ticker), None)
+    if not position:
+        raise ValidationError(f"No open position found for {ticker}.")
+
+    quantity = float(position.get("quantity", 0) or 0)
+    limit_price = float(position.get("last_price", 0) or 0)
+    if quantity <= 0 or limit_price <= 0:
+        raise ValidationError(f"Invalid quantity/price for {ticker}, cannot close.")
+
+    entry = {
+        "ticker": ticker,
+        "side": "SELL",
+        "quantity": quantity,
+        "limit_price": limit_price,
+        "reason": "Manual close from Trade Journal",
+        "account_id": account_id,
+        "status": "pending",
+    }
+    try:
+        result = webull_api.place_stock_order(
+            account_id=account_id,
+            symbol=ticker,
+            side="SELL",
+            quantity=quantity,
+            limit_price=limit_price,
+            trading_session=_current_webull_trading_session(),
+        )
+        entry["status"] = "placed"
+        entry["webull_response"] = result
+    except Exception as error:  # noqa: BLE001 - surface the failure, don't crash the request
+        entry["status"] = "failed"
+        entry["error"] = str(error)
+        record_overnight_order(user_id, entry)
+        raise ValidationError(f"Failed to close {ticker}: {error}") from error
+
+    record_overnight_order(user_id, entry)
+    POSITIONS_CACHE.pop(user_id, None)
+    BALANCE_CACHE.pop(user_id, None)
+    return _api_success(entry, **entry)
+
+
 @app.route("/candle-brain")
 def candle_brain_page() -> str:
     focus_ticker = request.args.get("ticker", "").strip().upper()
