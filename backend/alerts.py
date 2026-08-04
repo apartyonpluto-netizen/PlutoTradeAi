@@ -135,8 +135,94 @@ def _category_for_type(alert_type: str) -> str:
         "mission-alert": "Mission Alert",
         "economic-event": "Economic Event",
         "tradingview-alert": "TradingView",
+        "exit-signal": "Trade Journal",
     }
     return mapping.get(alert_type, "System")
+
+
+def _target_stop_by_ticker(overnight_orders: Sequence[Dict[str, object]]) -> Dict[str, Dict[str, object]]:
+    target_stop: Dict[str, Dict[str, object]] = {}
+    for order in overnight_orders:
+        if order.get("status") != "placed":
+            continue
+        ticker = str(order.get("ticker", "")).upper()
+        if not ticker or ticker in target_stop:
+            continue  # overnight_orders is newest-first, so the first hit per ticker is the most recent order
+        target_stop[ticker] = {"target": order.get("target"), "stop": order.get("stop")}
+    return target_stop
+
+
+def _exit_signal_for_position(position: Dict[str, object], levels: Dict[str, object] | None) -> Dict[str, object] | None:
+    """Returns {status, target, stop, last_price} if price has crossed the
+    recorded target/stop for this position, else None. Never auto-closes
+    anything - purely informational."""
+    if not levels:
+        return None
+    try:
+        last_price = float(position.get("last_price", 0) or 0)
+        target = float(levels["target"]) if levels.get("target") not in (None, "") else None
+        stop = float(levels["stop"]) if levels.get("stop") not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+    if not last_price:
+        return None
+
+    if target is not None and last_price >= target:
+        return {"status": "TARGET_HIT", "target": target, "stop": stop, "last_price": last_price}
+    if stop is not None and last_price <= stop:
+        return {"status": "STOP_HIT", "target": target, "stop": stop, "last_price": last_price}
+    return None
+
+
+def annotate_positions_with_exit_signal(
+    positions: Sequence[Dict[str, object]],
+    overnight_orders: Sequence[Dict[str, object]],
+) -> List[Dict[str, object]]:
+    target_stop = _target_stop_by_ticker(overnight_orders)
+    annotated = []
+    for position in positions:
+        ticker = str(position.get("symbol", "")).upper()
+        signal = _exit_signal_for_position(position, target_stop.get(ticker))
+        annotated.append({**position, "exit_signal": signal["status"] if signal else None})
+    return annotated
+
+
+def build_exit_signal_alerts(
+    positions: Sequence[Dict[str, object]],
+    overnight_orders: Sequence[Dict[str, object]],
+) -> List[Dict[str, str]]:
+    """Compares each open Webull sandbox position's live price against the
+    target/stop recorded when that ticker's order was placed, and raises an
+    alert once price crosses either level - the app never auto-closes a
+    position, this just tells the user it's time to look."""
+    target_stop = _target_stop_by_ticker(overnight_orders)
+
+    alerts: List[Dict[str, str]] = []
+    for position in positions:
+        ticker = str(position.get("symbol", "")).upper()
+        if not ticker:
+            continue
+        signal = _exit_signal_for_position(position, target_stop.get(ticker))
+        if not signal:
+            continue
+
+        if signal["status"] == "TARGET_HIT":
+            message = f"{ticker} hit its target of ${signal['target']:.2f} (now ${signal['last_price']:.2f}). Consider taking profit."
+        else:
+            message = f"{ticker} broke its stop of ${signal['stop']:.2f} (now ${signal['last_price']:.2f}). Consider cutting the loss."
+        alert_type = "exit-signal"
+
+        alerts.append(
+            {
+                "id": _build_alert_id(alert_type, ticker, message),
+                "type": alert_type,
+                "ticker": ticker,
+                "message": message,
+                "source": "system",
+                "created_at": _now_iso(),
+            }
+        )
+    return alerts
 
 
 def build_system_alerts(

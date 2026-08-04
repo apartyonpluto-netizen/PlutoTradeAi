@@ -47,6 +47,8 @@ if __package__:
     )
     from .alerts import (
         add_manual_alert,
+        annotate_positions_with_exit_signal,
+        build_exit_signal_alerts,
         build_system_alerts,
         dismiss_alert,
         get_alerts_snapshot,
@@ -123,6 +125,8 @@ else:
     )
     from alerts import (
         add_manual_alert,
+        annotate_positions_with_exit_signal,
+        build_exit_signal_alerts,
         build_system_alerts,
         dismiss_alert,
         get_alerts_snapshot,
@@ -1000,6 +1004,9 @@ def _build_page_context(
         market_phase=_market_phase(),
         tradingview_alert=get_tradingview_status(user_id).get("latest_alert", {}),
     )
+    live_positions = _get_live_webull_positions(user_id)
+    if live_positions.get("connected") and not live_positions.get("error"):
+        system_alerts += build_exit_signal_alerts(live_positions.get("positions", []), list_overnight_orders(user_id))
     alerts = get_alerts_snapshot(user_id, system_alerts)
 
     status_summary = _compute_status(scanner_rows, scanner_errors)
@@ -1242,8 +1249,15 @@ def trade_journal_page() -> str:
     user_id = _current_user_id()
     context["paper_trades"] = list_paper_trades(user_id)
     context["paper_trade_summary"] = get_paper_trade_summary(user_id)
-    context["overnight_orders"] = list_overnight_orders(user_id)
-    context["webull_positions"] = _get_live_webull_positions(user_id)
+    overnight_orders = list_overnight_orders(user_id)
+    context["overnight_orders"] = overnight_orders
+    webull_positions = _get_live_webull_positions(user_id)
+    if webull_positions.get("connected") and not webull_positions.get("error"):
+        webull_positions = {
+            **webull_positions,
+            "positions": annotate_positions_with_exit_signal(webull_positions["positions"], overnight_orders),
+        }
+    context["webull_positions"] = webull_positions
     return render_template("trade_journal.html", **context)
 
 

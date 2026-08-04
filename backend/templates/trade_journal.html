@@ -54,7 +54,7 @@
     <p class="auth-error">{{ webull_positions.error }}</p>
     {% else %}
     <table id="webullPositionsTable">
-        <thead><tr><th>Ticker</th><th>Qty</th><th>Cost Basis</th><th>Last Price</th><th>Market Value</th><th>Unrealized P/L</th></tr></thead>
+        <thead><tr><th>Ticker</th><th>Qty</th><th>Cost Basis</th><th>Last Price</th><th>Market Value</th><th>Unrealized P/L</th><th>Exit Signal</th></tr></thead>
         <tbody>
         {% for position in webull_positions.positions %}
         <tr>
@@ -64,9 +64,18 @@
             <td>${{ position.last_price }}</td>
             <td>${{ position.market_value }}</td>
             <td>{{ position.pnl_display }}</td>
+            <td>
+                {% if position.exit_signal == "TARGET_HIT" %}
+                <span class="badge badge-soft">Take Profit</span>
+                {% elif position.exit_signal == "STOP_HIT" %}
+                <span class="badge">Stop Loss</span>
+                {% else %}
+                &mdash;
+                {% endif %}
+            </td>
         </tr>
         {% else %}
-        <tr><td colspan="6" class="muted">No open Webull sandbox positions right now.</td></tr>
+        <tr><td colspan="7" class="muted">No open Webull sandbox positions right now.</td></tr>
         {% endfor %}
         </tbody>
     </table>
