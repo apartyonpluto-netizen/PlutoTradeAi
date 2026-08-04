@@ -17,6 +17,10 @@
 
 <section class="panel">
     <div class="panel-head"><h3>Open a paper trade</h3><span>Market fills at live price &middot; Limit fills at your price</span></div>
+    {% if not settings_payload.paper_trading_enabled %}
+    <p class="auth-error">Paper trading is disabled in <a href="/settings">Settings</a>. Enable it there to execute a paper trade.</p>
+    {% endif %}
+    <fieldset {% if not settings_payload.paper_trading_enabled %}disabled{% endif %} style="border: none; padding: 0; margin: 0;">
     <form id="paperTradeForm" class="grid-form">
         <input type="text" name="ticker" placeholder="Ticker" required>
         <select name="direction">
@@ -34,6 +38,7 @@
         <input type="text" name="reason" placeholder="Reason (optional)">
         <button type="submit">Execute Paper Trade</button>
     </form>
+    </fieldset>
 </section>
 
 <section class="panel panel-table">

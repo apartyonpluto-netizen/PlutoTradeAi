@@ -90,8 +90,10 @@ if __package__:
         add_stock,
         build_watchlist_suggestions,
         delete_stock,
+        dismiss_suggestion,
         get_watchlist,
         get_watchlist_tickers,
+        list_dismissed_suggestions,
         search_watchlist,
         sort_watchlist,
         update_stock,
@@ -168,8 +170,10 @@ else:
         add_stock,
         build_watchlist_suggestions,
         delete_stock,
+        dismiss_suggestion,
         get_watchlist,
         get_watchlist_tickers,
+        list_dismissed_suggestions,
         search_watchlist,
         sort_watchlist,
         update_stock,
@@ -789,12 +793,18 @@ def _build_page_context(
 ) -> Dict[str, object]:
     focus_ticker = focus_ticker.strip().upper()
     user_id = _current_user_id()
+    settings_payload = get_settings(user_id)
     watchlist = get_watchlist(user_id)
     watchlist_tickers = [row["ticker"] for row in watchlist]
     scanner_rows, scanner_errors, scanner_last_updated = get_market_data(force_refresh=force_refresh)
     suggestions = (
-        build_watchlist_suggestions(scanner_rows=scanner_rows, watchlist_tickers=watchlist_tickers, limit=8)
-        if include_suggestions
+        build_watchlist_suggestions(
+            scanner_rows=scanner_rows,
+            watchlist_tickers=watchlist_tickers,
+            limit=8,
+            dismissed_tickers=list_dismissed_suggestions(user_id),
+        )
+        if include_suggestions and settings_payload.get("auto_suggestions_enabled", True)
         else []
     )
 
@@ -874,7 +884,6 @@ def _build_page_context(
             )
             pattern_errors = candle_errors
 
-    settings_payload = get_settings(user_id)
     cached_reversal = reversal_rows or (ANALYTICS_CACHE.get("reversal_rows", []) if _cache_is_fresh(ANALYTICS_CACHE) else [])
     cached_trend = trend_rows or (ANALYTICS_CACHE.get("trend_rows", []) if _cache_is_fresh(ANALYTICS_CACHE) else [])
     cached_news = news_rows or (NEWS_CACHE.get("rows", []) if _cache_is_fresh(NEWS_CACHE) else [])
@@ -912,6 +921,7 @@ def _build_page_context(
     else:
         options_map = {}
 
+    confidence_floor = int(settings_payload.get("ai_confidence_threshold", 55) or 55)
     upcoming_opportunities: List[Dict[str, object]] = []
     mission_queue: List[Dict[str, object]] = []
     for ticker in intelligence_tickers:
@@ -923,7 +933,7 @@ def _build_page_context(
         if strategy.get("insufficient_data") or chart.get("insufficient_data"):
             continue
         confidence = int(strategy.get("strategy_confidence", 0) or 0)
-        if confidence < 55:
+        if confidence < confidence_floor:
             continue
         breakout_level = float(chart.get("breakout_level", 0) or 0)
         breakdown_level = float(chart.get("breakdown_level", 0) or 0)
@@ -1408,6 +1418,16 @@ def api_watchlist_add():
     return jsonify({"ok": True, "item": row})
 
 
+@app.route("/api/watchlist/dismiss-suggestion", methods=["POST"])
+def api_watchlist_dismiss_suggestion():
+    payload = request.get_json(silent=True) or {}
+    try:
+        dismiss_suggestion(_current_user_id(), payload.get("ticker", ""))
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    return jsonify({"ok": True})
+
+
 @app.route("/api/watchlist/update", methods=["POST"])
 def api_watchlist_update():
     payload = request.get_json(silent=True) or {}
@@ -1443,6 +1463,8 @@ def api_paper_trade_list():
 @api_guard
 def api_paper_trade_execute():
     payload = request.get_json(silent=True) or {}
+    if not get_settings(_current_user_id()).get("paper_trading_enabled", True):
+        raise ValidationError("Paper trading is disabled in Settings. Enable it to execute a paper trade.")
     try:
         trade = open_paper_trade(
             user_id=_current_user_id(),

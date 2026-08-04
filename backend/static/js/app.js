@@ -360,7 +360,15 @@ const bindWatchlistPage = () => {
       if (!(row instanceof HTMLElement)) return;
       const ticker = row.dataset.suggestionTicker || "";
       if (target.classList.contains("dismiss-suggestion")) {
-        row.remove();
+        try {
+          await requestJson("/api/watchlist/dismiss-suggestion", {
+            method: "POST",
+            body: JSON.stringify({ ticker }),
+          });
+          row.remove();
+        } catch (error) {
+          showToast(error.message, "error");
+        }
         return;
       }
       if (!target.classList.contains("add-suggestion-to-watchlist")) return;
@@ -390,6 +398,8 @@ const bindScannerPage = () => {
   const table = document.getElementById("scannerTable");
   const loading = document.getElementById("scannerLoadingState");
   if (!(button instanceof HTMLButtonElement) || !table) return;
+
+  const frequencySeconds = Math.max(10, Number(document.body.dataset.scannerFrequency) || 20);
 
   const refresh = async (forceRefresh) => {
     button.disabled = true;
@@ -421,7 +431,7 @@ const bindScannerPage = () => {
         errors.innerHTML = payload.errors?.length ? `<p class="error">${payload.errors.join(" | ")}</p>` : "";
       }
       const liveBadge = document.getElementById("scannerLiveBadge");
-      if (liveBadge) liveBadge.textContent = `Live updates every 20s · ${new Date().toLocaleTimeString()}`;
+      if (liveBadge) liveBadge.textContent = `Live updates every ${frequencySeconds}s · ${new Date().toLocaleTimeString()}`;
     } catch (error) {
       showToast(error.message, "error");
     } finally {
@@ -436,7 +446,7 @@ const bindScannerPage = () => {
   });
   window.setInterval(() => {
     refresh(false).catch(() => {});
-  }, 20000);
+  }, frequencySeconds * 1000);
 };
 
 const parseTickerList = (rawValue) =>

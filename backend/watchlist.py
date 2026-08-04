@@ -1,4 +1,5 @@
 import csv
+import json
 import os
 from pathlib import Path
 from typing import Dict, List, Sequence
@@ -13,6 +14,36 @@ def _watchlist_file(user_id: str) -> Path:
     if not user_id:
         raise ValueError("user_id is required.")
     return USER_DATA_ROOT / user_id / "watchlist.csv"
+
+
+def _dismissed_suggestions_file(user_id: str) -> Path:
+    if not user_id:
+        raise ValueError("user_id is required.")
+    path = USER_DATA_ROOT / user_id
+    path.mkdir(parents=True, exist_ok=True)
+    return path / "dismissed_suggestions.json"
+
+
+def list_dismissed_suggestions(user_id: str) -> set[str]:
+    dismissed_file = _dismissed_suggestions_file(user_id)
+    if not dismissed_file.exists():
+        return set()
+    try:
+        data = json.loads(dismissed_file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return set()
+    return {str(ticker).upper() for ticker in data} if isinstance(data, list) else set()
+
+
+def dismiss_suggestion(user_id: str, ticker: str) -> None:
+    normalized = _normalize_ticker(ticker)
+    if not normalized:
+        raise ValueError("Ticker is required.")
+    dismissed = list_dismissed_suggestions(user_id)
+    if normalized in dismissed:
+        return
+    dismissed.add(normalized)
+    _dismissed_suggestions_file(user_id).write_text(json.dumps(sorted(dismissed), indent=2), encoding="utf-8")
 
 
 def _normalize_ticker(ticker: str) -> str:
@@ -181,9 +212,13 @@ def sort_watchlist(rows: Sequence[Dict[str, str]], sort_by: str = "ticker", dire
 
 
 def build_watchlist_suggestions(
-    scanner_rows: List[Dict[str, str]], watchlist_tickers: List[str], limit: int = 8
+    scanner_rows: List[Dict[str, str]],
+    watchlist_tickers: List[str],
+    limit: int = 8,
+    dismissed_tickers: Sequence[str] | None = None,
 ) -> List[Dict[str, str]]:
     watchlist_set = {ticker.upper() for ticker in watchlist_tickers}
+    dismissed_set = {ticker.upper() for ticker in (dismissed_tickers or [])}
     suggestions: List[Dict[str, str]] = []
 
     for row in sorted(
@@ -192,7 +227,7 @@ def build_watchlist_suggestions(
         reverse=True,
     ):
         ticker = _normalize_ticker(str(row.get("ticker", "")))
-        if not ticker or ticker in watchlist_set:
+        if not ticker or ticker in watchlist_set or ticker in dismissed_set:
             continue
 
         score = float(row.get("scanner_score", 0))

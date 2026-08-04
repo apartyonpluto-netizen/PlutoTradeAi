@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="{{ (settings_payload.theme if settings_payload else 'midnight')|lower }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="/static/css/style.css">
     {% block head_extras %}{% endblock %}
 </head>
-<body class="{% block body_class %}{% endblock %}">
+<body class="{% block body_class %}{% endblock %}" data-scanner-frequency="{{ settings_payload.scanner_frequency_seconds if settings_payload else 20 }}">
 <div class="bg-space" aria-hidden="true"></div>
 <div class="bg-stars" aria-hidden="true"></div>
 <div class="bg-nebula" aria-hidden="true"></div>
