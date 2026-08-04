@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import secrets as secrets_module
+import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from datetime import datetime, timedelta, timezone
@@ -1725,7 +1726,9 @@ def api_autonomy_run_overnight_scan():
                 }
             )
 
-    for opp in candidates:
+    for candidate_index, opp in enumerate(candidates):
+        if candidate_index > 0:
+            time.sleep(1.0)  # spread order placements out to avoid tripping Webull's rate limiter
         ticker = str(opp.get("ticker", ""))
         limit_price = float(opp.get("ideal_entry") or 0)
         entry = {

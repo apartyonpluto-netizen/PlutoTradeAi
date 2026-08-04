@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -127,9 +128,20 @@ def place_stock_order(
         "time_in_force": "DAY",
         "entrust_type": "QTY",
     }
-    response = trade_client.order_v2.place_order(account_id, [order])
-    if response.status_code != 200:
-        raise ValueError(f"Webull API error (place order): HTTP {response.status_code} {response.text}")
-    result = response.json()
-    result["client_order_id"] = client_order_id
-    return result
+    # Batching several order placements back-to-back in one request (e.g. the
+    # overnight scan) can trip Webull's own rate limiter (429) well before any
+    # documented per-minute figure - retry with backoff rather than dropping
+    # the order.
+    last_response = None
+    for attempt in range(3):
+        response = trade_client.order_v2.place_order(account_id, [order])
+        if response.status_code == 200:
+            result = response.json()
+            result["client_order_id"] = client_order_id
+            return result
+        last_response = response
+        if response.status_code == 429 and attempt < 2:
+            time.sleep(1.5 * (attempt + 1))
+            continue
+        break
+    raise ValueError(f"Webull API error (place order): HTTP {last_response.status_code} {last_response.text}")
