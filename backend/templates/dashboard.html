@@ -3,15 +3,16 @@
 {% block body_class %}mission-control-page{% endblock %}
 
 {% block content %}
-{% set webull_account = (accounts | selectattr("platform", "equalto", "webull") | first) %}
 <section class="glass-panel account-balance-topbar">
-    <div class="panel-head"><h3>Account Balance</h3><span>{{ "Webull Sandbox" if webull_account and webull_account.status == "Connected" else "Not Connected" }}</span></div>
-    {% if webull_account and webull_account.status == "Connected" %}
+    <div class="panel-head"><h3>Account Balance</h3><span>{{ "Webull Sandbox (live)" if webull_balance.connected and webull_balance.balance else "Not Connected" }}</span></div>
+    {% if webull_balance.error %}
+    <p class="auth-error">{{ webull_balance.error }}</p>
+    {% elif webull_balance.connected and webull_balance.balance %}
     <div class="price-map-grid">
-        <div><small>Net Liquidation Value</small><b>${{ webull_account.net_liquidation_value }}</b></div>
-        <div><small>Cash Balance</small><b>${{ webull_account.cash_balance }}</b></div>
-        <div><small>Buying Power</small><b>${{ webull_account.buying_power }}</b></div>
-        <div><small>Account</small><b>{{ webull_account.account_number }}</b></div>
+        <div><small>Net Liquidation Value</small><b>${{ webull_balance.balance.net_liquidation_value }}</b></div>
+        <div><small>Cash Balance</small><b>${{ webull_balance.balance.cash_balance }}</b></div>
+        <div><small>Buying Power</small><b>${{ webull_balance.balance.buying_power }}</b></div>
+        <div><small>Account</small><b>{{ webull_balance.balance.account_number }}</b></div>
     </div>
     {% else %}
     <p class="muted">Connect Webull in Account Hub to show your real sandbox balance here.</p>

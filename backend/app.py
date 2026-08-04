@@ -1092,6 +1092,7 @@ def dashboard_page() -> str:
     )
     context["macro_ticker_rows"] = get_macro_ticker_tape()
     context["accounts"] = get_accounts(_current_user_id())
+    context["webull_balance"] = _get_live_webull_balance(_current_user_id())
     return render_template("dashboard.html", **context)
 
 
@@ -1688,6 +1689,51 @@ OVERNIGHT_ORDER_QUANTITY = 1
 
 POSITIONS_CACHE: Dict[str, Dict[str, object]] = {}
 POSITIONS_CACHE_SECONDS = 30
+BALANCE_CACHE: Dict[str, Dict[str, object]] = {}
+BALANCE_CACHE_SECONDS = 30
+
+
+def _get_live_webull_balance(user_id: str, force_refresh: bool = False) -> Dict[str, object]:
+    """accounts.json only stores a balance snapshot from whenever the user last
+    hit Connect/Test in Account Hub - it does not update after trades place, so
+    anything reading it directly can show a stale net liq / cash / buying power.
+    This fetches the current balance fresh (short-cached to avoid hammering
+    Webull on every request)."""
+    cached = BALANCE_CACHE.get(user_id)
+    if (
+        not force_refresh
+        and isinstance(cached, dict)
+        and isinstance(cached.get("expires_at"), datetime)
+        and cached["expires_at"] > _now_utc()
+    ):
+        return cached["payload"]
+
+    accounts = get_accounts(user_id)
+    webull_account = next((a for a in accounts if a.get("platform") == "webull"), None)
+    if not webull_account or webull_account.get("status") != "Connected":
+        payload = {"connected": False, "balance": None, "error": ""}
+    else:
+        try:
+            sandbox_accounts = webull_api.get_paper_accounts()
+            cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
+            if not cash_account:
+                raise ValueError("No Webull sandbox account found for these credentials.")
+            balance = webull_api.get_account_balance(cash_account["account_id"])
+            payload = {
+                "connected": True,
+                "error": "",
+                "balance": {
+                    "account_number": cash_account.get("account_number", ""),
+                    "net_liquidation_value": balance.get("total_net_liquidation_value", ""),
+                    "cash_balance": balance.get("total_cash_balance", ""),
+                    "buying_power": (balance.get("account_currency_assets") or [{}])[0].get("buying_power", ""),
+                },
+            }
+        except Exception as error:  # noqa: BLE001 - a flaky Webull call shouldn't break the page
+            payload = {"connected": True, "balance": None, "error": str(error)}
+
+    BALANCE_CACHE[user_id] = {"payload": payload, "expires_at": _now_utc() + timedelta(seconds=BALANCE_CACHE_SECONDS)}
+    return payload
 
 
 def _get_live_webull_positions(user_id: str, force_refresh: bool = False) -> Dict[str, object]:
