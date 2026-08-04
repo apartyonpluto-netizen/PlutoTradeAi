@@ -134,22 +134,37 @@ def _fmt(value: float) -> str:
     return f"${value:.2f}"
 
 
-def build_strategy_intelligence(ticker: str, extended_hours: Dict[str, object] | None = None) -> Dict[str, object]:
+def build_strategy_intelligence(
+    ticker: str,
+    extended_hours: Dict[str, object] | None = None,
+    daily: pd.DataFrame | None = None,
+    intraday: pd.DataFrame | None = None,
+    backtest_mode: bool = False,
+) -> Dict[str, object]:
+    """backtest_mode lets a backtest engine pass in a pre-sliced `daily` frame
+    (data available as of some historical date) and skip the intraday fetch -
+    Yahoo only retains 5-minute intraday history for ~60 days, so it can't be
+    reconstructed for an arbitrary past date. VWAP/gap signals that depend on
+    live intraday data degrade to a neutral WAIT bias rather than being faked."""
     normalized = ticker.strip().upper()
     if not normalized:
         raise ValueError("Ticker is required.")
     extended_hours = extended_hours or {}
 
-    try:
-        daily, intraday = _fetch_ohlcv(normalized)
-    except Exception as error:
-        return _insufficient_payload(normalized, f"Market data fetch failed: {error}")
+    if daily is None or intraday is None:
+        try:
+            fetched_daily, fetched_intraday = _fetch_ohlcv(normalized)
+        except Exception as error:
+            return _insufficient_payload(normalized, f"Market data fetch failed: {error}")
+        daily = fetched_daily if daily is None else daily
+        intraday = fetched_intraday if intraday is None else intraday
+
     daily = _normalize_ohlcv(daily, normalized)
     intraday = _normalize_ohlcv(intraday, normalized)
 
     if daily.empty or len(daily) < 80:
         return _insufficient_payload(normalized, "Not enough daily OHLCV candles. Need at least ~80 daily bars.")
-    if intraday.empty or len(intraday) < 40:
+    if not backtest_mode and (intraday.empty or len(intraday) < 40):
         return _insufficient_payload(normalized, "Not enough intraday OHLCV candles. Need intraday data.")
 
     closes = daily["Close"].astype(float)
@@ -157,10 +172,13 @@ def build_strategy_intelligence(ticker: str, extended_hours: Dict[str, object] |
     lows = daily["Low"].astype(float)
     opens = daily["Open"].astype(float)
     volumes = daily["Volume"].astype(float)
-    intraday_close = intraday["Close"].astype(float)
-    intraday_volume = intraday["Volume"].astype(float)
-    typical_price = (intraday["High"].astype(float) + intraday["Low"].astype(float) + intraday_close) / 3
-    vwap = float((typical_price * intraday_volume).cumsum().iloc[-1] / intraday_volume.cumsum().iloc[-1])
+    if intraday.empty:
+        vwap = float(closes.iloc[-1])
+    else:
+        intraday_close = intraday["Close"].astype(float)
+        intraday_volume = intraday["Volume"].astype(float)
+        typical_price = (intraday["High"].astype(float) + intraday["Low"].astype(float) + intraday_close) / 3
+        vwap = float((typical_price * intraday_volume).cumsum().iloc[-1] / intraday_volume.cumsum().iloc[-1])
 
     current_price = float(closes.iloc[-1])
     previous_close = float(closes.iloc[-2])
@@ -190,7 +208,7 @@ def build_strategy_intelligence(ticker: str, extended_hours: Dict[str, object] |
     in_downtrend = ema9 < ema20 < ema50 and current_price < ema20
     near_support = abs(current_price - low20) / current_price <= 0.015 if current_price else False
     near_resistance = abs(current_price - high20) / current_price <= 0.015 if current_price else False
-    near_vwap = abs(current_price - vwap) / current_price <= 0.006 if current_price else False
+    near_vwap = bool(not intraday.empty and current_price and abs(current_price - vwap) / current_price <= 0.006)
 
     candidates: List[StrategyCandidate] = [
         StrategyCandidate(

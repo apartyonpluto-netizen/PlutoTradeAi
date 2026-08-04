@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · Backtest{% endblock %}
+{% block content %}
+<section class="panel">
+    <div class="panel-head">
+        <h3>Strategy Backtest</h3>
+        <span>Validates the same CALL + confidence signal the autonomous scan trades on</span>
+    </div>
+    <p class="muted">Replays the strategy engine day-by-day over historical price data to see whether its CALL signals actually made money before you trust it with more autonomy. Daily-bar strategies only (Breakout, Pullback, Reversal, Trend Continuation, Support Bounce, Resistance Rejection, Mean Reversion, Momentum) &mdash; VWAP/gap/extended-hours signals are excluded because Yahoo Finance doesn't retain 5-minute intraday history beyond ~60 days, so they can't be reconstructed for older dates. Entries fill at the next trading day's open; exits are a fixed hold period, not a stop/target.</p>
+    <form id="backtestForm" class="grid-form">
+        <input type="text" name="tickers" placeholder="Tickers, comma separated (e.g. AAPL, TSLA, NVDA)" required>
+        <select name="lookback_months">
+            <option value="3">3 months</option>
+            <option value="6" selected>6 months</option>
+            <option value="12">12 months</option>
+            <option value="24">24 months</option>
+        </select>
+        <input type="number" name="hold_days" placeholder="Hold days" value="5" min="1" max="20" step="1">
+        <input type="number" name="min_confidence" placeholder="Min confidence %" value="55" min="0" max="99" step="1">
+        <button type="submit" id="backtestSubmit">Run Backtest</button>
+    </form>
+</section>
+
+<section class="panel" id="backtestSummaryPanel" style="display:none;">
+    <div class="panel-head"><h3>Combined Results</h3><span id="backtestScope"></span></div>
+    <div class="price-map-grid">
+        <div><small>Trades</small><b id="btTradeCount">&mdash;</b></div>
+        <div><small>Win Rate</small><b id="btWinRate">&mdash;</b></div>
+        <div><small>Avg Return / Trade</small><b id="btAvgReturn">&mdash;</b></div>
+        <div><small>Total Return (summed)</small><b id="btTotalReturn">&mdash;</b></div>
+        <div><small>Profit Factor</small><b id="btProfitFactor">&mdash;</b></div>
+        <div><small>Max Drawdown</small><b id="btMaxDrawdown">&mdash;</b></div>
+    </div>
+</section>
+
+<section class="panel panel-table" id="backtestPerTickerPanel" style="display:none;">
+    <div class="panel-head"><h3>Per Ticker</h3><span id="btPerTickerCount"></span></div>
+    <table id="backtestPerTickerTable">
+        <thead><tr><th>Ticker</th><th>Trades</th><th>Win Rate</th><th>Avg Return</th><th>Total Return</th><th>Profit Factor</th><th>Max Drawdown</th></tr></thead>
+        <tbody></tbody>
+    </table>
+</section>
+
+<section class="panel panel-table" id="backtestTradesPanel" style="display:none;">
+    <div class="panel-head"><h3>Simulated Trades</h3><span id="btTradesCount"></span></div>
+    <table id="backtestTradesTable">
+        <thead><tr><th>Ticker</th><th>Entry Date</th><th>Entry</th><th>Exit Date</th><th>Exit</th><th>Strategy</th><th>Confidence</th><th>PnL</th></tr></thead>
+        <tbody></tbody>
+    </table>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script>
+(() => {
+    const form = document.getElementById("backtestForm");
+    const submitButton = document.getElementById("backtestSubmit");
+    const summaryPanel = document.getElementById("backtestSummaryPanel");
+    const perTickerPanel = document.getElementById("backtestPerTickerPanel");
+    const tradesPanel = document.getElementById("backtestTradesPanel");
+    if (!(form instanceof HTMLFormElement)) return;
+
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const data = new FormData(form);
+        submitButton.disabled = true;
+        submitButton.textContent = "Running...";
+        try {
+            const response = await fetch("/api/backtest/run", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    tickers: String(data.get("tickers") || "").split(",").map((t) => t.trim()).filter(Boolean),
+                    lookback_months: Number(data.get("lookback_months")),
+                    hold_days: Number(data.get("hold_days")),
+                    min_confidence: Number(data.get("min_confidence")),
+                }),
+            });
+            const payload = await response.json();
+            if (!response.ok || payload.ok === false) {
+                throw new Error(payload.error || "Backtest failed.");
+            }
+
+            document.getElementById("backtestScope").textContent =
+                `${payload.tickers.join(", ")} · ${payload.lookback_months}mo lookback · ${payload.hold_days}d hold · ≥${payload.min_confidence}% confidence`;
+
+            const combined = payload.combined;
+            document.getElementById("btTradeCount").textContent = combined.trade_count;
+            document.getElementById("btWinRate").textContent = `${combined.win_rate_percent}%`;
+            document.getElementById("btAvgReturn").textContent = `${combined.avg_return_percent}%`;
+            document.getElementById("btTotalReturn").textContent = `${combined.total_return_percent}%`;
+            document.getElementById("btProfitFactor").textContent = combined.profit_factor;
+            document.getElementById("btMaxDrawdown").textContent = `${combined.max_drawdown_percent}%`;
+            summaryPanel.style.display = "";
+
+            const perTickerBody = document.querySelector("#backtestPerTickerTable tbody");
+            perTickerBody.innerHTML = payload.per_ticker.map((row) => `
+                <tr>
+                    <td>${row.ticker}</td>
+                    <td>${row.trade_count}</td>
+                    <td>${row.win_rate_percent}%</td>
+                    <td>${row.avg_return_percent}%</td>
+                    <td>${row.total_return_percent}%</td>
+                    <td>${row.profit_factor}</td>
+                    <td>${row.max_drawdown_percent}%</td>
+                </tr>
+            `).join("") || '<tr><td colspan="7" class="muted">No results.</td></tr>';
+            document.getElementById("btPerTickerCount").textContent = `${payload.per_ticker.length} ticker(s)`;
+            perTickerPanel.style.display = "";
+
+            const tradesBody = document.querySelector("#backtestTradesTable tbody");
+            tradesBody.innerHTML = payload.trades.map((trade) => `
+                <tr>
+                    <td>${trade.ticker}</td>
+                    <td>${trade.entry_date}</td>
+                    <td>$${trade.entry_price}</td>
+                    <td>${trade.exit_date}${trade.still_open ? " (still open)" : ""}</td>
+                    <td>$${trade.exit_price}</td>
+                    <td>${trade.strategy}</td>
+                    <td>${trade.confidence}%</td>
+                    <td>${trade.pnl_percent}%</td>
+                </tr>
+            `).join("") || '<tr><td colspan="8" class="muted">No trades in this window.</td></tr>';
+            document.getElementById("btTradesCount").textContent = `${payload.trades.length} trade(s)`;
+            tradesPanel.style.display = "";
+        } catch (error) {
+            showToast(error.message, "error");
+        } finally {
+            submitButton.disabled = false;
+            submitButton.textContent = "Run Backtest";
+        }
+    });
+})();
+</script>
+{% endblock %}

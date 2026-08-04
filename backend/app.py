@@ -65,6 +65,7 @@ if __package__:
     from .integrations.tradingview import get_tradingview_status, save_alert
     from .integrations import webull as webull_api
     from .autonomy.overnight_orders import list_overnight_orders, record_overnight_order
+    from .backtest_engine import run_backtest
     from .market_scanner import scan_market
     from .news.future_news import get_future_news_roadmap
     from .news.news_service import fetch_news_bundle
@@ -134,6 +135,7 @@ else:
     from integrations.tradingview import get_tradingview_status, save_alert
     from integrations import webull as webull_api
     from autonomy.overnight_orders import list_overnight_orders, record_overnight_order
+    from backtest_engine import run_backtest
     from market_scanner import scan_market
     from news.future_news import get_future_news_roadmap
     from news.news_service import fetch_news_bundle
@@ -1260,6 +1262,30 @@ def pattern_brain_page() -> str:
 @app.route("/neural-engine")
 def neural_engine_page() -> str:
     return render_template("neural_engine.html", **_build_page_context())
+
+
+@app.route("/backtest")
+def backtest_page() -> str:
+    return render_template("backtest.html", **_build_page_context())
+
+
+@app.route("/api/backtest/run", methods=["POST"])
+@api_guard
+def api_backtest_run():
+    payload = request.get_json(silent=True) or {}
+    tickers = payload.get("tickers") or []
+    if isinstance(tickers, str):
+        tickers = [part.strip() for part in tickers.split(",")]
+    try:
+        result = run_backtest(
+            tickers=tickers,
+            lookback_months=payload.get("lookback_months", 6),
+            hold_days=payload.get("hold_days", 5),
+            min_confidence=payload.get("min_confidence", 55),
+        )
+    except ValueError as error:
+        raise ValidationError(str(error)) from error
+    return _api_success(result, **result, ok=True)
 
 
 @app.route("/api/watchlist", methods=["GET"])
