@@ -133,6 +133,24 @@ def register_user(username: str, password: str) -> Dict[str, Any]:
     return user
 
 
+def reset_password(username: str, new_password: str) -> Dict[str, Any]:
+    """No email/SMS recovery is configured, so this is a username-only reset -
+    acceptable for a personal single-operator dashboard, not a public multi-
+    tenant product."""
+    new_password = new_password or ""
+    if len(new_password) < MIN_PASSWORD_LENGTH:
+        raise ValueError(f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
+
+    users = _read_users()
+    normalized = normalize_username(username)
+    for user in users:
+        if normalize_username(user.get("username", "")) == normalized:
+            user["password_hash"] = generate_password_hash(new_password)
+            _write_users(users)
+            return user
+    raise ValueError("No account found with that username.")
+
+
 def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
     user = get_user_by_username(username)
     if not user:

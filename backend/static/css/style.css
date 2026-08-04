@@ -3019,6 +3019,16 @@ select:focus {
     font-size: 0.82rem;
 }
 
+.auth-success {
+    margin: 0 0 16px;
+    padding: 10px 12px;
+    border-radius: var(--radius-md);
+    border: 1px solid rgba(88, 240, 175, 0.4);
+    background: rgba(88, 240, 175, 0.12);
+    color: #a6ffdb;
+    font-size: 0.82rem;
+}
+
 .auth-submit {
     width: 100%;
     justify-content: center;

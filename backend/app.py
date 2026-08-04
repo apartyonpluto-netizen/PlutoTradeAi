@@ -26,6 +26,7 @@ if __package__:
         list_all_user_ids,
         public_user,
         register_user,
+        reset_password,
     )
     from .autonomy.autonomous_controller import (
         emergency_stop,
@@ -99,6 +100,7 @@ else:
         list_all_user_ids,
         public_user,
         register_user,
+        reset_password,
     )
     from autonomy.autonomous_controller import emergency_stop, get_autonomy_status, reset_emergency_stop, set_mode
     from account_hub import (
@@ -298,7 +300,7 @@ def _log_response(response):
     return response
 
 
-_PUBLIC_PATHS = {"/login", "/register", "/logout"}
+_PUBLIC_PATHS = {"/login", "/register", "/logout", "/forgot-password"}
 _PUBLIC_PATH_PREFIXES = ("/static/",)
 _TOKEN_AUTH_PATHS = {"/api/tradingview/webhook", "/api/autonomy/cron-trigger"}
 
@@ -361,6 +363,24 @@ def register_page():
     session["user_id"] = user["id"]
     session.permanent = True
     return redirect(url_for("dashboard_page"))
+
+
+@app.route("/forgot-password", methods=["GET", "POST"])
+def forgot_password_page():
+    if request.method == "GET":
+        return render_template("forgot_password.html", error="", success="")
+
+    username = request.form.get("username", "")
+    password = request.form.get("password", "")
+    confirm_password = request.form.get("confirm_password", "")
+    if password != confirm_password:
+        return render_template("forgot_password.html", error="Passwords do not match.", success=""), 400
+    try:
+        reset_password(username, password)
+    except ValueError as error:
+        return render_template("forgot_password.html", error=str(error), success=""), 400
+
+    return render_template("forgot_password.html", error="", success="Password updated. You can sign in now.")
 
 
 @app.route("/logout", methods=["POST"])
