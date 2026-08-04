@@ -78,6 +78,7 @@ def preview_stock_order(
 ) -> Dict[str, Any]:
     trade_client = _get_trade_client()
     order = {
+        "combo_type": "NORMAL",
         "client_order_id": uuid.uuid4().hex,
         "symbol": symbol,
         "instrument_type": "EQUITY",
@@ -85,7 +86,7 @@ def preview_stock_order(
         "order_type": "LIMIT",
         "limit_price": str(limit_price),
         "quantity": str(quantity),
-        "support_trading_session": "CORE",
+        "support_trading_session": "N",
         "side": side,
         "time_in_force": "DAY",
         "entrust_type": "QTY",
@@ -108,6 +109,7 @@ def place_stock_order(
     trade_client = _get_trade_client()
     client_order_id = uuid.uuid4().hex
     order = {
+        "combo_type": "NORMAL",
         "client_order_id": client_order_id,
         "symbol": symbol,
         "instrument_type": "EQUITY",
@@ -115,7 +117,7 @@ def place_stock_order(
         "order_type": "LIMIT",
         "limit_price": str(limit_price),
         "quantity": str(quantity),
-        "support_trading_session": "CORE",
+        "support_trading_session": "N",
         "side": side,
         "time_in_force": "DAY",
         "entrust_type": "QTY",
