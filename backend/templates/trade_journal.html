@@ -17,6 +17,11 @@
         <div><small>Buying Power</small><b>${{ "{:,.2f}".format(webull_balance.balance.buying_power|float) }}</b></div>
         <div><small>Day's P&amp;L</small><b class="{{ 'tone-positive' if webull_balance.balance.day_pnl >= 0 else 'tone-negative' }}">{{ webull_balance.balance.day_pnl_display }}</b></div>
     </div>
+    <div class="price-map-grid" style="margin-top: 8px;">
+        <div><small>Open Positions</small><b>{{ webull_today_summary.open_count }}</b></div>
+        <div><small>Entries Today</small><b>{{ webull_today_summary.entries_today }}</b></div>
+        <div><small>Closed Today</small><b>{{ webull_today_summary.closed_today }}</b></div>
+    </div>
 </section>
 {% elif webull_balance.error %}
 <section class="panel">
@@ -38,8 +43,9 @@
     <p class="muted">Paper trades fill at live market price via Yahoo Finance by default, or enter your own fill price to log a trade you placed elsewhere (e.g. Webull). No real money or broker order is ever placed here.</p>
     <div class="price-map-grid">
         <div><small>Entries Today</small><b>{{ paper_trade_summary.entries_today }}</b></div>
+        <div><small>Closed Today</small><b>{{ paper_trade_summary.closed_today }}</b></div>
         <div><small>Win Rate</small><b>{{ paper_trade_summary.win_rate }}</b></div>
-        <div><small>PnL</small><b>{{ paper_trade_summary.total_pnl }}</b></div>
+        <div><small>PnL</small><b class="{{ 'tone-positive' if paper_trade_summary.total_pnl is number and paper_trade_summary.total_pnl > 0 else 'tone-negative' if paper_trade_summary.total_pnl is number and paper_trade_summary.total_pnl < 0 else '' }}">{{ paper_trade_summary.total_pnl }}</b></div>
         <div><small>Open Positions</small><b>{{ paper_trade_summary.open_count }}</b></div>
     </div>
 </section>
@@ -97,7 +103,7 @@
             <td>${{ position.cost_price }}</td>
             <td>${{ position.last_price }}</td>
             <td>${{ position.market_value }}</td>
-            <td>{{ position.pnl_display }}</td>
+            <td class="{{ 'tone-positive' if position.unrealized_profit_loss|float >= 0 else 'tone-negative' }}">{{ position.pnl_display }}</td>
             <td>
                 {% if position.exit_signal == "TARGET_HIT" %}
                 <span class="badge badge-soft">Take Profit</span>
@@ -155,7 +161,7 @@
             <td>{{ trade.quantity }}</td>
             <td>${{ trade.entry_price }}</td>
             <td>{{ trade.exit_price and "$" ~ trade.exit_price or "—" }}</td>
-            <td>{{ trade.pnl or "—" }}</td>
+            <td class="{{ 'tone-positive' if trade.pnl and trade.pnl|float > 0 else 'tone-negative' if trade.pnl and trade.pnl|float < 0 else '' }}">{{ trade.pnl or "—" }}</td>
             <td>{{ trade.status }}</td>
             <td class="action-row"><button class="close-paper-trade" type="button">Close</button></td>
         </tr>
@@ -179,7 +185,7 @@
             <td>{{ trade.quantity }}</td>
             <td>${{ trade.entry_price }}</td>
             <td>{{ trade.exit_price and "$" ~ trade.exit_price or "—" }}</td>
-            <td>{{ trade.pnl or "—" }}</td>
+            <td class="{{ 'tone-positive' if trade.pnl and trade.pnl|float > 0 else 'tone-negative' if trade.pnl and trade.pnl|float < 0 else '' }}">{{ trade.pnl or "—" }}</td>
             <td>{{ trade.status }}</td>
         </tr>
         {% else %}

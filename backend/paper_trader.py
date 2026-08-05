@@ -178,12 +178,14 @@ def get_summary(user_id: str) -> Dict[str, Any]:
     rows = _read_all(user_id)
     today = datetime.now(timezone.utc).date().isoformat()
     entries_today = sum(1 for row in rows if str(row.get("opened_at", "")).startswith(today))
+    closed_today = sum(1 for row in rows if row.get("status") == "Closed" and str(row.get("closed_at", "")).startswith(today))
     closed = [row for row in rows if row.get("status") == "Closed" and row.get("pnl") not in (None, "")]
     wins = [row for row in closed if float(row["pnl"]) > 0]
     win_rate = f"{(len(wins) / len(closed) * 100):.0f}%" if closed else "n/a"
     total_pnl = round(sum(float(row["pnl"]) for row in closed), 2) if closed else "n/a"
     return {
         "entries_today": entries_today,
+        "closed_today": closed_today,
         "win_rate": win_rate,
         "total_pnl": total_pnl,
         "open_count": sum(1 for row in rows if row.get("status") == "Open"),

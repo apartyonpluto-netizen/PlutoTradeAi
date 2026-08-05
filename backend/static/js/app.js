@@ -1123,6 +1123,13 @@ const bindLiveDataStatusCard = () => {
   }, 30000);
 };
 
+const paperTradePnlCell = (trade) => {
+  if (trade.pnl === "" || trade.pnl === undefined || trade.pnl === null) return "<td>—</td>";
+  const pnl = Number(trade.pnl);
+  const tone = pnl > 0 ? "tone-positive" : pnl < 0 ? "tone-negative" : "";
+  return `<td class="${tone}">${escapeHtml(trade.pnl)}</td>`;
+};
+
 const buildOpenPaperTradeRow = (trade) => `
   <tr data-trade-id="${escapeHtml(trade.id)}">
     <td>${escapeHtml(trade.ticker)}</td>
@@ -1131,7 +1138,7 @@ const buildOpenPaperTradeRow = (trade) => `
     <td>${escapeHtml(trade.quantity)}</td>
     <td>$${escapeHtml(trade.entry_price)}</td>
     <td>${trade.exit_price ? `$${escapeHtml(trade.exit_price)}` : "—"}</td>
-    <td>${trade.pnl === "" || trade.pnl === undefined || trade.pnl === null ? "—" : escapeHtml(trade.pnl)}</td>
+    ${paperTradePnlCell(trade)}
     <td>${escapeHtml(trade.status)}</td>
     <td class="action-row"><button class="close-paper-trade" type="button">Close</button></td>
   </tr>`;
@@ -1144,7 +1151,7 @@ const buildClosedPaperTradeRow = (trade) => `
     <td>${escapeHtml(trade.quantity)}</td>
     <td>$${escapeHtml(trade.entry_price)}</td>
     <td>${trade.exit_price ? `$${escapeHtml(trade.exit_price)}` : "—"}</td>
-    <td>${trade.pnl === "" || trade.pnl === undefined || trade.pnl === null ? "—" : escapeHtml(trade.pnl)}</td>
+    ${paperTradePnlCell(trade)}
     <td>${escapeHtml(trade.status)}</td>
   </tr>`;
 

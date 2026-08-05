@@ -1367,6 +1367,21 @@ def trade_journal_page() -> str:
         }
     context["webull_positions"] = webull_positions
     context["webull_balance"] = _get_live_webull_balance(user_id)
+
+    today_key = _trading_day_key()
+
+    def _order_trading_day(order: Dict[str, object]) -> str:
+        try:
+            return _trading_day_key(datetime.fromisoformat(str(order.get("logged_at", ""))))
+        except ValueError:
+            return ""
+
+    todays_orders = [order for order in overnight_orders if order.get("status") == "placed" and _order_trading_day(order) == today_key]
+    context["webull_today_summary"] = {
+        "entries_today": sum(1 for order in todays_orders if order.get("side") == "BUY"),
+        "closed_today": sum(1 for order in todays_orders if order.get("side") == "SELL"),
+        "open_count": len(webull_positions.get("positions", [])) if webull_positions.get("connected") else 0,
+    }
     return render_template("trade_journal.html", **context)
 
 
