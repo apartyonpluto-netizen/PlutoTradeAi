@@ -12,4 +12,174 @@
         <p class="muted">Loading options suggestions...</p>
     </div>
 </section>
+
+<section class="panel panel-table">
+    <div class="panel-head">
+        <h3>Live Options Chain</h3>
+        <span id="chainSpotPrice">&mdash;</span>
+    </div>
+    <p class="muted">Real bid/ask/volume/open interest from Yahoo, refreshed every 20s. Greeks (Delta/Gamma/Theta/Vega) are computed from Yahoo's implied volatility via Black-Scholes &mdash; not a paid Greeks feed, so treat them as an estimate. For research only, no options execution is enabled.</p>
+    <form id="chainForm" class="grid-form">
+        <input type="text" name="ticker" id="chainTickerInput" placeholder="Ticker (e.g. AAPL)" value="{{ searched_ticker or '' }}" required>
+        <select id="chainExpirationSelect"><option value="">Loading expirations...</option></select>
+        <label class="toggle-wrap"><input type="checkbox" id="chainGreeksToggle"><span>Show Greeks</span></label>
+        <button type="submit">Load Chain</button>
+    </form>
+    <div id="chainErrorBox"></div>
+    <div style="overflow-x: auto;">
+    <table id="optionsChainTable" class="greeks-hidden">
+        <thead>
+            <tr>
+                <th colspan="6" style="text-align:center;">Calls</th>
+                <th>Strike</th>
+                <th colspan="6" style="text-align:center;">Puts</th>
+            </tr>
+            <tr>
+                <th class="greeks-col">Delta</th>
+                <th class="greeks-col">IV%</th>
+                <th>OI</th>
+                <th>Vol</th>
+                <th>Bid</th>
+                <th>Ask</th>
+                <th></th>
+                <th>Bid</th>
+                <th>Ask</th>
+                <th>Vol</th>
+                <th>OI</th>
+                <th class="greeks-col">IV%</th>
+                <th class="greeks-col">Delta</th>
+            </tr>
+        </thead>
+        <tbody id="optionsChainBody">
+            <tr><td colspan="13" class="muted">Enter a ticker above to load the live chain.</td></tr>
+        </tbody>
+    </table>
+    </div>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script>
+(() => {
+    const form = document.getElementById("chainForm");
+    const tickerInput = document.getElementById("chainTickerInput");
+    const expirationSelect = document.getElementById("chainExpirationSelect");
+    const greeksToggle = document.getElementById("chainGreeksToggle");
+    const table = document.getElementById("optionsChainTable");
+    const tbody = document.getElementById("optionsChainBody");
+    const spotNode = document.getElementById("chainSpotPrice");
+    const errorBox = document.getElementById("chainErrorBox");
+    if (!form) return;
+
+    let pollTimer = null;
+
+    const fmt = (value) => (value === null || value === undefined ? "—" : value);
+
+    const renderRow = (call, put, strike, spot) => {
+        const callItm = call && call.in_the_money;
+        const putItm = put && put.in_the_money;
+        return `
+        <tr>
+            <td class="greeks-col">${call ? fmt(call.delta) : "—"}</td>
+            <td class="greeks-col">${call ? fmt(call.implied_volatility) : "—"}</td>
+            <td class="${callItm ? 'tone-positive' : ''}">${call ? fmt(call.open_interest) : "—"}</td>
+            <td class="${callItm ? 'tone-positive' : ''}">${call ? fmt(call.volume) : "—"}</td>
+            <td class="${callItm ? 'tone-positive' : ''}">${call ? "$" + fmt(call.bid) : "—"}</td>
+            <td class="${callItm ? 'tone-positive' : ''}">${call ? "$" + fmt(call.ask) : "—"}</td>
+            <td style="text-align:center; font-weight:600;">$${strike}${Math.abs(strike - spot) < 0.01 ? ' <span class="badge badge-soft">ATM</span>' : ''}</td>
+            <td class="${putItm ? 'tone-negative' : ''}">${put ? "$" + fmt(put.bid) : "—"}</td>
+            <td class="${putItm ? 'tone-negative' : ''}">${put ? "$" + fmt(put.ask) : "—"}</td>
+            <td class="${putItm ? 'tone-negative' : ''}">${put ? fmt(put.volume) : "—"}</td>
+            <td class="${putItm ? 'tone-negative' : ''}">${put ? fmt(put.open_interest) : "—"}</td>
+            <td class="greeks-col">${put ? fmt(put.implied_volatility) : "—"}</td>
+            <td class="greeks-col">${put ? fmt(put.delta) : "—"}</td>
+        </tr>`;
+    };
+
+    const renderChain = (payload) => {
+        if (payload.error) {
+            errorBox.innerHTML = `<p class="auth-error">${payload.error}</p>`;
+            tbody.innerHTML = '<tr><td colspan="13" class="muted">No data.</td></tr>';
+            return;
+        }
+        errorBox.innerHTML = "";
+        spotNode.textContent = payload.spot_price ? `Spot $${payload.spot_price}` : "—";
+
+        const byStrike = new Map();
+        (payload.calls || []).forEach((c) => byStrike.set(c.strike, {call: c, put: null}));
+        (payload.puts || []).forEach((p) => {
+            const existing = byStrike.get(p.strike) || {call: null, put: null};
+            existing.put = p;
+            byStrike.set(p.strike, existing);
+        });
+        const strikes = Array.from(byStrike.keys()).sort((a, b) => a - b);
+        tbody.innerHTML = strikes.length
+            ? strikes.map((strike) => {
+                const {call, put} = byStrike.get(strike);
+                return renderRow(call, put, strike, payload.spot_price || 0);
+            }).join("")
+            : '<tr><td colspan="13" class="muted">No contracts for this expiration.</td></tr>';
+    };
+
+    const loadExpirations = async (ticker) => {
+        const response = await fetch(`/api/options/chain?ticker=${encodeURIComponent(ticker)}`);
+        const payload = await response.json();
+        const data = payload.data || payload;
+        if (data.error && !(data.expirations || []).length) {
+            errorBox.innerHTML = `<p class="auth-error">${data.error}</p>`;
+            expirationSelect.innerHTML = '<option value="">No expirations</option>';
+            return null;
+        }
+        expirationSelect.innerHTML = (data.expirations || [])
+            .map((date) => `<option value="${date}">${date}</option>`)
+            .join("");
+        if (data.selected_expiration) expirationSelect.value = data.selected_expiration;
+        renderChain(data);
+        return data;
+    };
+
+    const loadChain = async (ticker, expiration) => {
+        const response = await fetch(`/api/options/chain?ticker=${encodeURIComponent(ticker)}&expiration=${encodeURIComponent(expiration || "")}`);
+        const payload = await response.json();
+        renderChain(payload.data || payload);
+    };
+
+    const startPolling = (ticker) => {
+        if (pollTimer) window.clearInterval(pollTimer);
+        pollTimer = window.setInterval(() => {
+            const expiration = expirationSelect.value;
+            if (ticker && expiration) loadChain(ticker, expiration).catch(() => {});
+        }, 20000);
+    };
+
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const ticker = tickerInput.value.trim().toUpperCase();
+        if (!ticker) return;
+        errorBox.innerHTML = "";
+        tbody.innerHTML = '<tr><td colspan="13" class="muted">Loading...</td></tr>';
+        try {
+            await loadExpirations(ticker);
+            startPolling(ticker);
+        } catch (error) {
+            errorBox.innerHTML = `<p class="auth-error">${error.message}</p>`;
+        }
+    });
+
+    expirationSelect.addEventListener("change", () => {
+        const ticker = tickerInput.value.trim().toUpperCase();
+        if (ticker && expirationSelect.value) loadChain(ticker, expirationSelect.value).catch(() => {});
+    });
+
+    if (greeksToggle instanceof HTMLInputElement) {
+        greeksToggle.addEventListener("change", () => {
+            table.classList.toggle("greeks-hidden", !greeksToggle.checked);
+        });
+    }
+
+    if (tickerInput.value.trim()) {
+        form.dispatchEvent(new Event("submit"));
+    }
+})();
+</script>
 {% endblock %}

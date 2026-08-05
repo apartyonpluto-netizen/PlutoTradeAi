@@ -1192,6 +1192,10 @@ select:focus {
     margin-top: 2px;
 }
 
+#optionsChainTable.greeks-hidden .greeks-col {
+    display: none;
+}
+
 .row-saved td {
     background: rgba(88, 216, 168, 0.12);
 }

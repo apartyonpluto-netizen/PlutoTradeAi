@@ -84,7 +84,7 @@ if __package__:
         remove_trusted_account,
     )
     from .neural.neural_engine import build_neural_status
-    from .options.options_brain import build_options_research, to_legacy_options_payload
+    from .options.options_brain import build_options_research, get_full_option_chain, to_legacy_options_payload
     from .paper_trader import close_trade as close_paper_trade
     from .paper_trader import get_summary as get_paper_trade_summary
     from .paper_trader import list_trades as list_paper_trades
@@ -169,7 +169,7 @@ else:
         remove_trusted_account,
     )
     from neural.neural_engine import build_neural_status
-    from options.options_brain import build_options_research, to_legacy_options_payload
+    from options.options_brain import build_options_research, get_full_option_chain, to_legacy_options_payload
     from paper_trader import close_trade as close_paper_trade
     from paper_trader import get_summary as get_paper_trade_summary
     from paper_trader import list_trades as list_paper_trades
@@ -1302,6 +1302,29 @@ def options_page() -> str:
     if searched_ticker:
         context["searched_ticker"] = searched_ticker
     return render_template("options.html", **context)
+
+
+CHAIN_CACHE: Dict[str, Dict[str, object]] = {}
+CHAIN_CACHE_SECONDS = 20
+
+
+@app.route("/api/options/chain", methods=["GET"])
+@api_guard
+def api_options_chain():
+    ticker = request.args.get("ticker", "").strip().upper()
+    expiration = request.args.get("expiration", "").strip()
+    if not ticker:
+        raise ValidationError("Ticker is required.")
+
+    cache_key = f"{ticker}:{expiration}"
+    cached = CHAIN_CACHE.get(cache_key)
+    if isinstance(cached, dict) and isinstance(cached.get("expires_at"), datetime) and cached["expires_at"] > _now_utc():
+        payload = cached["payload"]
+    else:
+        payload = get_full_option_chain(ticker, expiration)
+        CHAIN_CACHE[cache_key] = {"payload": payload, "expires_at": _now_utc() + timedelta(seconds=CHAIN_CACHE_SECONDS)}
+
+    return _api_success(payload, **payload)
 
 
 @app.route("/news-intelligence")

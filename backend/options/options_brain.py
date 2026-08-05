@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
+import yfinance as yf
+
 if __package__:
     from options_brain import build_options_outlook as legacy_build_options_outlook
+    from options_brain import _fetch_option_chain_with_retry, _fetch_option_expirations_with_retry, _fetch_history_with_retry
+    from .greeks import black_scholes_greeks
 else:
     from options_brain import build_options_outlook as legacy_build_options_outlook
+    from options_brain import _fetch_option_chain_with_retry, _fetch_option_expirations_with_retry, _fetch_history_with_retry
+    from greeks import black_scholes_greeks
 
 DISCLAIMER = "For research only. No options execution is enabled."
 
@@ -132,4 +139,98 @@ def to_legacy_options_payload(research_payload: Dict[str, Any]) -> Dict[str, Any
         "expirations": expirations,
         "disclaimer": research_payload.get("disclaimer", DISCLAIMER),
         "generated_at": research_payload.get("generated_at", _now_iso()),
+    }
+
+
+def _years_to_expiry(expiration_date: str) -> float:
+    try:
+        expiry = datetime.strptime(expiration_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return 0.0
+    days = (expiry - datetime.now(timezone.utc)).total_seconds() / 86400
+    return max(days, 0.5) / 365  # floor at half a day so 0DTE contracts don't divide by ~0 in Black-Scholes
+
+
+def _safe_num(value: Any, default: float = 0.0) -> float:
+    """Illiquid strikes with no trades today come back from Yahoo with NaN
+    volume/open interest/bid rather than 0 - `value or default` doesn't catch
+    that since NaN is truthy in Python."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return default if math.isnan(number) else number
+
+
+def _contract_row(row: Any, spot: float, years_to_expiry: float, option_type: str) -> Dict[str, Any]:
+    iv = _safe_num(row.get("impliedVolatility"))
+    greeks = black_scholes_greeks(spot, _safe_num(row.get("strike")), years_to_expiry, iv, option_type)
+    return {
+        "contract_symbol": row.get("contractSymbol", ""),
+        "strike": round(_safe_num(row.get("strike")), 2),
+        "bid": round(_safe_num(row.get("bid")), 2),
+        "ask": round(_safe_num(row.get("ask")), 2),
+        "last_price": round(_safe_num(row.get("lastPrice")), 2),
+        "volume": int(_safe_num(row.get("volume"))),
+        "open_interest": int(_safe_num(row.get("openInterest"))),
+        "implied_volatility": round(iv * 100, 2),
+        "in_the_money": bool(row.get("inTheMoney", False)),
+        **greeks,
+    }
+
+
+def get_full_option_chain(ticker: str, expiration: str = "") -> Dict[str, Any]:
+    """Real bid/ask/volume/open-interest/IV per contract from Yahoo, paired
+    calls-and-puts-by-strike like a real broker's chain view, plus Greeks
+    computed via Black-Scholes from Yahoo's own IV (Yahoo doesn't provide
+    Greeks directly - CBOE-style feeds that do are a paid data product)."""
+    normalized = ticker.strip().upper()
+    if not normalized:
+        raise ValueError("Ticker is required.")
+
+    ticker_client = yf.Ticker(normalized)
+    expirations = _fetch_option_expirations_with_retry(ticker_client)
+    if not expirations:
+        return {
+            "ticker": normalized,
+            "spot_price": None,
+            "expirations": [],
+            "selected_expiration": "",
+            "calls": [],
+            "puts": [],
+            "error": "No options chain available for this ticker right now.",
+            "generated_at": _now_iso(),
+        }
+
+    selected_expiration = expiration if expiration in expirations else expirations[0]
+
+    history = _fetch_history_with_retry(ticker_client, period="1d")
+    spot = float(history["Close"].dropna().iloc[-1]) if not history.empty and "Close" in history.columns else None
+
+    chain = _fetch_option_chain_with_retry(ticker_client, selected_expiration)
+    if chain is None or spot is None:
+        return {
+            "ticker": normalized,
+            "spot_price": spot,
+            "expirations": expirations,
+            "selected_expiration": selected_expiration,
+            "calls": [],
+            "puts": [],
+            "error": "Options chain data unavailable for this expiration right now.",
+            "generated_at": _now_iso(),
+        }
+
+    years = _years_to_expiry(selected_expiration)
+    calls = [_contract_row(row, spot, years, "call") for _, row in chain.calls.iterrows()]
+    puts = [_contract_row(row, spot, years, "put") for _, row in chain.puts.iterrows()]
+
+    return {
+        "ticker": normalized,
+        "spot_price": round(spot, 2),
+        "expirations": expirations,
+        "selected_expiration": selected_expiration,
+        "calls": calls,
+        "puts": puts,
+        "error": "",
+        "generated_at": _now_iso(),
     }
