@@ -67,6 +67,7 @@ if __package__:
     from .brains.strategy_brain import build_strategy_intelligence
     from .integrations.tradingview import get_tradingview_status, save_alert
     from .integrations import webull as webull_api
+    from .webull_credentials import get_webull_credentials, is_webull_configured, set_webull_credentials
     from .autonomy.overnight_orders import list_overnight_orders, record_overnight_order
     from .backtest_engine import run_backtest
     from .market_scanner import scan_market
@@ -147,6 +148,7 @@ else:
     from brains.strategy_brain import build_strategy_intelligence
     from integrations.tradingview import get_tradingview_status, save_alert
     from integrations import webull as webull_api
+    from webull_credentials import get_webull_credentials, is_webull_configured, set_webull_credentials
     from autonomy.overnight_orders import list_overnight_orders, record_overnight_order
     from backtest_engine import run_backtest
     from market_scanner import scan_market
@@ -1252,7 +1254,9 @@ def settings_page() -> str:
 @app.route("/account-hub")
 def account_hub_page() -> str:
     context = _build_page_context()
-    context["accounts"] = get_accounts(_current_user_id())
+    user_id = _current_user_id()
+    context["accounts"] = get_accounts(user_id)
+    context["webull_configured"] = is_webull_configured(user_id)
     return render_template("account_hub.html", **context)
 
 
@@ -1304,13 +1308,17 @@ def api_close_webull_position():
     if not webull_account or webull_account.get("status") != "Connected":
         raise ValidationError("Connect Webull in Account Hub before closing a position.")
 
-    sandbox_accounts = webull_api.get_paper_accounts()
+    creds = get_webull_credentials(user_id)
+    if not is_webull_configured(user_id):
+        raise ValidationError("Enter your Webull App Key and App Secret in Account Hub first.")
+
+    sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
     cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
     if not cash_account:
         raise ValidationError("No Webull sandbox account found for these credentials.")
     account_id = cash_account["account_id"]
 
-    positions = webull_api.get_account_positions(account_id)
+    positions = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
     position = next((p for p in positions if str(p.get("symbol", "")).upper() == ticker), None)
     if not position:
         raise ValidationError(f"No open position found for {ticker}.")
@@ -1331,6 +1339,8 @@ def api_close_webull_position():
     }
     try:
         result = webull_api.place_stock_order(
+            app_key=creds["app_key"],
+            app_secret=creds["app_secret"],
             account_id=account_id,
             symbol=ticker,
             side="SELL",
@@ -1873,11 +1883,12 @@ def _get_live_webull_balance(user_id: str, force_refresh: bool = False) -> Dict[
         payload = {"connected": False, "balance": None, "error": ""}
     else:
         try:
-            sandbox_accounts = webull_api.get_paper_accounts()
+            creds = get_webull_credentials(user_id)
+            sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
             cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
             if not cash_account:
                 raise ValueError("No Webull sandbox account found for these credentials.")
-            balance = webull_api.get_account_balance(cash_account["account_id"])
+            balance = webull_api.get_account_balance(creds["app_key"], creds["app_secret"], cash_account["account_id"])
             payload = {
                 "connected": True,
                 "error": "",
@@ -1914,11 +1925,12 @@ def _get_live_webull_positions(user_id: str, force_refresh: bool = False) -> Dic
         payload = {"connected": False, "positions": [], "error": ""}
     else:
         try:
-            sandbox_accounts = webull_api.get_paper_accounts()
+            creds = get_webull_credentials(user_id)
+            sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
             cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
             if not cash_account:
                 raise ValueError("No Webull sandbox account found for these credentials.")
-            positions = webull_api.get_account_positions(cash_account["account_id"])
+            positions = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], cash_account["account_id"])
             for position in positions:
                 pnl = float(position.get("unrealized_profit_loss", 0) or 0)
                 rate = float(position.get("unrealized_profit_loss_rate", 0) or 0)
@@ -1959,15 +1971,16 @@ def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
     skip, is logged with the reasoning behind it so it can be reviewed later.
     Pure function of user_id - safe to call from a real request or from the
     cron trigger's simulated per-user request context."""
-    if not webull_api.is_configured():
-        raise ValidationError("Webull API credentials are not configured on the server.")
+    creds = get_webull_credentials(user_id)
+    if not is_webull_configured(user_id):
+        raise ValidationError("Enter your Webull App Key and App Secret in Account Hub before running the trade scan.")
 
     accounts = get_accounts(user_id)
     webull_account = next((a for a in accounts if a.get("platform") == "webull"), None)
     if not webull_account or webull_account.get("status") != "Connected":
         raise ValidationError("Connect Webull in Account Hub before running the trade scan.")
 
-    sandbox_accounts = webull_api.get_paper_accounts()
+    sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
     cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
     if not cash_account:
         raise ValidationError("No Webull sandbox account found for these credentials.")
@@ -1979,7 +1992,7 @@ def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
 
     daily_loss_limit = float(risk_settings.get("daily_loss_limit", 0) or 0)
     if daily_loss_limit > 0:
-        balance = webull_api.get_account_balance(account_id)
+        balance = webull_api.get_account_balance(creds["app_key"], creds["app_secret"], account_id)
         day_pnl = float(balance.get("total_day_profit_loss", 0) or 0)
         if day_pnl <= -daily_loss_limit:
             raise ValidationError(
@@ -1987,7 +2000,7 @@ def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
             )
 
     max_positions = int(risk_settings.get("max_positions", 0) or 0)
-    open_position_count = len(webull_api.get_account_positions(account_id))
+    open_position_count = len(webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id))
     available_position_slots = max(0, max_positions - open_position_count) if max_positions > 0 else OVERNIGHT_MAX_ORDERS_PER_RUN
 
     max_trade_size = float(risk_settings.get("max_trade_size", 0) or 0)
@@ -2078,6 +2091,8 @@ def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
             if limit_price <= 0:
                 raise ValueError("No valid entry price computed for this ticker.")
             result = webull_api.place_stock_order(
+                app_key=creds["app_key"],
+                app_secret=creds["app_secret"],
                 account_id=account_id,
                 symbol=ticker,
                 side="BUY",
@@ -2163,12 +2178,13 @@ def api_autonomy_cron_trigger():
 @app.route("/api/accounts", methods=["GET"])
 @api_guard
 def api_accounts():
-    accounts = get_accounts(_current_user_id())
+    user_id = _current_user_id()
+    accounts = get_accounts(user_id)
     broker_framework = _broker_framework_status()
     safety = {
         "store_passwords": False,
         "hardcoded_api_keys": False,
-        "credentials_source": ".env (future integration)",
+        "credentials_source": "Per-user, entered in Account Hub - never shared across accounts",
         "live_trading_default_off": True,
         "etrade_approval_mode_required": True,
         "webull_default_paper_mode": True,
@@ -2178,9 +2194,10 @@ def api_accounts():
         "emergency_kill_switch_placeholder": True,
     }
     return _api_success(
-        {"accounts": accounts, "safety": safety, "broker_framework": broker_framework},
+        {"accounts": accounts, "safety": safety, "broker_framework": broker_framework, "webull_configured": is_webull_configured(user_id)},
         accounts=accounts,
         safety=safety,
+        webull_configured=is_webull_configured(user_id),
     )
 
 
@@ -2229,6 +2246,19 @@ def api_accounts_test():
     except ValueError as error:
         return jsonify({"ok": False, "error": str(error)}), 400
     return jsonify({"ok": True, "account": account})
+
+
+@app.route("/api/accounts/webull-credentials", methods=["POST"])
+def api_accounts_webull_credentials():
+    """Each user brings their own Webull OpenAPI app key/secret - saved here,
+    never a shared server-wide credential, so one user can never connect to
+    or see another user's Webull sandbox account."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        set_webull_credentials(_current_user_id(), payload.get("app_key", ""), payload.get("app_secret", ""))
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    return jsonify({"ok": True, "configured": True})
 
 
 @app.route("/api/tradingview/webhook", methods=["POST"])

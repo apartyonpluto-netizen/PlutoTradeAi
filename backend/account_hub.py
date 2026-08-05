@@ -11,8 +11,10 @@ from urllib.parse import parse_qs, urlparse
 
 if __package__:
     from .integrations import webull as webull_api
+    from .webull_credentials import get_webull_credentials, is_webull_configured
 else:
     from integrations import webull as webull_api
+    from webull_credentials import get_webull_credentials, is_webull_configured
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
@@ -185,20 +187,28 @@ def _extract_token(webhook_url: str) -> str:
     return (query.get("token") or [""])[0]
 
 
-def _sync_webull_account(account: Dict[str, Any]) -> None:
+def _sync_webull_account(user_id: str, account: Dict[str, Any]) -> None:
     """Connect/refresh a webull account record against the real Webull OpenAPI
-    paper-trading sandbox. Raises ValueError (surfaced to the UI) if
-    credentials aren't configured or the API call fails - never leaves the
-    account silently marked as connected without a verified round trip."""
-    if not webull_api.is_configured():
-        raise ValueError("Webull API credentials are not configured on the server (WEBULL_APP_KEY / WEBULL_APP_SECRET).")
+    paper-trading sandbox, using THIS user's own stored app key/secret - never
+    a shared/global credential, so one user can never see another user's
+    sandbox account. Raises ValueError (surfaced to the UI) if credentials
+    aren't configured or the API call fails - never leaves the account
+    silently marked as connected without a verified round trip."""
+    creds = get_webull_credentials(user_id)
+    if not is_webull_configured(user_id):
+        raise ValueError("Enter your own Webull App Key and App Secret below before connecting.")
 
-    accounts = webull_api.get_paper_accounts()
-    cash_account = webull_api.find_individual_cash_account(accounts)
-    if not cash_account:
-        raise ValueError("No Webull paper trading account found for these credentials.")
+    try:
+        accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
+        cash_account = webull_api.find_individual_cash_account(accounts)
+        if not cash_account:
+            raise ValueError("No Webull paper trading account found for these credentials.")
+        balance = webull_api.get_account_balance(creds["app_key"], creds["app_secret"], cash_account["account_id"])
+    except ValueError:
+        raise
+    except Exception as error:  # noqa: BLE001 - the Webull SDK raises its own exception types, not ValueError
+        raise ValueError(f"Webull rejected these credentials: {error}") from error
 
-    balance = webull_api.get_account_balance(cash_account["account_id"])
     account["status"] = "Connected"
     account["paper_mode"] = True
     account["risk_simulation_enabled"] = True
@@ -236,7 +246,7 @@ def connect_account(user_id: str, platform: str) -> Dict[str, Any]:
         account["approval_mode"] = True
         account["trading_enabled"] = False
     elif normalized_platform == "webull":
-        _sync_webull_account(account)
+        _sync_webull_account(user_id, account)
     elif normalized_platform == "tradingview":
         account["status"] = "Webhook Ready"
         if not account.get("webhook_url"):
@@ -287,7 +297,7 @@ def test_account(user_id: str, platform: str) -> Dict[str, Any]:
     if normalized_platform == "etrade":
         account["status"] = "Connected"
     if normalized_platform == "webull":
-        _sync_webull_account(account)
+        _sync_webull_account(user_id, account)
     if normalized_platform == "tradingview":
         account["alert_status"] = "Webhook Ready"
 

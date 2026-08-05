@@ -72,6 +72,12 @@
             <div><small>Buying power</small><strong data-account-field="buying_power">{{ state.webull.buying_power and "$" ~ state.webull.buying_power or "—" }}</strong></div>
             <div><small>Last sync</small><strong data-account-field="last_sync">{{ state.webull.last_sync or "Never" }}</strong></div>
         </div>
+        <div class="grid-form" style="margin-top: 12px;">
+            <input type="text" id="webullAppKeyInput" placeholder="{{ 'App Key (saved - enter to replace)' if webull_configured else 'Your Webull App Key' }}">
+            <input type="password" id="webullAppSecretInput" placeholder="{{ 'App Secret (saved - enter to replace)' if webull_configured else 'Your Webull App Secret' }}">
+            <button type="button" id="saveWebullCredentialsButton">Save Credentials</button>
+        </div>
+        <p class="muted">Bring your own Webull OpenAPI paper-trading app key/secret &mdash; each account's credentials are private and never shared with other users. {{ "Currently saved." if webull_configured else "Not set yet." }}</p>
         <div class="account-actions">
             <button type="button" class="account-connect">Connect</button>
             <button type="button" class="account-test">Test Paper Trade</button>

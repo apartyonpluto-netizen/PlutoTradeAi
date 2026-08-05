@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -13,32 +12,26 @@ _REGION_ID = "us"
 _SANDBOX_ENDPOINT = "api.sandbox.webull.com"
 
 
-def _get_credentials() -> tuple[str, str]:
-    app_key = os.environ.get("WEBULL_APP_KEY", "").strip()
-    app_secret = os.environ.get("WEBULL_APP_SECRET", "").strip()
-    return app_key, app_secret
+def is_configured(app_key: str, app_secret: str) -> bool:
+    return bool((app_key or "").strip() and (app_secret or "").strip())
 
 
-def is_configured() -> bool:
-    app_key, app_secret = _get_credentials()
-    return bool(app_key and app_secret)
-
-
-def _get_trade_client():
+def _get_trade_client(app_key: str, app_secret: str):
     from webull.core.client import ApiClient
     from webull.trade.trade_client import TradeClient
 
-    app_key, app_secret = _get_credentials()
+    app_key = (app_key or "").strip()
+    app_secret = (app_secret or "").strip()
     if not app_key or not app_secret:
-        raise ValueError("Webull API credentials are not configured (WEBULL_APP_KEY / WEBULL_APP_SECRET).")
+        raise ValueError("Webull API credentials are not configured for this account.")
 
     api_client = ApiClient(app_key, app_secret, _REGION_ID)
     api_client.add_endpoint(_REGION_ID, _SANDBOX_ENDPOINT)
     return TradeClient(api_client)
 
 
-def get_paper_accounts() -> List[Dict[str, Any]]:
-    trade_client = _get_trade_client()
+def get_paper_accounts(app_key: str, app_secret: str) -> List[Dict[str, Any]]:
+    trade_client = _get_trade_client(app_key, app_secret)
     response = trade_client.account_v2.get_account_list()
     if response.status_code != 200:
         raise ValueError(f"Webull API error (accounts): HTTP {response.status_code}")
@@ -53,16 +46,16 @@ def find_individual_cash_account(accounts: List[Dict[str, Any]]) -> Optional[Dic
     return accounts[0] if accounts else None
 
 
-def get_account_balance(account_id: str) -> Dict[str, Any]:
-    trade_client = _get_trade_client()
+def get_account_balance(app_key: str, app_secret: str, account_id: str) -> Dict[str, Any]:
+    trade_client = _get_trade_client(app_key, app_secret)
     response = trade_client.account_v2.get_account_balance(account_id)
     if response.status_code != 200:
         raise ValueError(f"Webull API error (balance): HTTP {response.status_code}")
     return response.json()
 
 
-def get_account_positions(account_id: str) -> List[Dict[str, Any]]:
-    trade_client = _get_trade_client()
+def get_account_positions(app_key: str, app_secret: str, account_id: str) -> List[Dict[str, Any]]:
+    trade_client = _get_trade_client(app_key, app_secret)
     response = trade_client.account_v2.get_account_position(account_id)
     if response.status_code != 200:
         raise ValueError(f"Webull API error (positions): HTTP {response.status_code}")
@@ -71,6 +64,8 @@ def get_account_positions(account_id: str) -> List[Dict[str, Any]]:
 
 
 def preview_stock_order(
+    app_key: str,
+    app_secret: str,
     account_id: str,
     symbol: str,
     side: str,
@@ -78,7 +73,7 @@ def preview_stock_order(
     limit_price: float,
     trading_session: str = "CORE",
 ) -> Dict[str, Any]:
-    trade_client = _get_trade_client()
+    trade_client = _get_trade_client(app_key, app_secret)
     order = {
         "combo_type": "NORMAL",
         "client_order_id": uuid.uuid4().hex,
@@ -100,6 +95,8 @@ def preview_stock_order(
 
 
 def place_stock_order(
+    app_key: str,
+    app_secret: str,
     account_id: str,
     symbol: str,
     side: str,
@@ -112,7 +109,7 @@ def place_stock_order(
     the only one accepted outside pre-market/after-hours windows, and it draws
     from a separate night_trading_buying_power pool rather than the account's
     regular buying power)."""
-    trade_client = _get_trade_client()
+    trade_client = _get_trade_client(app_key, app_secret)
     client_order_id = uuid.uuid4().hex
     order = {
         "combo_type": "NORMAL",

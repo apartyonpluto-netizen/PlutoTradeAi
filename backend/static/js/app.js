@@ -768,6 +768,7 @@ const bindAccountHubPage = () => {
     card.addEventListener("click", async (event) => {
       const button = event.target instanceof HTMLElement ? event.target.closest("button") : null;
       if (!(button instanceof HTMLButtonElement)) return;
+      if (button.id === "saveWebullCredentialsButton") return;
       button.disabled = true;
       const originalText = button.textContent;
       button.textContent = "Working...";
@@ -808,6 +809,34 @@ const bindAccountHubPage = () => {
       });
     }
   });
+
+  const saveWebullCredsBtn = document.getElementById("saveWebullCredentialsButton");
+  const webullAppKeyInput = document.getElementById("webullAppKeyInput");
+  const webullAppSecretInput = document.getElementById("webullAppSecretInput");
+  if (saveWebullCredsBtn instanceof HTMLButtonElement) {
+    saveWebullCredsBtn.addEventListener("click", async () => {
+      const appKey = webullAppKeyInput instanceof HTMLInputElement ? webullAppKeyInput.value.trim() : "";
+      const appSecret = webullAppSecretInput instanceof HTMLInputElement ? webullAppSecretInput.value.trim() : "";
+      if (!appKey || !appSecret) {
+        showToast("Enter both your Webull App Key and App Secret.", "error");
+        return;
+      }
+      saveWebullCredsBtn.disabled = true;
+      try {
+        await requestJson("/api/accounts/webull-credentials", {
+          method: "POST",
+          body: JSON.stringify({ app_key: appKey, app_secret: appSecret }),
+        });
+        if (webullAppKeyInput instanceof HTMLInputElement) webullAppKeyInput.value = "";
+        if (webullAppSecretInput instanceof HTMLInputElement) webullAppSecretInput.value = "";
+        showToast("Webull credentials saved. Click Connect to link your sandbox.", "success");
+      } catch (error) {
+        showToast(error.message, "error");
+      } finally {
+        saveWebullCredsBtn.disabled = false;
+      }
+    });
+  }
 
   const modal = document.getElementById("setupModal");
   if (!(modal instanceof HTMLElement)) return;
