@@ -5,6 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}PlutoTrade AI{% endblock %}</title>
     <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="manifest" href="/static/manifest.json">
+    <link rel="icon" href="/static/icons/favicon-32.png" sizes="32x32">
+    <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+    <meta name="theme-color" content="#020105">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="PlutoTrade">
     {% block head_extras %}{% endblock %}
 </head>
 <body class="{% block body_class %}{% endblock %}" data-scanner-frequency="{{ settings_payload.scanner_frequency_seconds if settings_payload else 20 }}">
@@ -189,6 +197,13 @@
 </aside>
 
 <script src="/static/js/app.js"></script>
+<script>
+if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+        navigator.serviceWorker.register("/service-worker.js").catch(() => {});
+    });
+}
+</script>
 {% block page_scripts %}{% endblock %}
 </body>
 </html>

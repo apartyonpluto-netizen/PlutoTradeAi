@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, jsonify, redirect, render_template, request, send_from_directory, session, url_for
 
 if __package__:
     from .auth import (
@@ -317,7 +317,15 @@ def _log_response(response):
     return response
 
 
-_PUBLIC_PATHS = {"/login", "/register", "/logout", "/forgot-password"}
+@app.route("/service-worker.js")
+def service_worker():
+    # Served from the root (not /static/) so its default scope covers the
+    # whole app - a service worker's scope is limited to the directory it's
+    # served from unless explicitly widened.
+    return send_from_directory(app.static_folder, "service-worker.js", mimetype="application/javascript")
+
+
+_PUBLIC_PATHS = {"/login", "/register", "/logout", "/forgot-password", "/service-worker.js"}
 _PUBLIC_PATH_PREFIXES = ("/static/",)
 _TOKEN_AUTH_PATHS = {"/api/tradingview/webhook", "/api/autonomy/cron-trigger"}
 
