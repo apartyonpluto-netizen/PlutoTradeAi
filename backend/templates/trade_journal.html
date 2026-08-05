@@ -1,9 +1,38 @@
 {% extends "base.html" %}
-{% block title %}PlutoTrade AI · Trade Journal{% endblock %}
+{% block title %}PlutoTrade AI · Trading Portfolio{% endblock %}
 {% block content %}
+{% if webull_balance.connected and webull_balance.balance %}
+<section class="panel account-summary-card">
+    <div class="panel-head">
+        <span>Net Account Value</span>
+        <span>Webull Sandbox &middot; {{ webull_balance.balance.account_number }}</span>
+    </div>
+    <div class="account-summary-value">${{ "{:,.2f}".format(webull_balance.balance.net_liquidation_value|float) }}</div>
+    <div class="account-summary-pnl {{ 'tone-positive' if webull_balance.balance.unrealized_pnl >= 0 else 'tone-negative' }}">
+        Open P&amp;L {{ webull_balance.balance.unrealized_pnl_display }}
+        ({{ "+" if webull_balance.balance.unrealized_pnl_percent >= 0 else "" }}{{ webull_balance.balance.unrealized_pnl_percent }}%)
+    </div>
+    <div class="price-map-grid" style="margin-top: 16px;">
+        <div><small>Market Value</small><b>${{ "{:,.2f}".format(webull_balance.balance.market_value) }}</b></div>
+        <div><small>Buying Power</small><b>${{ "{:,.2f}".format(webull_balance.balance.buying_power|float) }}</b></div>
+        <div><small>Day's P&amp;L</small><b class="{{ 'tone-positive' if webull_balance.balance.day_pnl >= 0 else 'tone-negative' }}">{{ webull_balance.balance.day_pnl_display }}</b></div>
+    </div>
+</section>
+{% elif webull_balance.error %}
+<section class="panel">
+    <div class="panel-head"><h3>Net Account Value</h3><span>Error</span></div>
+    <p class="auth-error">{{ webull_balance.error }}</p>
+</section>
+{% else %}
+<section class="panel">
+    <div class="panel-head"><h3>Net Account Value</h3><span>Not Connected</span></div>
+    <p class="muted">Connect Webull in Account Hub to show your real sandbox balance here.</p>
+</section>
+{% endif %}
+
 <section class="panel">
     <div class="panel-head">
-        <h3>Trade Journal</h3>
+        <h3>Trading Portfolio</h3>
         <span>Execution Log · Paper Trades Only</span>
     </div>
     <p class="muted">Paper trades fill at live market price via Yahoo Finance by default, or enter your own fill price to log a trade you placed elsewhere (e.g. Webull). No real money or broker order is ever placed here.</p>
@@ -88,12 +117,37 @@
     {% endif %}
 </section>
 
+{% set webull_closes = overnight_orders|selectattr("side", "equalto", "SELL")|selectattr("status", "equalto", "placed")|list %}
 <section class="panel panel-table">
-    <div class="panel-head"><h3>Positions</h3><span id="paperTradeCount">{{ paper_trades|length }} entries</span></div>
-    <table id="paperTradeTable">
+    <div class="panel-head"><h3>Webull Sandbox &mdash; Recently Closed</h3><span>{{ webull_closes|length }} sell orders</span></div>
+    <p class="muted">Real sandbox sell orders you've placed &mdash; either from the Close button above or a stop/target exit.</p>
+    <table>
+        <thead><tr><th>Ticker</th><th>Qty</th><th>Sell Price</th><th>Reason</th><th>Closed</th></tr></thead>
+        <tbody>
+        {% for order in webull_closes %}
+        <tr>
+            <td>{{ order.ticker }}</td>
+            <td>{{ order.quantity }}</td>
+            <td>${{ order.limit_price }}</td>
+            <td>{{ order.reason or "—" }}</td>
+            <td class="alert-time" data-timestamp="{{ order.logged_at }}">--</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="muted">No closed Webull positions yet.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+{% set open_paper_trades = paper_trades|selectattr("status", "equalto", "Open")|list %}
+{% set closed_paper_trades = paper_trades|rejectattr("status", "equalto", "Open")|list %}
+
+<section class="panel panel-table">
+    <div class="panel-head"><h3>Open Positions</h3><span id="openPaperTradeCount">{{ open_paper_trades|length }} entries</span></div>
+    <table id="openPaperTradeTable">
         <thead><tr><th>Ticker</th><th>Direction</th><th>Order Type</th><th>Qty</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody>
-        {% for trade in paper_trades %}
+        {% for trade in open_paper_trades %}
         <tr data-trade-id="{{ trade.id }}">
             <td>{{ trade.ticker }}</td>
             <td>{{ trade.direction }}</td>
@@ -103,16 +157,33 @@
             <td>{{ trade.exit_price and "$" ~ trade.exit_price or "—" }}</td>
             <td>{{ trade.pnl or "—" }}</td>
             <td>{{ trade.status }}</td>
-            <td class="action-row">
-                {% if trade.status == "Open" %}
-                <button class="close-paper-trade" type="button">Close</button>
-                {% else %}
-                &mdash;
-                {% endif %}
-            </td>
+            <td class="action-row"><button class="close-paper-trade" type="button">Close</button></td>
         </tr>
         {% else %}
-        <tr><td colspan="9" class="muted">No paper trades yet. Execute one above to get started.</td></tr>
+        <tr><td colspan="9" class="muted">No open paper trades. Execute one above to get started.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<section class="panel panel-table">
+    <div class="panel-head"><h3>Closed Positions</h3><span id="closedPaperTradeCount">{{ closed_paper_trades|length }} entries</span></div>
+    <table id="closedPaperTradeTable">
+        <thead><tr><th>Ticker</th><th>Direction</th><th>Order Type</th><th>Qty</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Status</th></tr></thead>
+        <tbody>
+        {% for trade in closed_paper_trades %}
+        <tr data-trade-id="{{ trade.id }}">
+            <td>{{ trade.ticker }}</td>
+            <td>{{ trade.direction }}</td>
+            <td>{{ trade.order_type or "MARKET" }}</td>
+            <td>{{ trade.quantity }}</td>
+            <td>${{ trade.entry_price }}</td>
+            <td>{{ trade.exit_price and "$" ~ trade.exit_price or "—" }}</td>
+            <td>{{ trade.pnl or "—" }}</td>
+            <td>{{ trade.status }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8" class="muted">No closed paper trades yet.</td></tr>
         {% endfor %}
         </tbody>
     </table>

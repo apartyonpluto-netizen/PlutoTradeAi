@@ -1123,7 +1123,7 @@ const bindLiveDataStatusCard = () => {
   }, 30000);
 };
 
-const buildPaperTradeRow = (trade) => `
+const buildOpenPaperTradeRow = (trade) => `
   <tr data-trade-id="${escapeHtml(trade.id)}">
     <td>${escapeHtml(trade.ticker)}</td>
     <td>${escapeHtml(trade.direction)}</td>
@@ -1133,16 +1133,31 @@ const buildPaperTradeRow = (trade) => `
     <td>${trade.exit_price ? `$${escapeHtml(trade.exit_price)}` : "—"}</td>
     <td>${trade.pnl === "" || trade.pnl === undefined || trade.pnl === null ? "—" : escapeHtml(trade.pnl)}</td>
     <td>${escapeHtml(trade.status)}</td>
-    <td class="action-row">${trade.status === "Open" ? '<button class="close-paper-trade" type="button">Close</button>' : "&mdash;"}</td>
+    <td class="action-row"><button class="close-paper-trade" type="button">Close</button></td>
+  </tr>`;
+
+const buildClosedPaperTradeRow = (trade) => `
+  <tr data-trade-id="${escapeHtml(trade.id)}">
+    <td>${escapeHtml(trade.ticker)}</td>
+    <td>${escapeHtml(trade.direction)}</td>
+    <td>${escapeHtml(trade.order_type || "MARKET")}</td>
+    <td>${escapeHtml(trade.quantity)}</td>
+    <td>$${escapeHtml(trade.entry_price)}</td>
+    <td>${trade.exit_price ? `$${escapeHtml(trade.exit_price)}` : "—"}</td>
+    <td>${trade.pnl === "" || trade.pnl === undefined || trade.pnl === null ? "—" : escapeHtml(trade.pnl)}</td>
+    <td>${escapeHtml(trade.status)}</td>
   </tr>`;
 
 const bindPaperTradePage = () => {
   const form = document.getElementById("paperTradeForm");
-  const table = document.getElementById("paperTradeTable");
-  if (!(form instanceof HTMLFormElement) || !table) return;
-  const tbody = table.querySelector("tbody");
-  if (!(tbody instanceof HTMLElement)) return;
-  const countNode = document.getElementById("paperTradeCount");
+  const openTable = document.getElementById("openPaperTradeTable");
+  const closedTable = document.getElementById("closedPaperTradeTable");
+  if (!(form instanceof HTMLFormElement) || !openTable || !closedTable) return;
+  const openTbody = openTable.querySelector("tbody");
+  const closedTbody = closedTable.querySelector("tbody");
+  if (!(openTbody instanceof HTMLElement) || !(closedTbody instanceof HTMLElement)) return;
+  const openCountNode = document.getElementById("openPaperTradeCount");
+  const closedCountNode = document.getElementById("closedPaperTradeCount");
   const entriesNode = document.querySelector('[data-summary="entries_today"]');
   const orderTypeSelect = document.getElementById("paperTradeOrderType");
   const entryPriceInput = document.getElementById("paperTradeEntryPrice");
@@ -1157,10 +1172,16 @@ const bindPaperTradePage = () => {
   }
 
   const renderRows = (rows) => {
-    tbody.innerHTML = rows.length
-      ? rows.map((trade) => buildPaperTradeRow(trade)).join("")
-      : '<tr><td colspan="9" class="muted">No paper trades yet. Execute one above to get started.</td></tr>';
-    if (countNode) countNode.textContent = `${rows.length} entries`;
+    const openRows = rows.filter((trade) => trade.status === "Open");
+    const closedRows = rows.filter((trade) => trade.status !== "Open");
+    openTbody.innerHTML = openRows.length
+      ? openRows.map((trade) => buildOpenPaperTradeRow(trade)).join("")
+      : '<tr><td colspan="9" class="muted">No open paper trades. Execute one above to get started.</td></tr>';
+    closedTbody.innerHTML = closedRows.length
+      ? closedRows.map((trade) => buildClosedPaperTradeRow(trade)).join("")
+      : '<tr><td colspan="8" class="muted">No closed paper trades yet.</td></tr>';
+    if (openCountNode) openCountNode.textContent = `${openRows.length} entries`;
+    if (closedCountNode) closedCountNode.textContent = `${closedRows.length} entries`;
   };
 
   const loadTrades = async () => {
@@ -1194,7 +1215,7 @@ const bindPaperTradePage = () => {
     }
   });
 
-  table.addEventListener("click", async (event) => {
+  openTable.addEventListener("click", async (event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement) || !target.classList.contains("close-paper-trade")) return;
     const row = target.closest("tr[data-trade-id]");

@@ -484,6 +484,10 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _signed_money(value: float) -> str:
+    return f"{'-' if value < 0 else '+'}${abs(value):,.2f}"
+
+
 def _market_session(now_utc: datetime | None = None) -> str:
     eastern = (now_utc or _now_utc()).astimezone(ZoneInfo("America/New_York"))
     if eastern.weekday() >= 5:
@@ -1339,6 +1343,7 @@ def trade_journal_page() -> str:
             "positions": annotate_positions_with_exit_signal(webull_positions["positions"], overnight_orders),
         }
     context["webull_positions"] = webull_positions
+    context["webull_balance"] = _get_live_webull_balance(user_id)
     return render_template("trade_journal.html", **context)
 
 
@@ -1948,6 +1953,11 @@ def _get_live_webull_balance(user_id: str, force_refresh: bool = False) -> Dict[
             if not cash_account:
                 raise ValueError("No Webull sandbox account found for these credentials.")
             balance = webull_api.get_account_balance(creds["app_key"], creds["app_secret"], cash_account["account_id"])
+            unrealized_pnl = float(balance.get("total_unrealized_profit_loss", 0) or 0)
+            market_value = float(balance.get("total_market_value", 0) or 0)
+            cost_basis = market_value - unrealized_pnl
+            unrealized_pnl_percent = (unrealized_pnl / cost_basis * 100) if cost_basis else 0.0
+            day_pnl = float(balance.get("total_day_profit_loss", 0) or 0)
             payload = {
                 "connected": True,
                 "error": "",
@@ -1956,6 +1966,12 @@ def _get_live_webull_balance(user_id: str, force_refresh: bool = False) -> Dict[
                     "net_liquidation_value": balance.get("total_net_liquidation_value", ""),
                     "cash_balance": balance.get("total_cash_balance", ""),
                     "buying_power": (balance.get("account_currency_assets") or [{}])[0].get("buying_power", ""),
+                    "market_value": round(market_value, 2),
+                    "unrealized_pnl": round(unrealized_pnl, 2),
+                    "unrealized_pnl_percent": round(unrealized_pnl_percent, 2),
+                    "unrealized_pnl_display": _signed_money(unrealized_pnl),
+                    "day_pnl": round(day_pnl, 2),
+                    "day_pnl_display": _signed_money(day_pnl),
                 },
             }
         except Exception as error:  # noqa: BLE001 - a flaky Webull call shouldn't break the page
