@@ -20,12 +20,16 @@ from flask import Flask, jsonify, redirect, render_template, request, send_from_
 
 if __package__:
     from .auth import (
+        approve_user,
         authenticate_user,
         find_user_by_webhook_token,
         get_user_by_id,
+        is_admin,
         list_all_user_ids,
+        list_pending_users,
         public_user,
         register_user,
+        reject_user,
         reset_password,
     )
     from .autonomy.autonomous_controller import (
@@ -101,12 +105,16 @@ if __package__:
     )
 else:
     from auth import (
+        approve_user,
         authenticate_user,
         find_user_by_webhook_token,
         get_user_by_id,
+        is_admin,
         list_all_user_ids,
+        list_pending_users,
         public_user,
         register_user,
+        reject_user,
         reset_password,
     )
     from autonomy.autonomous_controller import (
@@ -341,7 +349,8 @@ def _require_login():
         return None
 
     user_id = session.get("user_id")
-    if user_id and get_user_by_id(user_id):
+    user = get_user_by_id(user_id) if user_id else None
+    if user and user.get("approved", True):
         return None
 
     session.pop("user_id", None)
@@ -363,6 +372,8 @@ def login_page():
     user = authenticate_user(username, password)
     if not user:
         return render_template("login.html", error="Incorrect username or password.", next_path=next_path), 401
+    if not user.get("approved", True):
+        return render_template("login.html", error="Your account is still pending admin approval.", next_path=next_path), 403
 
     session["user_id"] = user["id"]
     session.permanent = True
@@ -386,6 +397,13 @@ def register_page():
         user = register_user(username, password)
     except ValueError as error:
         return render_template("register.html", error=str(error)), 400
+
+    if not user.get("approved", True):
+        return render_template(
+            "login.html",
+            error="Account created. An admin needs to approve it before you can sign in.",
+            next_path="",
+        )
 
     session["user_id"] = user["id"]
     session.permanent = True
@@ -419,6 +437,47 @@ def logout_page():
 def _current_user_id() -> str:
     """Guaranteed non-empty for any route reachable past the before_request auth gate."""
     return session.get("user_id", "")
+
+
+def _require_admin():
+    if not is_admin(_current_user_id()):
+        return _api_failure("Admin access required.", status_code=403, error_code="forbidden", ok=False)
+    return None
+
+
+@app.route("/admin")
+def admin_page():
+    if not is_admin(_current_user_id()):
+        return redirect(url_for("dashboard_page"))
+    context = _build_page_context()
+    context["pending_users"] = list_pending_users()
+    return render_template("admin.html", **context)
+
+
+@app.route("/api/admin/approve-user", methods=["POST"])
+def api_admin_approve_user():
+    guard = _require_admin()
+    if guard:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    try:
+        approve_user(payload.get("user_id", ""))
+    except ValueError as error:
+        return _api_failure(str(error), status_code=400, error_code="not_found", ok=False)
+    return _api_success({}, ok=True)
+
+
+@app.route("/api/admin/reject-user", methods=["POST"])
+def api_admin_reject_user():
+    guard = _require_admin()
+    if guard:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    try:
+        reject_user(payload.get("user_id", ""))
+    except ValueError as error:
+        return _api_failure(str(error), status_code=400, error_code="not_found", ok=False)
+    return _api_success({}, ok=True)
 
 
 def _now_utc() -> datetime:

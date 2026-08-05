@@ -92,6 +92,13 @@
                     <span>{{ item.label }}</span>
                 </a>
                 {% endfor %}
+
+                {% if current_user and current_user.role == "admin" %}
+                <a href="/admin" class="{{ 'active' if request.path == '/admin' else '' }}">
+                    <span class="nav-glyph" aria-hidden="true">☗</span>
+                    <span>Admin</span>
+                </a>
+                {% endif %}
             </nav>
 
             <div class="system-card">

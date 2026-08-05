@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · Admin{% endblock %}
+{% block content %}
+<section class="panel panel-table">
+    <div class="panel-head">
+        <h3>Pending Signups</h3>
+        <span>{{ pending_users|length }} awaiting approval</span>
+    </div>
+    <p class="muted">New accounts can't sign in until you approve them here. Rejecting deletes the account outright.</p>
+    <table id="pendingUsersTable">
+        <thead><tr><th>Username</th><th>Requested</th><th>Actions</th></tr></thead>
+        <tbody>
+        {% for user in pending_users %}
+        <tr data-user-id="{{ user.id }}">
+            <td>{{ user.username }}</td>
+            <td class="alert-time" data-timestamp="{{ user.created_at }}">--</td>
+            <td class="action-row">
+                <button class="approve-user" type="button" data-user-id="{{ user.id }}">Approve</button>
+                <button class="ghost-button reject-user" type="button" data-user-id="{{ user.id }}">Reject</button>
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="3" class="muted">No pending signups.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script>
+(() => {
+    const table = document.getElementById("pendingUsersTable");
+    if (!table) return;
+
+    table.addEventListener("click", async (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) return;
+        const row = target.closest("tr[data-user-id]");
+        if (!(row instanceof HTMLElement)) return;
+        const userId = row.dataset.userId;
+        const isApprove = target.classList.contains("approve-user");
+        const isReject = target.classList.contains("reject-user");
+        if (!isApprove && !isReject) return;
+        if (isReject && !window.confirm("Reject and permanently delete this account?")) return;
+
+        target.disabled = true;
+        try {
+            const response = await fetch(isApprove ? "/api/admin/approve-user" : "/api/admin/reject-user", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({user_id: userId}),
+            });
+            const payload = await response.json();
+            if (!response.ok || payload.ok === false) {
+                throw new Error((payload.error && payload.error.message) || "Request failed.");
+            }
+            row.remove();
+            showToast(isApprove ? "User approved." : "User rejected.", "success");
+        } catch (error) {
+            showToast(error.message, "error");
+            target.disabled = false;
+        }
+    });
+})();
+</script>
+{% endblock %}
