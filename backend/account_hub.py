@@ -11,10 +11,10 @@ from urllib.parse import parse_qs, urlparse
 
 if __package__:
     from .integrations import webull as webull_api
-    from .webull_credentials import get_webull_credentials, is_webull_configured
+    from .webull_credentials import get_webull_credentials, is_webull_configured, record_seed_balance_if_unset
 else:
     from integrations import webull as webull_api
-    from webull_credentials import get_webull_credentials, is_webull_configured
+    from webull_credentials import get_webull_credentials, is_webull_configured, record_seed_balance_if_unset
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
@@ -217,6 +217,7 @@ def _sync_webull_account(user_id: str, account: Dict[str, Any]) -> None:
     account["cash_balance"] = balance.get("total_cash_balance", "")
     account["buying_power"] = (balance.get("account_currency_assets") or [{}])[0].get("buying_power", "")
     account["net_liquidation_value"] = balance.get("total_net_liquidation_value", "")
+    record_seed_balance_if_unset(user_id, float(balance.get("total_net_liquidation_value", 0) or 0))
 
 
 def verify_tradingview_token(user_id: str, token: str) -> bool:

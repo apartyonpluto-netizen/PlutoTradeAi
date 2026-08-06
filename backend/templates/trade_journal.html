@@ -12,6 +12,11 @@
         Open P&amp;L {{ webull_balance.balance.unrealized_pnl_display }}
         ({{ "+" if webull_balance.balance.unrealized_pnl_percent >= 0 else "" }}{{ webull_balance.balance.unrealized_pnl_percent }}%)
     </div>
+    {% if webull_balance.balance.is_virtual_balance %}
+    <div class="muted" style="margin-top: 4px; font-size: 0.8rem;">
+        Scaled to a ${{ "{:,.0f}".format(webull_balance.balance.virtual_starting_balance|float) }} starting balance for realistic sizing &middot; real Webull sandbox is ${{ "{:,.2f}".format(webull_balance.balance.real_net_liquidation_value|float) }}
+    </div>
+    {% endif %}
     <div class="price-map-grid" style="margin-top: 16px;">
         <div><small>Market Value</small><b>${{ "{:,.2f}".format(webull_balance.balance.market_value) }}</b></div>
         <div><small>Buying Power</small><b>${{ "{:,.2f}".format(webull_balance.balance.buying_power|float) }}</b></div>

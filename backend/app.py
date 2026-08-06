@@ -71,7 +71,13 @@ if __package__:
     from .brains.strategy_brain import build_strategy_intelligence
     from .integrations.tradingview import get_tradingview_status, save_alert
     from .integrations import webull as webull_api
-    from .webull_credentials import get_webull_credentials, is_webull_configured, set_webull_credentials
+    from .webull_credentials import (
+        get_webull_credentials,
+        is_webull_configured,
+        set_webull_credentials,
+        get_virtual_net_account_value,
+        get_virtual_starting_balance,
+    )
     from .webull_stop_orders import pop_exit_orders, record_exit_order, tracked_tickers as webull_tracked_tickers
     from .autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
     from .backtest_engine import run_backtest
@@ -157,7 +163,13 @@ else:
     from brains.strategy_brain import build_strategy_intelligence
     from integrations.tradingview import get_tradingview_status, save_alert
     from integrations import webull as webull_api
-    from webull_credentials import get_webull_credentials, is_webull_configured, set_webull_credentials
+    from webull_credentials import (
+        get_webull_credentials,
+        is_webull_configured,
+        set_webull_credentials,
+        get_virtual_net_account_value,
+        get_virtual_starting_balance,
+    )
     from webull_stop_orders import pop_exit_orders, record_exit_order, tracked_tickers as webull_tracked_tickers
     from autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
     from backtest_engine import run_backtest
@@ -2011,12 +2023,19 @@ def _get_live_webull_balance(user_id: str, force_refresh: bool = False) -> Dict[
             cost_basis = market_value - unrealized_pnl
             unrealized_pnl_percent = (unrealized_pnl / cost_basis * 100) if cost_basis else 0.0
             day_pnl = float(balance.get("total_day_profit_loss", 0) or 0)
+            real_net_liquidation_value = float(balance.get("total_net_liquidation_value", 0) or 0)
+            virtual_net_account_value = get_virtual_net_account_value(user_id, real_net_liquidation_value)
             payload = {
                 "connected": True,
                 "error": "",
                 "balance": {
                     "account_number": cash_account.get("account_number", ""),
-                    "net_liquidation_value": balance.get("total_net_liquidation_value", ""),
+                    "net_liquidation_value": (
+                        round(virtual_net_account_value, 2) if virtual_net_account_value is not None else real_net_liquidation_value
+                    ),
+                    "real_net_liquidation_value": real_net_liquidation_value,
+                    "virtual_starting_balance": get_virtual_starting_balance(user_id),
+                    "is_virtual_balance": virtual_net_account_value is not None,
                     "cash_balance": balance.get("total_cash_balance", ""),
                     "buying_power": (balance.get("account_currency_assets") or [{}])[0].get("buying_power", ""),
                     "market_value": round(market_value, 2),

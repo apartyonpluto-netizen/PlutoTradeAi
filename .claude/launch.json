@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "plutotrade-backend",
+      "runtimeExecutable": "/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/venv/bin/python",
+      "runtimeArgs": ["/Users/curtissmith/Downloads/PROJECTTRADINGWITHPLUTOAI/PlutoTradeAI/backend/app.py"],
+      "port": 5000
+    }
+  ]
+}
