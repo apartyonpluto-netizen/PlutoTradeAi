@@ -142,3 +142,111 @@ def place_stock_order(
             continue
         break
     raise ValueError(f"Webull API error (place order): HTTP {last_response.status_code} {last_response.text}")
+
+
+def place_stop_loss_order(
+    app_key: str,
+    app_secret: str,
+    account_id: str,
+    symbol: str,
+    quantity: float,
+    stop_price: float,
+) -> Dict[str, Any]:
+    """Places a real standalone stop-loss SELL order at the broker - once this
+    is accepted, Webull itself watches the price and executes the exit, with
+    no dependency on this app polling or a cron job firing in time. order_type
+    must be the literal string "STOP_LOSS" (underscore, not a space - "STOP
+    LOSS" is rejected with OAUTH_OPENAPI_PARAM_ERR, verified via preview_order
+    before this was wired into live placement). support_trading_session is
+    hardcoded to "CORE" - unlike LIMIT orders, STOP_LOSS rejects both "NIGHT"
+    and "ALL" as invalid parameter values (confirmed live against the sandbox
+    API), so stop-loss orders can only be placed while the core trading
+    gateway is up (roughly 9:30-16:00 ET). Callers placing an entry outside
+    those hours should expect this to fail and retry once CORE hours begin -
+    see _place_missing_stop_orders in app.py."""
+    trade_client = _get_trade_client(app_key, app_secret)
+    client_order_id = uuid.uuid4().hex
+    order = {
+        "combo_type": "NORMAL",
+        "client_order_id": client_order_id,
+        "symbol": symbol,
+        "instrument_type": "EQUITY",
+        "market": "US",
+        "order_type": "STOP_LOSS",
+        "stop_price": str(stop_price),
+        "quantity": str(quantity),
+        "support_trading_session": "CORE",
+        "side": "SELL",
+        "time_in_force": "DAY",
+        "entrust_type": "QTY",
+    }
+    last_response = None
+    for attempt in range(3):
+        response = trade_client.order_v2.place_order(account_id, [order])
+        if response.status_code == 200:
+            result = response.json()
+            result["client_order_id"] = client_order_id
+            return result
+        last_response = response
+        if response.status_code == 429 and attempt < 2:
+            time.sleep(1.5 * (attempt + 1))
+            continue
+        break
+    raise ValueError(f"Webull API error (place stop-loss order): HTTP {last_response.status_code} {last_response.text}")
+
+
+def place_take_profit_order(
+    app_key: str,
+    app_secret: str,
+    account_id: str,
+    symbol: str,
+    quantity: float,
+    target_price: float,
+    trading_session: str = "CORE",
+) -> Dict[str, Any]:
+    """Places a real take-profit SELL order at the broker - a plain LIMIT
+    order resting above the current price, which Webull fills automatically
+    once the market reaches it, same as any other limit order. Unlike
+    STOP_LOSS, LIMIT accepts CORE/ALL/NIGHT normally (confirmed earlier
+    against the sandbox API), so this has no trading-hours restriction. This
+    order rides alongside the STOP_LOSS order placed at entry as an
+    independent bracket rather than a true OTOCO combo - see the
+    _reconcile_exit_orders note in app.py for how the stale-leg risk that
+    creates is handled."""
+    trade_client = _get_trade_client(app_key, app_secret)
+    client_order_id = uuid.uuid4().hex
+    order = {
+        "combo_type": "NORMAL",
+        "client_order_id": client_order_id,
+        "symbol": symbol,
+        "instrument_type": "EQUITY",
+        "market": "US",
+        "order_type": "LIMIT",
+        "limit_price": str(target_price),
+        "quantity": str(quantity),
+        "support_trading_session": trading_session,
+        "side": "SELL",
+        "time_in_force": "DAY",
+        "entrust_type": "QTY",
+    }
+    last_response = None
+    for attempt in range(3):
+        response = trade_client.order_v2.place_order(account_id, [order])
+        if response.status_code == 200:
+            result = response.json()
+            result["client_order_id"] = client_order_id
+            return result
+        last_response = response
+        if response.status_code == 429 and attempt < 2:
+            time.sleep(1.5 * (attempt + 1))
+            continue
+        break
+    raise ValueError(f"Webull API error (place take-profit order): HTTP {last_response.status_code} {last_response.text}")
+
+
+def cancel_order(app_key: str, app_secret: str, account_id: str, client_order_id: str) -> Dict[str, Any]:
+    trade_client = _get_trade_client(app_key, app_secret)
+    response = trade_client.order_v2.cancel_order(account_id, client_order_id)
+    if response.status_code != 200:
+        raise ValueError(f"Webull API error (cancel order): HTTP {response.status_code} {response.text}")
+    return response.json()

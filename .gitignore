@@ -4,6 +4,7 @@ venv/
 .venv/
 .env
 *.log
+*.log.*
 logs/*.log
 
 data/accounts.json

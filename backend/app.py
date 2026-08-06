@@ -72,7 +72,8 @@ if __package__:
     from .integrations.tradingview import get_tradingview_status, save_alert
     from .integrations import webull as webull_api
     from .webull_credentials import get_webull_credentials, is_webull_configured, set_webull_credentials
-    from .autonomy.overnight_orders import list_overnight_orders, record_overnight_order
+    from .webull_stop_orders import pop_exit_orders, record_exit_order, tracked_tickers as webull_tracked_tickers
+    from .autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
     from .backtest_engine import run_backtest
     from .market_scanner import scan_market
     from .news.future_news import get_future_news_roadmap
@@ -157,7 +158,8 @@ else:
     from integrations.tradingview import get_tradingview_status, save_alert
     from integrations import webull as webull_api
     from webull_credentials import get_webull_credentials, is_webull_configured, set_webull_credentials
-    from autonomy.overnight_orders import list_overnight_orders, record_overnight_order
+    from webull_stop_orders import pop_exit_orders, record_exit_order, tracked_tickers as webull_tracked_tickers
+    from autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
     from backtest_engine import run_backtest
     from market_scanner import scan_market
     from news.future_news import get_future_news_roadmap
@@ -1430,11 +1432,24 @@ def api_close_webull_position():
     if quantity <= 0 or limit_price <= 0:
         raise ValidationError(f"Invalid quantity/price for {ticker}, cannot close.")
 
+    # Cancel any resting protective stop-loss and/or take-profit order(s) for
+    # this ticker before selling manually - otherwise a stale leg could later
+    # fire against shares that no longer exist, which risks an accidental
+    # short position.
+    cancelled_exit_order_ids = []
+    for exit_order in pop_exit_orders(user_id, ticker):
+        try:
+            webull_api.cancel_order(creds["app_key"], creds["app_secret"], account_id, exit_order["id"])
+            cancelled_exit_order_ids.append(exit_order["id"])
+        except Exception:  # noqa: BLE001 - likely already filled/expired, don't block the manual close over it
+            pass
+
     entry = {
         "ticker": ticker,
         "side": "SELL",
         "quantity": quantity,
         "limit_price": limit_price,
+        "cancelled_exit_order_ids": cancelled_exit_order_ids,
         "reason": "Manual close from Trade Journal",
         "account_id": account_id,
         "status": "pending",
@@ -2075,6 +2090,102 @@ def api_autonomy_overnight_orders():
     return _api_success({"orders": orders}, orders=orders, ok=True)
 
 
+def _reconcile_exit_orders(user_id: str, creds: Dict[str, str], account_id: str) -> None:
+    """Runs at the start of every scan to keep resting broker-side exit
+    orders in sync with reality. The stop-loss and take-profit legs are two
+    independent orders (not a true OTOCO bracket - see the note on
+    place_take_profit_order), which creates two gaps this closes:
+
+    1. An entry bought outside CORE hours couldn't get its STOP_LOSS order
+       attached yet (STOP_LOSS only accepts the CORE session, confirmed live
+       against the sandbox - NIGHT and ALL are both rejected). Retry it here;
+       once CORE hours are live the retry succeeds and the gap closes itself.
+    2. One leg already filled at the broker on its own (e.g. price hit the
+       take-profit limit, or the stop triggered) and closed the position -
+       the other leg is now stale, resting against shares that no longer
+       exist. If left alone it could later fire and open an accidental short,
+       so cancel every tracked leg for any ticker that's no longer an open
+       position."""
+    try:
+        open_tickers = {
+            str(position.get("symbol", "")).upper()
+            for position in webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
+        }
+    except Exception:  # noqa: BLE001 - best-effort reconciliation, don't block the scan over a flaky positions call
+        return
+
+    for ticker in webull_tracked_tickers(user_id):
+        if ticker in open_tickers:
+            continue
+        for exit_order in pop_exit_orders(user_id, ticker):
+            try:
+                webull_api.cancel_order(creds["app_key"], creds["app_secret"], account_id, exit_order["id"])
+            except Exception:  # noqa: BLE001 - likely already filled/expired, that's fine
+                pass
+
+    if not open_tickers:
+        return
+
+    orders = list_overnight_orders(user_id)
+    changed = False
+    handled_tickers = set()
+    for order in orders:
+        ticker = str(order.get("ticker", "")).upper()
+        if (
+            ticker in handled_tickers
+            or order.get("status") != "placed"
+            or order.get("side") != "BUY"
+            or ticker not in open_tickers
+        ):
+            continue
+        handled_tickers.add(ticker)
+        quantity = order.get("quantity", OVERNIGHT_ORDER_QUANTITY)
+
+        if order.get("stop_order_placed") is False:
+            stop_price = float(order.get("stop") or 0)
+            if stop_price > 0:
+                try:
+                    time.sleep(1.0)
+                    stop_result = webull_api.place_stop_loss_order(
+                        app_key=creds["app_key"],
+                        app_secret=creds["app_secret"],
+                        account_id=account_id,
+                        symbol=ticker,
+                        quantity=quantity,
+                        stop_price=stop_price,
+                    )
+                    record_exit_order(user_id, ticker, stop_result["client_order_id"], "stop")
+                    order["stop_order_placed"] = True
+                    order["stop_order_error"] = None
+                except Exception as stop_error:  # noqa: BLE001 - still not placeable (e.g. still outside CORE hours) - try again next run
+                    order["stop_order_error"] = str(stop_error)
+                changed = True
+
+        if order.get("take_profit_order_placed") is False:
+            target_price = float(order.get("target") or 0)
+            if target_price > 0:
+                try:
+                    time.sleep(1.0)
+                    take_profit_result = webull_api.place_take_profit_order(
+                        app_key=creds["app_key"],
+                        app_secret=creds["app_secret"],
+                        account_id=account_id,
+                        symbol=ticker,
+                        quantity=quantity,
+                        target_price=target_price,
+                        trading_session=_current_webull_trading_session(),
+                    )
+                    record_exit_order(user_id, ticker, take_profit_result["client_order_id"], "take_profit")
+                    order["take_profit_order_placed"] = True
+                    order["take_profit_order_error"] = None
+                except Exception as take_profit_error:  # noqa: BLE001 - try again next run
+                    order["take_profit_order_error"] = str(take_profit_error)
+                changed = True
+
+    if changed:
+        replace_overnight_orders(user_id, orders)
+
+
 def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
     """Scans current setups the same way the dashboard does, and for the
     highest-confidence bullish ones places real (sandbox) DAY limit orders on
@@ -2098,6 +2209,8 @@ def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
     if not cash_account:
         raise ValidationError("No Webull sandbox account found for these credentials.")
     account_id = cash_account["account_id"]
+
+    _reconcile_exit_orders(user_id, creds, account_id)
 
     risk_settings = get_autonomy_status(user_id)
     if risk_settings.get("emergency_stop_enabled"):
@@ -2216,6 +2329,55 @@ def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
             entry["status"] = "placed"
             entry["webull_response"] = result
             placed.append(entry)
+
+            # The entry is filled - place real protective exit orders at the
+            # broker immediately (a STOP_LOSS and a take-profit LIMIT), rather
+            # than relying on this app noticing later. Failure here doesn't
+            # roll back the entry (it already filled); it's logged clearly
+            # instead so an unprotected position is visible, not silently
+            # assumed safe. These are two independent orders, not a linked
+            # bracket - _reconcile_exit_orders cancels whichever leg is left
+            # stale once the other one fills.
+            stop_price = float(entry.get("stop") or 0)
+            if stop_price > 0:
+                try:
+                    time.sleep(1.0)
+                    stop_result = webull_api.place_stop_loss_order(
+                        app_key=creds["app_key"],
+                        app_secret=creds["app_secret"],
+                        account_id=account_id,
+                        symbol=ticker,
+                        quantity=quantity,
+                        stop_price=stop_price,
+                    )
+                    record_exit_order(user_id, ticker, stop_result["client_order_id"], "stop")
+                    entry["stop_order_placed"] = True
+                except Exception as stop_error:  # noqa: BLE001 - the entry already succeeded, don't fail the whole candidate
+                    entry["stop_order_placed"] = False
+                    entry["stop_order_error"] = str(stop_error)
+            else:
+                entry["stop_order_placed"] = False
+
+            target_price = float(entry.get("target") or 0)
+            if target_price > 0:
+                try:
+                    time.sleep(1.0)
+                    take_profit_result = webull_api.place_take_profit_order(
+                        app_key=creds["app_key"],
+                        app_secret=creds["app_secret"],
+                        account_id=account_id,
+                        symbol=ticker,
+                        quantity=quantity,
+                        target_price=target_price,
+                        trading_session=_current_webull_trading_session(),
+                    )
+                    record_exit_order(user_id, ticker, take_profit_result["client_order_id"], "take_profit")
+                    entry["take_profit_order_placed"] = True
+                except Exception as take_profit_error:  # noqa: BLE001 - the entry already succeeded, don't fail the whole candidate
+                    entry["take_profit_order_placed"] = False
+                    entry["take_profit_order_error"] = str(take_profit_error)
+            else:
+                entry["take_profit_order_placed"] = False
         except Exception as error:  # noqa: BLE001 - one bad ticker shouldn't kill the whole batch
             entry["status"] = "failed"
             entry["error"] = str(error)

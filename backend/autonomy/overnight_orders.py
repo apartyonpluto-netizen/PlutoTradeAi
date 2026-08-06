@@ -40,3 +40,10 @@ def record_overnight_order(user_id: str, entry: Dict[str, Any]) -> Dict[str, Any
     orders.insert(0, entry)
     _orders_file(user_id).write_text(json.dumps(orders, indent=2), encoding="utf-8")
     return entry
+
+
+def replace_overnight_orders(user_id: str, orders: List[Dict[str, Any]]) -> None:
+    """Overwrites the full log - used to persist in-place updates (e.g. a
+    stop-loss that failed at entry time later succeeding on retry) rather
+    than appending a new entry."""
+    _orders_file(user_id).write_text(json.dumps(orders, indent=2), encoding="utf-8")
