@@ -7,6 +7,8 @@ from typing import Dict, List, Tuple
 import pandas as pd
 import yfinance as yf
 
+from calibration_store import score_multiplier
+
 SUPPORTED_STRATEGIES = [
     "Breakout",
     "Pullback",
@@ -344,6 +346,13 @@ def build_strategy_intelligence(
             f"Loss of momentum back through EMA20 {_fmt(ema20)}.",
         ),
     ]
+
+    # Nudge each candidate's hand-tuned score by how that named strategy has
+    # actually performed in the walk-forward backtest (see calibration.py) -
+    # a no-op until an admin runs calibration, and a no-op per-strategy until
+    # enough trades have been recorded to trust the number.
+    for candidate in candidates:
+        candidate.score = max(0, min(99, round(candidate.score * score_multiplier(candidate.name))))
 
     ranked = sorted(candidates, key=lambda item: item.score, reverse=True)
     winner = ranked[0]

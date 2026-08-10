@@ -838,6 +838,31 @@ const bindAccountHubPage = () => {
     });
   }
 
+  const saveAnthropicKeyBtn = document.getElementById("saveAnthropicKeyButton");
+  const anthropicApiKeyInput = document.getElementById("anthropicApiKeyInput");
+  if (saveAnthropicKeyBtn instanceof HTMLButtonElement) {
+    saveAnthropicKeyBtn.addEventListener("click", async () => {
+      const apiKey = anthropicApiKeyInput instanceof HTMLInputElement ? anthropicApiKeyInput.value.trim() : "";
+      if (!apiKey) {
+        showToast("Enter your Anthropic API key.", "error");
+        return;
+      }
+      saveAnthropicKeyBtn.disabled = true;
+      try {
+        await requestJson("/api/accounts/anthropic-credentials", {
+          method: "POST",
+          body: JSON.stringify({ api_key: apiKey }),
+        });
+        if (anthropicApiKeyInput instanceof HTMLInputElement) anthropicApiKeyInput.value = "";
+        showToast("Anthropic API key saved.", "success");
+      } catch (error) {
+        showToast(error.message, "error");
+      } finally {
+        saveAnthropicKeyBtn.disabled = false;
+      }
+    });
+  }
+
   const modal = document.getElementById("setupModal");
   if (!(modal instanceof HTMLElement)) return;
   const closeModal = () => {

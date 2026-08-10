@@ -123,6 +123,23 @@
 
 <section class="panel">
     <div class="panel-head">
+        <h3>AI Reasoning</h3>
+        <span>{{ "Configured" if anthropic_configured else "Not Configured" }}</span>
+    </div>
+    <p class="muted">
+        Optional - bring your own Anthropic API key to have Claude write a genuine judgment on each autonomous trade
+        candidate (after it already passed the technical confidence threshold), which can adjust or veto the trade.
+        This calls the Anthropic API per candidate and is billed to your own key, never shared with other users.
+        Leave unset and autonomous trading works exactly as before, using only the technical scoring.
+    </p>
+    <div class="grid-form">
+        <input type="password" id="anthropicApiKeyInput" placeholder="{{ 'API Key (saved - enter to replace)' if anthropic_configured else 'Your Anthropic API Key (sk-ant-...)' }}">
+        <button type="button" id="saveAnthropicKeyButton">Save API Key</button>
+    </div>
+</section>
+
+<section class="panel">
+    <div class="panel-head">
         <h3>Future Platforms</h3>
         <span>Locked Integrations</span>
     </div>

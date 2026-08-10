@@ -63,6 +63,40 @@
     </table>
 </section>
 
+<section class="panel panel-table">
+    <div class="panel-head">
+        <h3>Strategy Calibration</h3>
+        <span id="calibrationStatusBadge">{{ calibration.status or "never_run" }}</span>
+    </div>
+    <p class="muted">
+        Runs the walk-forward backtest across the scan universe and measures each named strategy's real historical
+        win rate, then nudges its live confidence score by that evidence instead of trusting the hand-tuned formula
+        alone. Strategies with fewer than 15 recorded trades are left unadjusted. Can take several minutes.
+    </p>
+    <p class="muted" id="calibrationGeneratedAt">
+        {% if calibration.generated_at %}Last run: <span class="alert-time" data-timestamp="{{ calibration.generated_at }}">--</span>{% else %}Never run.{% endif %}
+    </p>
+    <button id="runCalibrationButton" type="button" {{ "disabled" if calibration.status == "running" else "" }}>
+        {{ "Running..." if calibration.status == "running" else "Run Calibration" }}
+    </button>
+    <table id="calibrationStatsTable" style="margin-top: 16px;">
+        <thead><tr><th>Strategy</th><th>Trades</th><th>Win Rate</th><th>Avg Return</th><th>Trusted</th></tr></thead>
+        <tbody id="calibrationStatsBody">
+        {% for name, stats in (calibration.strategy_stats or {}).items() %}
+        <tr>
+            <td>{{ name }}</td>
+            <td>{{ stats.trade_count }}</td>
+            <td>{{ stats.win_rate_percent }}%</td>
+            <td class="{{ 'tone-positive' if stats.avg_return_percent >= 0 else 'tone-negative' }}">{{ stats.avg_return_percent }}%</td>
+            <td>{{ "Yes" if stats.trusted else "No (needs more trades)" }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="muted">No calibration data yet.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
 <section class="panel">
     <div class="panel-head">
         <h3>Global Settings</h3>
@@ -179,6 +213,69 @@
                 target.disabled = false;
             }
         });
+    }
+
+    const runCalibrationButton = document.getElementById("runCalibrationButton");
+    if (runCalibrationButton) {
+        const statsBody = document.getElementById("calibrationStatsBody");
+        const statusBadge = document.getElementById("calibrationStatusBadge");
+
+        function renderCalibrationStats(calibration) {
+            statusBadge.textContent = calibration.status || "never_run";
+            if (!calibration.strategy_stats || Object.keys(calibration.strategy_stats).length === 0) return;
+            statsBody.innerHTML = "";
+            for (const [name, stats] of Object.entries(calibration.strategy_stats)) {
+                const row = document.createElement("tr");
+                const pnlClass = stats.avg_return_percent >= 0 ? "tone-positive" : "tone-negative";
+                row.innerHTML = `
+                    <td>${name}</td>
+                    <td>${stats.trade_count}</td>
+                    <td>${stats.win_rate_percent}%</td>
+                    <td class="${pnlClass}">${stats.avg_return_percent}%</td>
+                    <td>${stats.trusted ? "Yes" : "No (needs more trades)"}</td>
+                `;
+                statsBody.appendChild(row);
+            }
+        }
+
+        async function pollCalibrationStatus() {
+            const response = await fetch("/api/admin/calibration-status");
+            const payload = await response.json();
+            if (!response.ok || payload.ok === false) return;
+            const calibration = payload.data;
+            renderCalibrationStats(calibration);
+            if (calibration.status === "running") {
+                runCalibrationButton.disabled = true;
+                runCalibrationButton.textContent = "Running...";
+                setTimeout(pollCalibrationStatus, 5000);
+            } else {
+                runCalibrationButton.disabled = false;
+                runCalibrationButton.textContent = "Run Calibration";
+                if (calibration.status === "done") {
+                    showToast("Calibration complete.", "success");
+                }
+            }
+        }
+
+        runCalibrationButton.addEventListener("click", async () => {
+            runCalibrationButton.disabled = true;
+            runCalibrationButton.textContent = "Starting...";
+            try {
+                const result = await callAdminApi("/api/admin/recalibrate-strategies", {});
+                if (result.data && result.data.status === "already_running") {
+                    showToast("A calibration run is already in progress.", "error");
+                }
+                setTimeout(pollCalibrationStatus, 3000);
+            } catch (error) {
+                showToast(error.message, "error");
+                runCalibrationButton.disabled = false;
+                runCalibrationButton.textContent = "Run Calibration";
+            }
+        });
+
+        if (statusBadge.textContent.trim() === "running") {
+            setTimeout(pollCalibrationStatus, 3000);
+        }
     }
 
     const globalSettingsForm = document.getElementById("globalSettingsForm");

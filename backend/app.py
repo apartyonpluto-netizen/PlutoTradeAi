@@ -75,6 +75,7 @@ if __package__:
     from .brains.charting_brain import build_chart_levels
     from .brains.extended_hours_brain import build_extended_hours_intelligence
     from .brains.strategy_brain import build_strategy_intelligence
+    from .brains.llm_reasoning import get_llm_verdict
     from .integrations.tradingview import get_tradingview_status, save_alert
     from .integrations import webull as webull_api
     from .webull_credentials import (
@@ -85,8 +86,10 @@ if __package__:
         get_virtual_starting_balance,
     )
     from .webull_stop_orders import pop_exit_orders, record_exit_order, tracked_tickers as webull_tracked_tickers
+    from .anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from .autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
     from .backtest_engine import run_backtest
+    from .calibration import get_calibration, start_calibration
     from .market_scanner import scan_market
     from .news.future_news import get_future_news_roadmap
     from .news.news_service import fetch_news_bundle
@@ -173,6 +176,7 @@ else:
     from brains.charting_brain import build_chart_levels
     from brains.extended_hours_brain import build_extended_hours_intelligence
     from brains.strategy_brain import build_strategy_intelligence
+    from brains.llm_reasoning import get_llm_verdict
     from integrations.tradingview import get_tradingview_status, save_alert
     from integrations import webull as webull_api
     from webull_credentials import (
@@ -183,8 +187,10 @@ else:
         get_virtual_starting_balance,
     )
     from webull_stop_orders import pop_exit_orders, record_exit_order, tracked_tickers as webull_tracked_tickers
+    from anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
     from backtest_engine import run_backtest
+    from calibration import get_calibration, start_calibration
     from market_scanner import scan_market
     from news.future_news import get_future_news_roadmap
     from news.news_service import fetch_news_bundle
@@ -509,6 +515,7 @@ def admin_page():
     context["all_users"] = list_all_users()
     context["current_user_id"] = _current_user_id()
     context["global_settings"] = get_global_settings()
+    context["calibration"] = get_calibration()
     return render_template("admin.html", **context)
 
 
@@ -614,6 +621,39 @@ def api_admin_reset_user_password():
     except ValueError as error:
         return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
     return _api_success({}, ok=True)
+
+
+@app.route("/api/admin/recalibrate-strategies", methods=["POST"])
+def api_admin_recalibrate_strategies():
+    """Runs the walk-forward backtest across the scan universe in a
+    background thread and measures each named strategy's real historical
+    win rate, so strategy_brain's confidence scores can be nudged by
+    evidence instead of trusting the hand-tuned formulas blindly. Can take
+    several minutes - the route returns immediately, the UI polls
+    /api/admin/calibration-status for progress."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    tickers = payload.get("tickers") or CORE_SCAN_UNIVERSE
+    try:
+        result = start_calibration(
+            tickers,
+            lookback_months=int(payload.get("lookback_months", 6)),
+            hold_days=int(payload.get("hold_days", 5)),
+            min_confidence=int(payload.get("min_confidence", 55)),
+        )
+    except ValueError as error:
+        return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
+    return _api_success(result, ok=True)
+
+
+@app.route("/api/admin/calibration-status", methods=["GET"])
+def api_admin_calibration_status():
+    guard = _require_admin()
+    if guard:
+        return guard
+    return _api_success(get_calibration(), ok=True)
 
 
 @app.route("/api/admin/global-settings", methods=["GET", "POST"])
@@ -1494,6 +1534,7 @@ def account_hub_page() -> str:
     user_id = _current_user_id()
     context["accounts"] = get_accounts(user_id)
     context["webull_configured"] = is_webull_configured(user_id)
+    context["anthropic_configured"] = is_anthropic_configured(user_id)
     return render_template("account_hub.html", **context)
 
 
@@ -2355,6 +2396,8 @@ def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
     if not is_webull_configured(user_id):
         raise ValidationError("Enter your Webull App Key and App Secret in Account Hub before running the trade scan.")
 
+    anthropic_api_key = get_anthropic_api_key(user_id)
+
     accounts = get_accounts(user_id)
     webull_account = next((a for a in accounts if a.get("platform") == "webull"), None)
     if not webull_account or webull_account.get("status") != "Connected":
@@ -2469,6 +2512,37 @@ def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
             "account_id": account_id,
             "status": "pending",
         }
+
+        # Optional second-opinion pass - only runs if the user configured
+        # their own Anthropic key. Reviews the setup after it already passed
+        # the technical confidence threshold, and can veto or nudge the
+        # confidence score, but a missing key or a flaky API call degrades
+        # to skipping this step entirely rather than blocking the trade.
+        llm_verdict = get_llm_verdict(opp, anthropic_api_key)
+        entry["llm_reasoning_available"] = llm_verdict.get("available", False)
+        if llm_verdict.get("available"):
+            adjustment = int(llm_verdict.get("confidence_adjustment", 0))
+            adjusted_confidence = int(opp.get("confidence", 0)) + adjustment
+            entry["llm_verdict"] = llm_verdict.get("verdict")
+            entry["llm_confidence_adjustment"] = adjustment
+            entry["llm_adjusted_confidence"] = adjusted_confidence
+            entry["llm_reasoning"] = llm_verdict.get("reasoning")
+
+            veto_reason = ""
+            if llm_verdict.get("verdict") == "veto":
+                veto_reason = f"LLM reasoning vetoed: {llm_verdict.get('reasoning')}"
+            elif adjusted_confidence < OVERNIGHT_MIN_CONFIDENCE:
+                veto_reason = (
+                    f"LLM-adjusted confidence {adjusted_confidence} ({opp.get('confidence')}{adjustment:+d}) "
+                    f"fell below {OVERNIGHT_MIN_CONFIDENCE} threshold: {llm_verdict.get('reasoning')}"
+                )
+            if veto_reason:
+                entry["status"] = "skipped"
+                entry["reason_skipped"] = veto_reason
+                skipped.append(entry)
+                record_overnight_order(user_id, entry)
+                continue
+
         try:
             if limit_price <= 0:
                 raise ValueError("No valid entry price computed for this ticker.")
@@ -2687,6 +2761,19 @@ def api_accounts_webull_credentials():
     payload = request.get_json(silent=True) or {}
     try:
         set_webull_credentials(_current_user_id(), payload.get("app_key", ""), payload.get("app_secret", ""))
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    return jsonify({"ok": True, "configured": True})
+
+
+@app.route("/api/accounts/anthropic-credentials", methods=["POST"])
+def api_accounts_anthropic_credentials():
+    """Each user brings their own Anthropic API key for the LLM reasoning
+    pass on autonomous trade candidates - it's opt-in and billed to whoever
+    configures it, never a shared server-wide key."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        set_anthropic_api_key(_current_user_id(), payload.get("api_key", ""))
     except ValueError as error:
         return jsonify({"ok": False, "error": str(error)}), 400
     return jsonify({"ok": True, "configured": True})
