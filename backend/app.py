@@ -20,18 +20,24 @@ from flask import Flask, jsonify, redirect, render_template, request, send_from_
 
 if __package__:
     from .auth import (
+        admin_reset_user_password,
         approve_user,
         authenticate_user,
+        delete_user_account,
         find_user_by_webhook_token,
         get_user_by_id,
         is_admin,
         list_all_user_ids,
+        list_all_users,
         list_pending_users,
         public_user,
         register_user,
         reject_user,
         reset_password,
+        set_user_role,
+        set_user_suspended,
     )
+    from .global_settings import get_global_settings, update_global_settings
     from .autonomy.autonomous_controller import (
         emergency_stop,
         get_autonomy_status,
@@ -112,18 +118,24 @@ if __package__:
     )
 else:
     from auth import (
+        admin_reset_user_password,
         approve_user,
         authenticate_user,
+        delete_user_account,
         find_user_by_webhook_token,
         get_user_by_id,
         is_admin,
         list_all_user_ids,
+        list_all_users,
         list_pending_users,
         public_user,
         register_user,
         reject_user,
         reset_password,
+        set_user_role,
+        set_user_suspended,
     )
+    from global_settings import get_global_settings, update_global_settings
     from autonomy.autonomous_controller import (
         emergency_stop,
         get_autonomy_status,
@@ -364,7 +376,7 @@ def _require_login():
 
     user_id = session.get("user_id")
     user = get_user_by_id(user_id) if user_id else None
-    if user and user.get("approved", True):
+    if user and user.get("approved", True) and not user.get("suspended", False):
         return None
 
     session.pop("user_id", None)
@@ -388,6 +400,8 @@ def login_page():
         return render_template("login.html", error="Incorrect username or password.", next_path=next_path), 401
     if not user.get("approved", True):
         return render_template("login.html", error="Your account is still pending admin approval.", next_path=next_path), 403
+    if user.get("suspended", False):
+        return render_template("login.html", error="This account has been suspended.", next_path=next_path), 403
 
     session["user_id"] = user["id"]
     session.permanent = True
@@ -397,10 +411,19 @@ def login_page():
 
 @app.route("/register", methods=["GET", "POST"])
 def register_page():
+    # Registration stays open for the very first account regardless of the
+    # setting (there'd be no admin yet to have configured it, and no admin
+    # to approve anyone in), and only blocks signups after that.
+    registration_open = get_global_settings()["registration_open"] or not list_all_user_ids()
     if request.method == "GET":
         if session.get("user_id") and get_user_by_id(session["user_id"]):
             return redirect(url_for("dashboard_page"))
+        if not registration_open:
+            return render_template("register.html", error="Registration is currently closed."), 403
         return render_template("register.html", error="")
+
+    if not registration_open:
+        return render_template("register.html", error="Registration is currently closed."), 403
 
     username = request.form.get("username", "")
     password = request.form.get("password", "")
@@ -465,7 +488,36 @@ def admin_page():
         return redirect(url_for("dashboard_page"))
     context = _build_page_context()
     context["pending_users"] = list_pending_users()
+    context["all_users"] = list_all_users()
+    context["current_user_id"] = _current_user_id()
+    context["global_settings"] = get_global_settings()
     return render_template("admin.html", **context)
+
+
+@app.route("/admin/users/<user_id>")
+def admin_user_activity_page(user_id: str):
+    """Read-only view of another user's trading activity - no trade-affecting
+    actions live here, so an admin can help debug a friend's setup without
+    ever being able to place/close a trade on their behalf."""
+    if not is_admin(_current_user_id()):
+        return redirect(url_for("dashboard_page"))
+    target_user = get_user_by_id(user_id)
+    if not target_user:
+        return redirect(url_for("admin_page"))
+    # Base chrome (sidebar/topbar) reflects the admin's own session as usual;
+    # only the page body below shows the target user's data.
+    context = _build_page_context()
+    context.update(
+        {
+            "target_user": public_user(target_user),
+            "accounts": get_accounts(user_id),
+            "webull_balance": _get_live_webull_balance(user_id, force_refresh=True),
+            "webull_positions": _get_live_webull_positions(user_id, force_refresh=True),
+            "autonomy_status": get_autonomy_status(user_id),
+            "paper_summary": get_paper_trade_summary(user_id),
+        }
+    )
+    return render_template("admin_user_activity.html", **context)
 
 
 @app.route("/api/admin/approve-user", methods=["POST"])
@@ -492,6 +544,73 @@ def api_admin_reject_user():
     except ValueError as error:
         return _api_failure(str(error), status_code=400, error_code="not_found", ok=False)
     return _api_success({}, ok=True)
+
+
+@app.route("/api/admin/set-role", methods=["POST"])
+def api_admin_set_role():
+    guard = _require_admin()
+    if guard:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    try:
+        user = set_user_role(payload.get("user_id", ""), payload.get("role", ""))
+    except ValueError as error:
+        return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
+    return _api_success(public_user(user), ok=True)
+
+
+@app.route("/api/admin/set-suspended", methods=["POST"])
+def api_admin_set_suspended():
+    guard = _require_admin()
+    if guard:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    try:
+        user = set_user_suspended(payload.get("user_id", ""), bool(payload.get("suspended", False)))
+    except ValueError as error:
+        return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
+    return _api_success(public_user(user), ok=True)
+
+
+@app.route("/api/admin/delete-user", methods=["POST"])
+def api_admin_delete_user():
+    guard = _require_admin()
+    if guard:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    try:
+        delete_user_account(payload.get("user_id", ""))
+    except ValueError as error:
+        return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
+    return _api_success({}, ok=True)
+
+
+@app.route("/api/admin/reset-user-password", methods=["POST"])
+def api_admin_reset_user_password():
+    guard = _require_admin()
+    if guard:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    try:
+        admin_reset_user_password(payload.get("user_id", ""), payload.get("new_password", ""))
+    except ValueError as error:
+        return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
+    return _api_success({}, ok=True)
+
+
+@app.route("/api/admin/global-settings", methods=["GET", "POST"])
+def api_admin_global_settings():
+    guard = _require_admin()
+    if guard:
+        return guard
+    if request.method == "GET":
+        return _api_success(get_global_settings(), ok=True)
+    payload = request.get_json(silent=True) or {}
+    try:
+        settings = update_global_settings(payload)
+    except ValueError as error:
+        return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
+    return _api_success(settings, ok=True)
 
 
 def _now_utc() -> datetime:

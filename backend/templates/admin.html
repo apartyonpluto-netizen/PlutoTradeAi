@@ -25,43 +25,184 @@
         </tbody>
     </table>
 </section>
+
+<section class="panel panel-table">
+    <div class="panel-head">
+        <h3>All Users</h3>
+        <span>{{ all_users|length }} accounts</span>
+    </div>
+    <p class="muted">Promote/demote, suspend, reset a password, view activity, or permanently delete an account.</p>
+    <table id="allUsersTable">
+        <thead><tr><th>Username</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>
+        {% for user in all_users %}
+        <tr data-user-id="{{ user.id }}" data-role="{{ user.role }}">
+            <td>{{ user.username }}{% if user.id == current_user_id %} <span class="muted">(you)</span>{% endif %}</td>
+            <td data-field="role">{{ user.role }}</td>
+            <td data-field="status">
+                {% if not user.approved %}Pending{% elif user.suspended %}Suspended{% else %}Active{% endif %}
+            </td>
+            <td class="action-row">
+                <a href="/admin/users/{{ user.id }}"><button type="button">View Activity</button></a>
+                {% if user.role == "admin" %}
+                <button class="ghost-button demote-user" type="button" data-user-id="{{ user.id }}">Demote</button>
+                {% else %}
+                <button class="ghost-button promote-user" type="button" data-user-id="{{ user.id }}">Promote</button>
+                {% endif %}
+                {% if user.suspended %}
+                <button class="unsuspend-user" type="button" data-user-id="{{ user.id }}">Unsuspend</button>
+                {% else %}
+                <button class="ghost-button suspend-user" type="button" data-user-id="{{ user.id }}" {{ "disabled" if user.id == current_user_id else "" }}>Suspend</button>
+                {% endif %}
+                <button class="ghost-button reset-password-user" type="button" data-user-id="{{ user.id }}">Reset Password</button>
+                <button class="ghost-button delete-user" type="button" data-user-id="{{ user.id }}" {{ "disabled" if user.id == current_user_id else "" }}>Delete</button>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<section class="panel">
+    <div class="panel-head">
+        <h3>Global Settings</h3>
+        <span>Applies to new accounts only</span>
+    </div>
+    <p class="muted">Changing these never touches an existing user's settings - only what new accounts start with.</p>
+    <form id="globalSettingsForm" class="settings-form">
+        <label class="toggle-row">
+            <span>Registration open</span>
+            <input type="checkbox" id="gsRegistrationOpen" {{ "checked" if global_settings.registration_open else "" }}>
+        </label>
+        <label>
+            Default AI confidence threshold
+            <input type="number" id="gsConfidence" min="0" max="100" value="{{ global_settings.default_ai_confidence_threshold }}">
+        </label>
+        <label>
+            Default daily loss limit ($)
+            <input type="number" id="gsDailyLossLimit" min="0" step="1" value="{{ global_settings.default_daily_loss_limit }}">
+        </label>
+        <label>
+            Default max trade size ($)
+            <input type="number" id="gsMaxTradeSize" min="0" step="1" value="{{ global_settings.default_max_trade_size }}">
+        </label>
+        <label>
+            Default max positions
+            <input type="number" id="gsMaxPositions" min="0" step="1" value="{{ global_settings.default_max_positions }}">
+        </label>
+        <button type="submit">Save Global Settings</button>
+    </form>
+</section>
 {% endblock %}
 
 {% block page_scripts %}
 <script>
 (() => {
-    const table = document.getElementById("pendingUsersTable");
-    if (!table) return;
-
-    table.addEventListener("click", async (event) => {
-        const target = event.target;
-        if (!(target instanceof HTMLElement)) return;
-        const row = target.closest("tr[data-user-id]");
-        if (!(row instanceof HTMLElement)) return;
-        const userId = row.dataset.userId;
-        const isApprove = target.classList.contains("approve-user");
-        const isReject = target.classList.contains("reject-user");
-        if (!isApprove && !isReject) return;
-        if (isReject && !window.confirm("Reject and permanently delete this account?")) return;
-
-        target.disabled = true;
-        try {
-            const response = await fetch(isApprove ? "/api/admin/approve-user" : "/api/admin/reject-user", {
-                method: "POST",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({user_id: userId}),
-            });
-            const payload = await response.json();
-            if (!response.ok || payload.ok === false) {
-                throw new Error((payload.error && payload.error.message) || "Request failed.");
-            }
-            row.remove();
-            showToast(isApprove ? "User approved." : "User rejected.", "success");
-        } catch (error) {
-            showToast(error.message, "error");
-            target.disabled = false;
+    async function callAdminApi(path, body) {
+        const response = await fetch(path, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(body),
+        });
+        const payload = await response.json();
+        if (!response.ok || payload.ok === false) {
+            throw new Error((payload.error && payload.error.message) || "Request failed.");
         }
-    });
+        return payload;
+    }
+
+    const pendingTable = document.getElementById("pendingUsersTable");
+    if (pendingTable) {
+        pendingTable.addEventListener("click", async (event) => {
+            const target = event.target;
+            if (!(target instanceof HTMLElement)) return;
+            const row = target.closest("tr[data-user-id]");
+            if (!(row instanceof HTMLElement)) return;
+            const userId = row.dataset.userId;
+            const isApprove = target.classList.contains("approve-user");
+            const isReject = target.classList.contains("reject-user");
+            if (!isApprove && !isReject) return;
+            if (isReject && !window.confirm("Reject and permanently delete this account?")) return;
+
+            target.disabled = true;
+            try {
+                await callAdminApi(isApprove ? "/api/admin/approve-user" : "/api/admin/reject-user", {user_id: userId});
+                row.remove();
+                showToast(isApprove ? "User approved." : "User rejected.", "success");
+            } catch (error) {
+                showToast(error.message, "error");
+                target.disabled = false;
+            }
+        });
+    }
+
+    const allUsersTable = document.getElementById("allUsersTable");
+    if (allUsersTable) {
+        allUsersTable.addEventListener("click", async (event) => {
+            const target = event.target;
+            if (!(target instanceof HTMLElement) || target.tagName !== "BUTTON") return;
+            const row = target.closest("tr[data-user-id]");
+            if (!(row instanceof HTMLElement)) return;
+            const userId = row.dataset.userId;
+            const username = row.querySelector("td").textContent.trim();
+
+            try {
+                if (target.classList.contains("promote-user") || target.classList.contains("demote-user")) {
+                    const role = target.classList.contains("promote-user") ? "admin" : "user";
+                    if (!window.confirm(`Set ${username} to role "${role}"?`)) return;
+                    target.disabled = true;
+                    await callAdminApi("/api/admin/set-role", {user_id: userId, role});
+                    showToast(`${username} is now ${role}.`, "success");
+                    window.location.reload();
+                } else if (target.classList.contains("suspend-user") || target.classList.contains("unsuspend-user")) {
+                    const suspended = target.classList.contains("suspend-user");
+                    target.disabled = true;
+                    await callAdminApi("/api/admin/set-suspended", {user_id: userId, suspended});
+                    showToast(suspended ? `${username} suspended.` : `${username} unsuspended.`, "success");
+                    window.location.reload();
+                } else if (target.classList.contains("reset-password-user")) {
+                    const newPassword = window.prompt(`New password for ${username} (min 8 characters):`);
+                    if (!newPassword) return;
+                    target.disabled = true;
+                    await callAdminApi("/api/admin/reset-user-password", {user_id: userId, new_password: newPassword});
+                    showToast(`Password reset for ${username}.`, "success");
+                    target.disabled = false;
+                } else if (target.classList.contains("delete-user")) {
+                    if (!window.confirm(`Permanently delete ${username} and all their data? This cannot be undone.`)) return;
+                    target.disabled = true;
+                    await callAdminApi("/api/admin/delete-user", {user_id: userId});
+                    row.remove();
+                    showToast(`${username} deleted.`, "success");
+                }
+            } catch (error) {
+                showToast(error.message, "error");
+                target.disabled = false;
+            }
+        });
+    }
+
+    const globalSettingsForm = document.getElementById("globalSettingsForm");
+    if (globalSettingsForm) {
+        globalSettingsForm.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const submitButton = globalSettingsForm.querySelector("button[type=submit]");
+            submitButton.disabled = true;
+            try {
+                await callAdminApi("/api/admin/global-settings", {
+                    registration_open: document.getElementById("gsRegistrationOpen").checked,
+                    default_ai_confidence_threshold: Number(document.getElementById("gsConfidence").value),
+                    default_daily_loss_limit: Number(document.getElementById("gsDailyLossLimit").value),
+                    default_max_trade_size: Number(document.getElementById("gsMaxTradeSize").value),
+                    default_max_positions: Number(document.getElementById("gsMaxPositions").value),
+                });
+                showToast("Global settings saved.", "success");
+            } catch (error) {
+                showToast(error.message, "error");
+            } finally {
+                submitButton.disabled = false;
+            }
+        });
+    }
 })();
 </script>
 {% endblock %}

@@ -5,6 +5,11 @@ import os
 from pathlib import Path
 from typing import Dict, List
 
+if __package__:
+    from .global_settings import get_global_settings
+else:
+    from global_settings import get_global_settings
+
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
 USER_DATA_ROOT = DATA_DIR / "users"
@@ -20,7 +25,7 @@ def _default_settings() -> Dict[str, object]:
     return {
         "theme": "Midnight",
         "notifications_enabled": True,
-        "ai_confidence_threshold": 68,
+        "ai_confidence_threshold": get_global_settings()["default_ai_confidence_threshold"],
         "scanner_frequency_seconds": 20,
         "market_hours": "09:30-16:00 ET",
         "paper_trading_enabled": True,

@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict
 
+from global_settings import get_global_settings
+
 BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
 USER_DATA_ROOT = DATA_DIR / "users"
@@ -26,14 +28,15 @@ def _now_iso() -> str:
 
 def _default_settings() -> Dict[str, object]:
     now = _now_iso()
+    global_defaults = get_global_settings()
     return {
         "current_mode": "OFF",
         "live_trading_enabled": False,
         "paper_trading_enabled": False,
         "approval_required": False,
-        "daily_loss_limit": 500.0,
-        "max_trade_size": 250.0,
-        "max_positions": 3,
+        "daily_loss_limit": global_defaults["default_daily_loss_limit"],
+        "max_trade_size": global_defaults["default_max_trade_size"],
+        "max_positions": global_defaults["default_max_positions"],
         "emergency_stop_enabled": False,
         "last_mode_change": now,
         "mode_change_reason": "Initialization",

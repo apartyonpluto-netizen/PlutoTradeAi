@@ -94,6 +94,7 @@ def public_user(user: Dict[str, Any]) -> Dict[str, Any]:
         "created_at": user.get("created_at", ""),
         "role": user.get("role", "user"),
         "approved": bool(user.get("approved", True)),
+        "suspended": bool(user.get("suspended", False)),
     }
 
 
@@ -190,6 +191,74 @@ def reject_user(user_id: str) -> None:
     target_dir = USER_DATA_ROOT / user_id
     if target_dir.exists():
         shutil.rmtree(target_dir)
+
+
+def list_all_users() -> List[Dict[str, Any]]:
+    """Every account, approved or not - for the admin's user-management table."""
+    return [public_user(user) for user in _read_users()]
+
+
+def _count_admins(users: List[Dict[str, Any]]) -> int:
+    return sum(1 for user in users if user.get("role") == "admin")
+
+
+def set_user_role(user_id: str, role: str) -> Dict[str, Any]:
+    if role not in ("admin", "user"):
+        raise ValueError("Role must be 'admin' or 'user'.")
+    users = _read_users()
+    target = next((user for user in users if user.get("id") == user_id), None)
+    if not target:
+        raise ValueError("User not found.")
+    if target.get("role") == "admin" and role != "admin" and _count_admins(users) <= 1:
+        raise ValueError("Can't demote the last remaining admin - promote someone else first.")
+    target["role"] = role
+    _write_users(users)
+    return target
+
+
+def set_user_suspended(user_id: str, suspended: bool) -> Dict[str, Any]:
+    """Suspension blocks login without deleting the account or its data -
+    reversible, unlike reject/delete."""
+    users = _read_users()
+    target = next((user for user in users if user.get("id") == user_id), None)
+    if not target:
+        raise ValueError("User not found.")
+    if suspended and target.get("role") == "admin" and _count_admins(users) <= 1:
+        raise ValueError("Can't suspend the last remaining admin.")
+    target["suspended"] = bool(suspended)
+    _write_users(users)
+    return target
+
+
+def delete_user_account(user_id: str) -> None:
+    """Permanently deletes an approved account and all of its data - unlike
+    reject_user (which only ever applies to a still-pending signup), this can
+    destroy real trading history, so callers should confirm with the admin
+    before calling this."""
+    users = _read_users()
+    target = next((user for user in users if user.get("id") == user_id), None)
+    if not target:
+        raise ValueError("User not found.")
+    if target.get("role") == "admin" and _count_admins(users) <= 1:
+        raise ValueError("Can't delete the last remaining admin.")
+    remaining = [user for user in users if user.get("id") != user_id]
+    _write_users(remaining)
+    target_dir = USER_DATA_ROOT / user_id
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+
+
+def admin_reset_user_password(user_id: str, new_password: str) -> Dict[str, Any]:
+    new_password = new_password or ""
+    if len(new_password) < MIN_PASSWORD_LENGTH:
+        raise ValueError(f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
+    users = _read_users()
+    target = next((user for user in users if user.get("id") == user_id), None)
+    if not target:
+        raise ValueError("User not found.")
+    target["password_hash"] = generate_password_hash(new_password)
+    _write_users(users)
+    return target
 
 
 def reset_password(username: str, new_password: str) -> Dict[str, Any]:

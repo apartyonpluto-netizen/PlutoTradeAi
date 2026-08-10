@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · {{ target_user.username }}'s Activity{% endblock %}
+{% block content %}
+<section class="panel">
+    <div class="panel-head">
+        <h3>{{ target_user.username }}</h3>
+        <span>{{ target_user.role }} &middot; {{ "Suspended" if target_user.suspended else ("Pending" if not target_user.approved else "Active") }}</span>
+    </div>
+    <p class="muted">Read-only - nothing on this page can place, close, or modify a trade for this user.</p>
+    <p><a href="/admin">&larr; Back to Admin</a></p>
+</section>
+
+<section class="panel">
+    <div class="panel-head"><h3>Webull Sandbox</h3></div>
+    {% if webull_balance.connected and webull_balance.balance %}
+    <div class="account-summary-value">${{ "{:,.2f}".format(webull_balance.balance.net_liquidation_value|float) }}</div>
+    <div class="account-summary-pnl {{ 'tone-positive' if webull_balance.balance.unrealized_pnl >= 0 else 'tone-negative' }}">
+        Open P&amp;L {{ webull_balance.balance.unrealized_pnl_display }}
+        ({{ "+" if webull_balance.balance.unrealized_pnl_percent >= 0 else "" }}{{ webull_balance.balance.unrealized_pnl_percent }}%)
+    </div>
+    {% if webull_balance.balance.is_virtual_balance %}
+    <div class="muted" style="margin-top: 4px; font-size: 0.8rem;">
+        Real Webull sandbox is ${{ "{:,.2f}".format(webull_balance.balance.real_net_liquidation_value|float) }}
+    </div>
+    {% endif %}
+    <div class="price-map-grid" style="margin-top: 16px;">
+        <div><small>Market Value</small><b>${{ "{:,.2f}".format(webull_balance.balance.market_value) }}</b></div>
+        <div><small>Buying Power</small><b>${{ "{:,.2f}".format(webull_balance.balance.buying_power|float) }}</b></div>
+        <div><small>Day's P&amp;L</small><b class="{{ 'tone-positive' if webull_balance.balance.day_pnl >= 0 else 'tone-negative' }}">{{ webull_balance.balance.day_pnl_display }}</b></div>
+    </div>
+    {% elif webull_balance.error %}
+    <p class="auth-error">{{ webull_balance.error }}</p>
+    {% else %}
+    <p class="muted">Not connected.</p>
+    {% endif %}
+</section>
+
+<section class="panel panel-table">
+    <div class="panel-head">
+        <h3>Open Positions</h3>
+        <span>{{ webull_positions.positions|length if webull_positions.positions else 0 }}</span>
+    </div>
+    {% if webull_positions.positions %}
+    <table>
+        <thead><tr><th>Ticker</th><th>Qty</th><th>Last Price</th><th>P&amp;L</th></tr></thead>
+        <tbody>
+        {% for position in webull_positions.positions %}
+        <tr>
+            <td>{{ position.symbol }}</td>
+            <td>{{ position.quantity }}</td>
+            <td>${{ position.last_price }}</td>
+            <td class="{{ 'tone-positive' if position.unrealized_profit_loss|float >= 0 else 'tone-negative' }}">{{ position.pnl_display }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No open positions.</p>
+    {% endif %}
+</section>
+
+<section class="panel">
+    <div class="panel-head"><h3>Autonomy Settings</h3></div>
+    <div class="price-map-grid">
+        <div><small>Mode</small><b>{{ autonomy_status.current_mode }}</b></div>
+        <div><small>Daily Loss Limit</small><b>${{ "{:,.2f}".format(autonomy_status.daily_loss_limit|float) }}</b></div>
+        <div><small>Max Trade Size</small><b>${{ "{:,.2f}".format(autonomy_status.max_trade_size|float) }}</b></div>
+        <div><small>Max Positions</small><b>{{ autonomy_status.max_positions }}</b></div>
+        <div><small>Emergency Stop</small><b>{{ "Enabled" if autonomy_status.emergency_stop_enabled else "Off" }}</b></div>
+    </div>
+</section>
+
+<section class="panel">
+    <div class="panel-head"><h3>Paper Trading</h3></div>
+    <div class="price-map-grid">
+        <div><small>Open</small><b>{{ paper_summary.open_count }}</b></div>
+        <div><small>Entries Today</small><b>{{ paper_summary.entries_today }}</b></div>
+        <div><small>Closed Today</small><b>{{ paper_summary.closed_today }}</b></div>
+    </div>
+</section>
+{% endblock %}

@@ -14,6 +14,7 @@ data/alerts.json
 data/tradingview_alerts.json
 data/dismissed_alerts.json
 data/read_alerts.json
+data/global_settings.json
 data/paper_trades.csv
 data/watchlist.csv
 
