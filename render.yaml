@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: plutotradeai
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --chdir backend app:app
+    healthCheckPath: /healthz
+    envVars:
+      - key: FLASK_SECRET_KEY
+        generateValue: true
+      - key: CRON_SECRET
+        generateValue: true
+      - key: PLUTO_DATA_DIR
+        value: /var/data
+      - key: FORCE_SECURE_COOKIES
+        value: "1"
+      - key: FLASK_DEBUG
+        value: "0"
+      - key: ALPACA_API_KEY_ID
+        sync: false
+      - key: ALPACA_API_SECRET_KEY
+        sync: false
+    disk:
+      name: plutotradeai-data
+      mountPath: /var/data
+      sizeGB: 1
