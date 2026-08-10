@@ -1360,6 +1360,8 @@ def mission_briefing_page() -> str:
         include_trusted_accounts=True,
     )
     if not context.get("mission_brief_should_show") and request.args.get("show_brief") != "1":
+        context["macro_ticker_rows"] = get_macro_ticker_tape()
+        context["webull_balance"] = _get_live_webull_balance(_current_user_id())
         return render_template("dashboard.html", **context)
     return render_template("mission_briefing.html", **context)
 

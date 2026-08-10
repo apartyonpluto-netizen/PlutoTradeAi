@@ -33,17 +33,22 @@ def get_calibration() -> Dict[str, Any]:
 
 def score_multiplier(strategy_name: str) -> float:
     """Multiplier applied to a strategy's raw hand-tuned score, derived from
-    its measured backtested win rate - 1.0 (no change) if calibration has
-    never run, is still running, or this specific strategy doesn't have
-    enough trade samples yet. A 50% win rate leaves the score unchanged;
-    further from 50% nudges it proportionally, capped so a small sample or a
-    hot/cold streak can't swing the ranking wildly."""
+    its measured backtested AVERAGE RETURN per trade - not win rate. A
+    strategy that wins less than half the time but lets winners run bigger
+    than its losses (e.g. a 49% win rate with a strong average return) is
+    genuinely profitable and should be rewarded, not penalized for a
+    coin-flip-adjacent win rate; win rate alone can't tell that difference,
+    only expectancy can. 1.0 (no change) if calibration has never run, is
+    still running, or this strategy doesn't have enough trade samples yet.
+    0% average return leaves the score unchanged; further from 0% nudges it
+    proportionally, capped so a small sample or a hot/cold streak can't swing
+    the ranking wildly."""
     calibration = get_calibration()
     if calibration.get("status") != "done":
         return 1.0
     stats = calibration.get("strategy_stats", {}).get(strategy_name)
     if not stats or not stats.get("trusted"):
         return 1.0
-    win_rate = float(stats.get("win_rate_percent", 50.0))
-    adjustment = max(-MAX_SCORE_ADJUSTMENT, min(MAX_SCORE_ADJUSTMENT, (win_rate - 50.0) / 100.0))
+    avg_return = float(stats.get("avg_return_percent", 0.0))
+    adjustment = max(-MAX_SCORE_ADJUSTMENT, min(MAX_SCORE_ADJUSTMENT, avg_return / 10.0))
     return 1.0 + adjustment
