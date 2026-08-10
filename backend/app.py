@@ -239,6 +239,15 @@ def _resolve_secret_key() -> str:
 
 app.secret_key = _resolve_secret_key()
 
+# Off by default so local HTTP testing (http://localhost:...) keeps working -
+# a Secure cookie is refused by the browser over plain HTTP, which would
+# silently break login. Every PaaS host gives you HTTPS by default, so set
+# FORCE_SECURE_COOKIES=1 once deployed there.
+if os.environ.get("FORCE_SECURE_COOKIES", "0") == "1":
+    app.config["SESSION_COOKIE_SECURE"] = True
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
 # Curated, liquid Nasdaq-heavy scan universe (mostly Nasdaq-100 constituents
 # plus SPY/QQQ). scan_market() fetches this in two batched yf.download() calls
 # regardless of list size, so this can grow without a per-ticker request cost -
@@ -361,7 +370,7 @@ def service_worker():
     return send_from_directory(app.static_folder, "service-worker.js", mimetype="application/javascript")
 
 
-_PUBLIC_PATHS = {"/login", "/register", "/logout", "/forgot-password", "/service-worker.js"}
+_PUBLIC_PATHS = {"/login", "/register", "/logout", "/forgot-password", "/service-worker.js", "/healthz"}
 _PUBLIC_PATH_PREFIXES = ("/static/",)
 _TOKEN_AUTH_PATHS = {"/api/tradingview/webhook", "/api/autonomy/cron-trigger"}
 
@@ -463,6 +472,15 @@ def forgot_password_page():
         return render_template("forgot_password.html", error=str(error), success=""), 400
 
     return render_template("forgot_password.html", error="", success="Password updated. You can sign in now.")
+
+
+@app.route("/healthz")
+def healthz():
+    """Unauthenticated liveness check for the hosting platform's health probe -
+    intentionally does nothing but confirm the process is up and can render a
+    response, no auth/DB/broker calls that could make a slow dependency look
+    like a dead app."""
+    return {"status": "ok"}, 200
 
 
 @app.route("/logout", methods=["POST"])
