@@ -93,6 +93,7 @@ if __package__:
         get_virtual_starting_balance,
     )
     from .webull_stop_orders import pop_exit_orders, pop_exit_orders_by_type, record_exit_order, tracked_tickers as webull_tracked_tickers
+    from .scan_lock import ScanAlreadyRunningError, user_scan_lock
     from .anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from .autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
     from .backtest_engine import run_backtest
@@ -202,6 +203,7 @@ else:
         get_virtual_starting_balance,
     )
     from webull_stop_orders import pop_exit_orders, pop_exit_orders_by_type, record_exit_order, tracked_tickers as webull_tracked_tickers
+    from scan_lock import ScanAlreadyRunningError, user_scan_lock
     from anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
     from backtest_engine import run_backtest
@@ -2584,6 +2586,58 @@ def _reconcile_exit_orders(user_id: str, creds: Dict[str, str], account_id: str)
         replace_overnight_orders(user_id, orders)
 
 
+# Pure trading-math helpers, deliberately factored out of _run_autonomous_trade_scan
+# and _refresh_stop_confidence so the arithmetic that actually moves money can be
+# unit-tested directly without mocking Webull, market data, or anything else.
+
+
+def _is_daily_loss_limit_hit(day_pnl: float, current_balance: float, daily_loss_limit_percent: float) -> bool:
+    """daily_loss_limit_percent <= 0 means the limit is disabled - never blocks."""
+    if daily_loss_limit_percent <= 0:
+        return False
+    daily_loss_limit = current_balance * (daily_loss_limit_percent / 100)
+    return day_pnl <= -daily_loss_limit
+
+
+def _available_position_slots(max_positions: int, open_position_count: int, default_max_orders: int) -> int:
+    """max_positions <= 0 means uncapped - falls back to the per-run batch cap
+    (OVERNIGHT_MAX_ORDERS_PER_RUN) instead of an unlimited number of new orders
+    in one scan."""
+    if max_positions <= 0:
+        return default_max_orders
+    return max(0, max_positions - open_position_count)
+
+
+def _compute_max_trade_size(current_balance: float, risk_percent_of_balance: float) -> float:
+    """risk_percent_of_balance <= 0 means the risk-per-trade limit is disabled
+    (returns 0, which callers treat as "no cap" - see _compute_position_quantity)."""
+    if risk_percent_of_balance <= 0:
+        return 0.0
+    return current_balance * (risk_percent_of_balance / 100)
+
+
+def _compute_position_quantity(max_trade_size: float, limit_price: float, fallback_quantity: int) -> int:
+    """Share count sized off max_trade_size (see _compute_max_trade_size) - at
+    least 1 share once a trade is deemed affordable, never 0. Falls back to a
+    fixed quantity when sizing is disabled (max_trade_size <= 0) or the price
+    isn't usable."""
+    if max_trade_size > 0 and limit_price > 0:
+        return max(1, int(max_trade_size // limit_price))
+    return fallback_quantity
+
+
+def _compute_tightened_stop(current_stop: float, current_price: float) -> float:
+    """Moves the stop halfway from where it was to the current price - locks
+    in progress made so far without exiting on a single soft signal. Capped
+    just under current price so the resulting stop order is always valid.
+    Never returns a value below current_stop; callers must still check the
+    result against current_stop themselves before acting; if
+    current_price <= current_stop (price has already fallen through the
+    stop), the formula would compute a value at or below current_stop, and
+    the caller's own "only tighten, never loosen" check correctly no-ops."""
+    return round(min(current_stop + (current_price - current_stop) * 0.5, current_price * 0.999), 2)
+
+
 def _refresh_stop_confidence(user_id: str, creds: Dict[str, str], account_id: str) -> None:
     """Runs at the start of every scan tick (same 5-minute cadence as the
     cron scheduler) and re-scores every open position's ticker against the
@@ -2651,11 +2705,7 @@ def _refresh_stop_confidence(user_id: str, creds: Dict[str, str], account_id: st
         if current_price <= 0 or quantity <= 0:
             continue
 
-        # Move the stop halfway from where it was to the current price -
-        # locks in progress made so far without exiting immediately on a
-        # single soft signal. Capped just under current price so the order
-        # is always valid, and never allowed to move backwards (looser).
-        tightened_stop = round(min(current_stop + (current_price - current_stop) * 0.5, current_price * 0.999), 2)
+        tightened_stop = _compute_tightened_stop(current_stop, current_price)
         if tightened_stop <= current_stop:
             continue
 
@@ -2695,6 +2745,21 @@ def _refresh_stop_confidence(user_id: str, creds: Dict[str, str], account_id: st
 
 
 def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
+    """Thin wrapper around _run_autonomous_trade_scan_locked that holds an
+    OS-level per-user lock (scan_lock.py) for the scan's entire duration.
+    gunicorn runs multiple worker processes, and this function is called
+    both from a manual button click and from the cron-trigger endpoint's
+    per-user loop - without this lock, two overlapping calls for the same
+    user (a retry, a double cron fire, a click landing mid-tick) could each
+    independently pass the position-cap/risk checks and place orders that
+    were never meant to coexist. Raises ScanAlreadyRunningError (a
+    PlutoTradeError, so it surfaces as a friendly 409) if a scan for this
+    user is already in flight."""
+    with user_scan_lock(user_id):
+        return _run_autonomous_trade_scan_locked(user_id)
+
+
+def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
     """Scans current setups the same way the dashboard does, and for the
     highest-confidence bullish ones places real (sandbox) DAY limit orders on
     Webull - the trading session (CORE/ALL/NIGHT) is picked automatically by
@@ -2702,7 +2767,9 @@ def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
     market open rather than executing immediately. Every order, and every
     skip, is logged with the reasoning behind it so it can be reviewed later.
     Pure function of user_id - safe to call from a real request or from the
-    cron trigger's simulated per-user request context."""
+    cron trigger's simulated per-user request context. Callers must go
+    through _run_autonomous_trade_scan above, not this directly, to hold the
+    per-user lock for the scan's duration."""
     creds = get_webull_credentials(user_id)
     if not is_webull_configured(user_id):
         raise ValidationError("Enter your Webull App Key and App Secret in Account Hub before running the trade scan.")
@@ -2737,21 +2804,20 @@ def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
     current_balance = virtual_balance if virtual_balance is not None else real_net_liquidation_value
 
     daily_loss_limit_percent = float(risk_settings.get("daily_loss_limit_percent", 0) or 0)
-    if daily_loss_limit_percent > 0:
+    day_pnl = float(balance.get("total_day_profit_loss", 0) or 0)
+    if _is_daily_loss_limit_hit(day_pnl, current_balance, daily_loss_limit_percent):
         daily_loss_limit = current_balance * (daily_loss_limit_percent / 100)
-        day_pnl = float(balance.get("total_day_profit_loss", 0) or 0)
-        if day_pnl <= -daily_loss_limit:
-            raise ValidationError(
-                f"Daily loss limit reached (today's P/L ${day_pnl:.2f} vs -${daily_loss_limit:.2f} limit, "
-                f"{daily_loss_limit_percent:.1f}% of ${current_balance:,.2f} balance). No new trades until tomorrow."
-            )
+        raise ValidationError(
+            f"Daily loss limit reached (today's P/L ${day_pnl:.2f} vs -${daily_loss_limit:.2f} limit, "
+            f"{daily_loss_limit_percent:.1f}% of ${current_balance:,.2f} balance). No new trades until tomorrow."
+        )
 
     max_positions = int(risk_settings.get("max_positions", 0) or 0)
     open_position_count = len(webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id))
-    available_position_slots = max(0, max_positions - open_position_count) if max_positions > 0 else OVERNIGHT_MAX_ORDERS_PER_RUN
+    available_position_slots = _available_position_slots(max_positions, open_position_count, OVERNIGHT_MAX_ORDERS_PER_RUN)
 
     risk_percent_of_balance = float(risk_settings.get("risk_percent_of_balance", 0) or 0)
-    max_trade_size = current_balance * (risk_percent_of_balance / 100) if risk_percent_of_balance > 0 else 0
+    max_trade_size = _compute_max_trade_size(current_balance, risk_percent_of_balance)
 
     context = _build_page_context(include_reversal=True, include_trend=True)
     opportunities = context.get("upcoming_opportunities", [])
@@ -2818,7 +2884,7 @@ def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
             )
             continue
 
-        quantity = max(1, int(max_trade_size // limit_price)) if max_trade_size > 0 and limit_price > 0 else OVERNIGHT_ORDER_QUANTITY
+        quantity = _compute_position_quantity(max_trade_size, limit_price, OVERNIGHT_ORDER_QUANTITY)
         entry = {
             "ticker": ticker,
             "side": "BUY",
@@ -2997,6 +3063,12 @@ def api_autonomy_cron_trigger():
             try:
                 scan_result = _run_autonomous_trade_scan(user_id)
                 results.append({"user_id": user_id, "ok": True, **scan_result})
+            except ScanAlreadyRunningError:
+                # Benign, expected overlap (a retry, a double-fire, a manual
+                # click mid-tick) - the lock did its job by refusing this
+                # call outright, so this is not a real failure worth
+                # surfacing the same way as an actual error.
+                results.append({"user_id": user_id, "ok": True, "skipped": "scan_already_running"})
             except Exception as error:  # noqa: BLE001 - one user's failure shouldn't block others
                 results.append({"user_id": user_id, "ok": False, "error": str(error)})
 
