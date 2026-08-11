@@ -64,6 +64,26 @@ def pop_exit_orders(user_id: str, ticker: str) -> List[Dict[str, str]]:
     return order_ids
 
 
+def pop_exit_orders_by_type(user_id: str, ticker: str, order_type: str) -> List[Dict[str, str]]:
+    """Like pop_exit_orders, but only removes/returns orders of one leg type
+    - used when refreshing a single leg (e.g. re-pricing the stop after a
+    confidence drop) so a resting take-profit order for the same ticker is
+    left completely untouched."""
+    data = _read(user_id)
+    ticker = ticker.strip().upper()
+    all_orders = data.get(ticker, [])
+    matching = [order for order in all_orders if order.get("type") == order_type]
+    if not matching:
+        return []
+    remaining = [order for order in all_orders if order.get("type") != order_type]
+    if remaining:
+        data[ticker] = remaining
+    else:
+        data.pop(ticker, None)
+    _write(user_id, data)
+    return matching
+
+
 def tracked_tickers(user_id: str) -> List[str]:
     """Every ticker that currently has at least one resting exit order
     tracked - used to spot stale legs for positions that closed on their own."""

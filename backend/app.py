@@ -85,7 +85,7 @@ if __package__:
         get_virtual_net_account_value,
         get_virtual_starting_balance,
     )
-    from .webull_stop_orders import pop_exit_orders, record_exit_order, tracked_tickers as webull_tracked_tickers
+    from .webull_stop_orders import pop_exit_orders, pop_exit_orders_by_type, record_exit_order, tracked_tickers as webull_tracked_tickers
     from .anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from .autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
     from .backtest_engine import run_backtest
@@ -187,7 +187,7 @@ else:
         get_virtual_net_account_value,
         get_virtual_starting_balance,
     )
-    from webull_stop_orders import pop_exit_orders, record_exit_order, tracked_tickers as webull_tracked_tickers
+    from webull_stop_orders import pop_exit_orders, pop_exit_orders_by_type, record_exit_order, tracked_tickers as webull_tracked_tickers
     from anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
     from backtest_engine import run_backtest
@@ -2183,6 +2183,7 @@ def api_autonomy_risk_settings():
 OVERNIGHT_MIN_CONFIDENCE = 55  # matches the confidence floor the dashboard itself uses to call something a real opportunity vs WAIT
 OVERNIGHT_MAX_ORDERS_PER_RUN = 5
 OVERNIGHT_ORDER_QUANTITY = 1
+CONFIDENCE_DEGRADATION_THRESHOLD = 15  # how many confidence points a held position can drop before its stop gets tightened
 
 POSITIONS_CACHE: Dict[str, Dict[str, object]] = {}
 POSITIONS_CACHE_SECONDS = 30
@@ -2404,6 +2405,116 @@ def _reconcile_exit_orders(user_id: str, creds: Dict[str, str], account_id: str)
         replace_overnight_orders(user_id, orders)
 
 
+def _refresh_stop_confidence(user_id: str, creds: Dict[str, str], account_id: str) -> None:
+    """Runs at the start of every scan tick (same 15-minute cadence as the
+    cron scheduler) and re-scores every open position's ticker against the
+    live, calibrated confidence engine - the same one used to find entries.
+    If a setup has degraded since entry (confidence dropped a lot, or the
+    recommendation flipped away from CALL), the resting stop-loss is tightened
+    to lock in more of the gain / cap more of the loss. It only ever tightens,
+    never loosens, and only ever touches the stop leg - any resting take-profit
+    order for the same ticker is left completely alone via
+    pop_exit_orders_by_type. STOP_LOSS only accepts the CORE session (same
+    constraint _reconcile_exit_orders works around), so this is a no-op
+    outside CORE hours and simply retries on the next tick."""
+    if _current_webull_trading_session() != "CORE":
+        return
+    try:
+        positions = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
+    except Exception:  # noqa: BLE001 - best-effort refresh, don't block the scan over a flaky positions call
+        return
+    if not positions:
+        return
+
+    orders = list_overnight_orders(user_id)
+    changed = False
+
+    for position in positions:
+        ticker = str(position.get("symbol", "")).upper()
+        if not ticker:
+            continue
+        tracked_entry = next(
+            (
+                order
+                for order in orders
+                if str(order.get("ticker", "")).upper() == ticker
+                and order.get("status") == "placed"
+                and order.get("side") == "BUY"
+            ),
+            None,
+        )
+        if not tracked_entry:
+            continue
+
+        current_stop = float(tracked_entry.get("stop") or 0)
+        if current_stop <= 0:
+            continue
+
+        try:
+            fresh = build_strategy_intelligence(ticker)
+        except Exception:  # noqa: BLE001 - flaky data fetch for this ticker, try again next tick
+            continue
+        if fresh.get("insufficient_data"):
+            continue
+
+        entry_confidence = int(tracked_entry.get("llm_adjusted_confidence") or tracked_entry.get("confidence") or 0)
+        current_confidence = int(fresh.get("strategy_confidence", 0) or 0)
+        current_recommendation = str(fresh.get("recommendation", "")).upper()
+        degraded = (
+            current_recommendation != "CALL"
+            or (entry_confidence - current_confidence) >= CONFIDENCE_DEGRADATION_THRESHOLD
+        )
+        if not degraded:
+            continue
+
+        current_price = float(position.get("last_price", 0) or 0)
+        quantity = float(position.get("quantity", 0) or 0)
+        if current_price <= 0 or quantity <= 0:
+            continue
+
+        # Move the stop halfway from where it was to the current price -
+        # locks in progress made so far without exiting immediately on a
+        # single soft signal. Capped just under current price so the order
+        # is always valid, and never allowed to move backwards (looser).
+        tightened_stop = round(min(current_stop + (current_price - current_stop) * 0.5, current_price * 0.999), 2)
+        if tightened_stop <= current_stop:
+            continue
+
+        stale_legs = pop_exit_orders_by_type(user_id, ticker, "stop")
+        for exit_order in stale_legs:
+            try:
+                webull_api.cancel_order(creds["app_key"], creds["app_secret"], account_id, exit_order["id"])
+            except Exception:  # noqa: BLE001 - likely already filled/expired, that's fine
+                pass
+
+        try:
+            time.sleep(1.0)
+            stop_result = webull_api.place_stop_loss_order(
+                app_key=creds["app_key"],
+                app_secret=creds["app_secret"],
+                account_id=account_id,
+                symbol=ticker,
+                quantity=quantity,
+                stop_price=tightened_stop,
+            )
+            record_exit_order(user_id, ticker, stop_result["client_order_id"], "stop")
+            tracked_entry["stop"] = tightened_stop
+            tracked_entry["stop_refreshed_at"] = _now_utc().isoformat()
+            tracked_entry["stop_refresh_reason"] = (
+                f"confidence dropped {entry_confidence}->{current_confidence}"
+                if current_recommendation == "CALL"
+                else f"recommendation flipped to {current_recommendation} (was {entry_confidence}% CALL at entry)"
+            )
+            changed = True
+        except Exception as stop_error:  # noqa: BLE001 - the old stop is already cancelled; flag it unprotected so _reconcile_exit_orders retries next tick
+            tracked_entry["stop_order_placed"] = False
+            tracked_entry["stop_refresh_error"] = str(stop_error)
+            changed = True
+
+    if changed:
+        replace_overnight_orders(user_id, orders)
+
+
 def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
     """Scans current setups the same way the dashboard does, and for the
     highest-confidence bullish ones places real (sandbox) DAY limit orders on
@@ -2431,6 +2542,7 @@ def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
     account_id = cash_account["account_id"]
 
     _reconcile_exit_orders(user_id, creds, account_id)
+    _refresh_stop_confidence(user_id, creds, account_id)
 
     risk_settings = get_autonomy_status(user_id)
     if risk_settings.get("emergency_stop_enabled"):
