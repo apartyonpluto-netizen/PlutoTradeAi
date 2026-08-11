@@ -118,3 +118,15 @@ def test_tightened_stop_does_not_move_backwards_when_price_has_fallen_through_st
     # that invariant rather than fighting it.
     result = pluto_app._compute_tightened_stop(current_stop=200.0, current_price=195.0)
     assert result <= 200.0
+
+
+# --- CORE-hours-only entries -----------------------------------------------
+
+
+def test_new_entries_allowed_during_core_session():
+    assert pluto_app._new_entries_allowed("CORE") is True
+
+
+def test_new_entries_blocked_outside_core_session():
+    assert pluto_app._new_entries_allowed("ALL") is False
+    assert pluto_app._new_entries_allowed("NIGHT") is False

@@ -2626,6 +2626,17 @@ def _compute_position_quantity(max_trade_size: float, limit_price: float, fallba
     return fallback_quantity
 
 
+def _new_entries_allowed(trading_session: str) -> bool:
+    """New autonomous entries are restricted to CORE hours - not because an
+    entry order itself needs CORE (LIMIT orders accept ALL/NIGHT fine), but
+    because place_stop_loss_order only accepts CORE. Entering outside CORE
+    would leave a filled position with no real broker-side stop until CORE
+    hours arrive, relying entirely on reconciliation to eventually close
+    that gap - acceptable for retrying a stop on an existing position, not
+    for opening a brand new one with no protection plan at all."""
+    return trading_session == "CORE"
+
+
 def _compute_tightened_stop(current_stop: float, current_price: float) -> float:
     """Moves the stop halfway from where it was to the current price - locks
     in progress made so far without exiting on a single soft signal. Capped
@@ -2844,7 +2855,12 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
         and str(opp.get("ticker", "")).upper() not in already_placed_today
     ]
     qualifying.sort(key=lambda opp: int(opp.get("confidence", 0) or 0), reverse=True)
-    candidates = qualifying[: min(OVERNIGHT_MAX_ORDERS_PER_RUN, available_position_slots)]
+
+    # Position management for existing positions (_reconcile_exit_orders,
+    # _refresh_stop_confidence above) already ran regardless of session;
+    # only new-entry candidates are gated by _new_entries_allowed.
+    entries_allowed = _new_entries_allowed(_current_webull_trading_session())
+    candidates = qualifying[: min(OVERNIGHT_MAX_ORDERS_PER_RUN, available_position_slots)] if entries_allowed else []
 
     placed: List[Dict[str, object]] = []
     skipped: List[Dict[str, object]] = []
@@ -2852,7 +2868,9 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
     for opp in opportunities:
         if opp in candidates:
             continue
-        if opp in qualifying:
+        if not entries_allowed and opp in qualifying:
+            reason = "outside CORE trading hours - a new entry can't get a real broker-side stop attached until CORE opens"
+        elif opp in qualifying:
             reason = f"max_positions limit reached ({open_position_count}/{max_positions} open)" if max_positions > 0 else "no position slots available"
         elif str(opp.get("recommendation", "")).upper() == "CALL":
             reason = f"confidence {opp.get('confidence')} below {OVERNIGHT_MIN_CONFIDENCE} threshold"
