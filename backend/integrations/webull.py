@@ -118,6 +118,82 @@ def get_account_positions(app_key: str, app_secret: str, account_id: str) -> Lis
     return positions if isinstance(positions, list) else []
 
 
+# Webull's client (webull.core.client.Client.get_response) raises a
+# ServerException for ANY non-2xx response rather than returning a Response
+# object with a checkable .status_code - confirmed by reading the SDK source
+# this session. The place_*_order functions used to check
+# `response.status_code == 429` after the call to decide whether to retry;
+# that branch was unreachable dead code, since a 429 raises before a
+# response object is ever returned. _place_order_with_retry replaces that
+# pattern with a real try/except around the actual exception type.
+REPEAT_ORDER_ERROR_CODE = "OAUTH_OPENAPI_TRADE_PLACE_ORDER_REPEAT"
+
+
+def _place_order_with_retry(trade_client, account_id: str, order: Dict[str, Any], action_label: str) -> Dict[str, Any]:
+    """Places one order, retrying on rate-limiting, and treating a reused
+    client_order_id as success rather than failure - confirmed live against
+    the sandbox this session that Webull rejects a repeated client_order_id
+    with HTTP 417 OAUTH_OPENAPI_TRADE_PLACE_ORDER_REPEAT rather than quietly
+    creating a duplicate order. That rejection means "this exact order was
+    already placed", which is exactly the outcome a caller retrying after a
+    crash wants - so it's resolved by looking up and returning the order
+    that already exists, not raised as a new failure."""
+    from webull.core.exception.exceptions import ServerException
+
+    client_order_id = order["client_order_id"]
+    last_error: Optional[ServerException] = None
+    for attempt in range(3):
+        try:
+            response = trade_client.order_v2.place_order(account_id, [order])
+            result = response.json()
+            result["client_order_id"] = client_order_id
+            result["idempotent_replay"] = False
+            return result
+        except ServerException as error:
+            if error.get_http_status() == 417 and error.get_error_code() == REPEAT_ORDER_ERROR_CODE:
+                detail = _fetch_order_detail(trade_client, account_id, client_order_id)
+                detail["client_order_id"] = client_order_id
+                detail["idempotent_replay"] = True
+                return detail
+            last_error = error
+            if error.get_http_status() == 429 and attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            break
+    raise ValueError(f"Webull API error ({action_label}): {last_error}")
+
+
+def _fetch_order_detail(trade_client, account_id: str, client_order_id: str) -> Dict[str, Any]:
+    response = trade_client.order_v2.get_order_detail(account_id, client_order_id)
+    if response.status_code != 200:
+        raise ValueError(f"Webull API error (order detail): HTTP {response.status_code}")
+    return response.json()
+
+
+def get_order_detail(app_key: str, app_secret: str, account_id: str, client_order_id: str) -> Dict[str, Any]:
+    """The current state of one order by its client_order_id - status,
+    total_quantity, filled_quantity (see order_lifecycle.summarize_fill).
+    Used to confirm an entry's actual fill quantity before sizing protective
+    orders, and to confirm a protective order is still genuinely resting
+    rather than just "was once accepted"."""
+    trade_client = _get_trade_client(app_key, app_secret)
+    return _fetch_order_detail(trade_client, account_id, client_order_id)
+
+
+def get_open_orders(app_key: str, app_secret: str, account_id: str) -> List[Dict[str, Any]]:
+    """Every order currently resting at the broker for this account -
+    used to confirm a protective leg is genuinely still active, not just
+    that the placement call once returned success."""
+    trade_client = _get_trade_client(app_key, app_secret)
+    response = trade_client.order_v2.get_order_open(account_id)
+    if response.status_code != 200:
+        raise ValueError(f"Webull API error (open orders): HTTP {response.status_code}")
+    payload = response.json()
+    if isinstance(payload, dict):
+        return payload.get("orders", []) or []
+    return payload if isinstance(payload, list) else []
+
+
 def preview_stock_order(
     app_key: str,
     app_secret: str,
@@ -158,14 +234,21 @@ def place_stock_order(
     quantity: float,
     limit_price: float,
     trading_session: str = "CORE",
+    client_order_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Places a real (sandbox) DAY limit order. trading_session must be CORE
     (regular hours), ALL (extended hours), or NIGHT (Webull's 24-hour session -
     the only one accepted outside pre-market/after-hours windows, and it draws
     from a separate night_trading_buying_power pool rather than the account's
-    regular buying power)."""
+    regular buying power).
+
+    client_order_id should be a deterministic id (see
+    order_lifecycle.deterministic_client_order_id) for any caller that might
+    retry this same logical placement after a crash - a fresh random id is
+    generated only if none is supplied, which loses Webull's own
+    duplicate-order protection."""
     trade_client = _get_trade_client(app_key, app_secret)
-    client_order_id = uuid.uuid4().hex
+    client_order_id = client_order_id or uuid.uuid4().hex
     order = {
         "combo_type": "NORMAL",
         "client_order_id": client_order_id,
@@ -180,23 +263,7 @@ def place_stock_order(
         "time_in_force": "DAY",
         "entrust_type": "QTY",
     }
-    # Batching several order placements back-to-back in one request (e.g. the
-    # overnight scan) can trip Webull's own rate limiter (429) well before any
-    # documented per-minute figure - retry with backoff rather than dropping
-    # the order.
-    last_response = None
-    for attempt in range(3):
-        response = trade_client.order_v2.place_order(account_id, [order])
-        if response.status_code == 200:
-            result = response.json()
-            result["client_order_id"] = client_order_id
-            return result
-        last_response = response
-        if response.status_code == 429 and attempt < 2:
-            time.sleep(1.5 * (attempt + 1))
-            continue
-        break
-    raise ValueError(f"Webull API error (place order): HTTP {last_response.status_code} {last_response.text}")
+    return _place_order_with_retry(trade_client, account_id, order, "place order")
 
 
 def place_stop_loss_order(
@@ -206,6 +273,7 @@ def place_stop_loss_order(
     symbol: str,
     quantity: float,
     stop_price: float,
+    client_order_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Places a real standalone stop-loss SELL order at the broker - once this
     is accepted, Webull itself watches the price and executes the exit, with
@@ -218,9 +286,11 @@ def place_stop_loss_order(
     API), so stop-loss orders can only be placed while the core trading
     gateway is up (roughly 9:30-16:00 ET). Callers placing an entry outside
     those hours should expect this to fail and retry once CORE hours begin -
-    see _place_missing_stop_orders in app.py."""
+    see _reconcile_exit_orders in app.py.
+
+    client_order_id: see place_stock_order."""
     trade_client = _get_trade_client(app_key, app_secret)
-    client_order_id = uuid.uuid4().hex
+    client_order_id = client_order_id or uuid.uuid4().hex
     order = {
         "combo_type": "NORMAL",
         "client_order_id": client_order_id,
@@ -235,19 +305,7 @@ def place_stop_loss_order(
         "time_in_force": "DAY",
         "entrust_type": "QTY",
     }
-    last_response = None
-    for attempt in range(3):
-        response = trade_client.order_v2.place_order(account_id, [order])
-        if response.status_code == 200:
-            result = response.json()
-            result["client_order_id"] = client_order_id
-            return result
-        last_response = response
-        if response.status_code == 429 and attempt < 2:
-            time.sleep(1.5 * (attempt + 1))
-            continue
-        break
-    raise ValueError(f"Webull API error (place stop-loss order): HTTP {last_response.status_code} {last_response.text}")
+    return _place_order_with_retry(trade_client, account_id, order, "place stop-loss order")
 
 
 def place_take_profit_order(
@@ -258,6 +316,7 @@ def place_take_profit_order(
     quantity: float,
     target_price: float,
     trading_session: str = "CORE",
+    client_order_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Places a real take-profit SELL order at the broker - a plain LIMIT
     order resting above the current price, which Webull fills automatically
@@ -267,9 +326,11 @@ def place_take_profit_order(
     order rides alongside the STOP_LOSS order placed at entry as an
     independent bracket rather than a true OTOCO combo - see the
     _reconcile_exit_orders note in app.py for how the stale-leg risk that
-    creates is handled."""
+    creates is handled.
+
+    client_order_id: see place_stock_order."""
     trade_client = _get_trade_client(app_key, app_secret)
-    client_order_id = uuid.uuid4().hex
+    client_order_id = client_order_id or uuid.uuid4().hex
     order = {
         "combo_type": "NORMAL",
         "client_order_id": client_order_id,
@@ -284,19 +345,7 @@ def place_take_profit_order(
         "time_in_force": "DAY",
         "entrust_type": "QTY",
     }
-    last_response = None
-    for attempt in range(3):
-        response = trade_client.order_v2.place_order(account_id, [order])
-        if response.status_code == 200:
-            result = response.json()
-            result["client_order_id"] = client_order_id
-            return result
-        last_response = response
-        if response.status_code == 429 and attempt < 2:
-            time.sleep(1.5 * (attempt + 1))
-            continue
-        break
-    raise ValueError(f"Webull API error (place take-profit order): HTTP {last_response.status_code} {last_response.text}")
+    return _place_order_with_retry(trade_client, account_id, order, "place take-profit order")
 
 
 def cancel_order(app_key: str, app_secret: str, account_id: str, client_order_id: str) -> Dict[str, Any]:
