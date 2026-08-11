@@ -3226,6 +3226,11 @@ select:focus {
     color: var(--text-primary);
 }
 
+.ticker-autocomplete {
+    position: relative;
+    max-width: 340px;
+}
+
 .ticker-add-form {
     display: inline-flex;
     align-items: center;
@@ -3233,7 +3238,7 @@ select:focus {
 }
 
 .ticker-add-form input {
-    width: 110px;
+    width: 220px;
     padding: 7px 10px;
     border-radius: 999px;
     border: 1px dashed rgba(180, 116, 255, 0.45);
@@ -3256,14 +3261,59 @@ select:focus {
     margin-top: 2px;
 }
 
-.analysis-suggestions {
-    margin-top: var(--space-3);
+.ticker-autocomplete-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    z-index: 20;
+    width: min(340px, 100%);
+    max-height: 280px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px;
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(180, 116, 255, 0.35);
+    background: var(--bg-elevated);
+    box-shadow: var(--shadow-1);
 }
 
-.analysis-suggestions .alert-row {
-    align-items: center;
-}
-
-.analysis-suggestions .alert-row b {
+.ticker-autocomplete-item {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    width: 100%;
+    text-align: left;
+    padding: 8px 10px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
     color: var(--text-primary);
+    cursor: pointer;
+}
+
+.ticker-autocomplete-item:hover,
+.ticker-autocomplete-item.highlighted {
+    background: rgba(137, 83, 198, 0.25);
+}
+
+.ticker-autocomplete-ticker {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    font-size: 0.85rem;
+    font-weight: 700;
+}
+
+.ticker-autocomplete-ticker b {
+    color: var(--accent-primary);
+    font-size: 0.7rem;
+    font-weight: 600;
+}
+
+.ticker-autocomplete-reason {
+    font-size: 0.72rem;
+    color: var(--text-secondary);
 }

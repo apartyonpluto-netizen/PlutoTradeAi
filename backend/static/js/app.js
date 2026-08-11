@@ -1573,10 +1573,8 @@ const bindAnalysisSectionPage = () => {
 
   const chipRow = root.querySelector("[data-analysis-chips]");
   const addForm = root.querySelector("[data-analysis-add-form]");
-  const addInput = addForm ? addForm.querySelector("input") : null;
-  // Lives in its own <section> below the ticker list, not inside root, so it
-  // has to be looked up from the document rather than scoped to root.
-  const suggestionsList = document.querySelector("[data-analysis-suggestions]");
+  const addInput = root.querySelector("[data-analysis-add-input]");
+  const menu = root.querySelector("[data-analysis-suggestions]");
   const errorsNode = root.querySelector("[data-analysis-errors]");
   const liveBadge = root.querySelector("[data-analysis-live-badge]");
   const capNote = root.querySelector("[data-analysis-cap-note]");
@@ -1584,10 +1582,49 @@ const bindAnalysisSectionPage = () => {
 
   const focusTicker = new URLSearchParams(window.location.search).get("ticker") || "";
   let firstLoad = true;
+  let latestSuggestions = [];
+  let latestTickers = [];
+  let highlightedIndex = -1;
+
+  const closeMenu = () => {
+    if (!(menu instanceof HTMLElement)) return;
+    menu.hidden = true;
+    menu.innerHTML = "";
+    highlightedIndex = -1;
+  };
+
+  // Autocomplete, not a strict picklist - it filters the same AI-suggested
+  // tickers (scanner score + reason) shown elsewhere in the app, but typing
+  // a ticker that isn't in the suggestion pool and hitting Add still works.
+  const renderMenu = (filterText) => {
+    if (!(menu instanceof HTMLElement)) return;
+    const needle = filterText.trim().toUpperCase();
+    const matches = latestSuggestions
+      .filter((s) => !latestTickers.includes(String(s.ticker || "").toUpperCase()))
+      .filter((s) => !needle || String(s.ticker || "").toUpperCase().startsWith(needle))
+      .slice(0, 8);
+    if (!matches.length) {
+      closeMenu();
+      return;
+    }
+    highlightedIndex = 0;
+    menu.innerHTML = matches
+      .map(
+        (s, index) => `
+        <button type="button" class="ticker-autocomplete-item${index === 0 ? " highlighted" : ""}" data-suggestion-ticker="${escapeHtml(s.ticker)}" data-index="${index}">
+          <span class="ticker-autocomplete-ticker">${escapeHtml(s.ticker)} <b>${escapeHtml(s.scanner_score)}</b></span>
+          <span class="ticker-autocomplete-reason">${escapeHtml(s.reason || "")}</span>
+        </button>`
+      )
+      .join("");
+    menu.hidden = false;
+  };
 
   const render = (payload) => {
     const rows = payload.rows || [];
     const tickers = (payload.tickers || []).map((ticker) => String(ticker).toUpperCase());
+    latestTickers = tickers;
+    latestSuggestions = payload.suggestions || [];
 
     list.innerHTML = rows.length
       ? rows.map((row) => renderRow(row)).join("")
@@ -1603,26 +1640,6 @@ const bindAnalysisSectionPage = () => {
           </span>`
         )
         .join("");
-    }
-
-    if (suggestionsList) {
-      const suggestions = (payload.suggestions || []).filter((s) => !tickers.includes(String(s.ticker || "").toUpperCase()));
-      suggestionsList.innerHTML = suggestions.length
-        ? suggestions
-            .map(
-              (s) => `
-            <div class="alert-row" data-suggestion-ticker="${escapeHtml(s.ticker)}">
-              <div>
-                <b>${escapeHtml(s.ticker)} · Score ${escapeHtml(s.scanner_score)}</b>
-                <p>${escapeHtml(s.reason || "")}</p>
-              </div>
-              <div class="action-row">
-                <button type="button" class="ghost-button add-analysis-suggestion" data-suggestion-ticker="${escapeHtml(s.ticker)}">Add</button>
-              </div>
-            </div>`
-            )
-            .join("")
-        : '<p class="muted">No AI suggestions right now.</p>';
     }
 
     if (errorsNode) {
@@ -1655,22 +1672,64 @@ const bindAnalysisSectionPage = () => {
     }
   };
 
+  const addTicker = async (ticker) => {
+    if (!ticker) return;
+    try {
+      const payload = await requestJson(`/api/analysis/${section}/tickers`, {
+        method: "POST",
+        body: JSON.stringify({ ticker }),
+      });
+      render(payload);
+      if (addInput instanceof HTMLInputElement) addInput.value = "";
+      closeMenu();
+      showToast(`${ticker} added.`, "success");
+    } catch (error) {
+      showToast(error.message, "error");
+    }
+  };
+
   if (addForm instanceof HTMLFormElement) {
-    addForm.addEventListener("submit", async (event) => {
+    addForm.addEventListener("submit", (event) => {
       event.preventDefault();
       const ticker = (addInput instanceof HTMLInputElement ? addInput.value : "").trim().toUpperCase();
-      if (!ticker) return;
-      try {
-        const payload = await requestJson(`/api/analysis/${section}/tickers`, {
-          method: "POST",
-          body: JSON.stringify({ ticker }),
-        });
-        render(payload);
-        if (addInput instanceof HTMLInputElement) addInput.value = "";
-        showToast(`${ticker} added.`, "success");
-      } catch (error) {
-        showToast(error.message, "error");
+      addTicker(ticker).catch(() => {});
+    });
+  }
+
+  if (addInput instanceof HTMLInputElement) {
+    addInput.addEventListener("focus", () => renderMenu(addInput.value));
+    addInput.addEventListener("input", () => renderMenu(addInput.value));
+    addInput.addEventListener("keydown", (event) => {
+      if (!(menu instanceof HTMLElement) || menu.hidden) return;
+      const items = Array.from(menu.querySelectorAll(".ticker-autocomplete-item"));
+      if (!items.length) return;
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        highlightedIndex = Math.min(highlightedIndex + 1, items.length - 1);
+        items.forEach((item, i) => item.classList.toggle("highlighted", i === highlightedIndex));
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        highlightedIndex = Math.max(highlightedIndex - 1, 0);
+        items.forEach((item, i) => item.classList.toggle("highlighted", i === highlightedIndex));
+      } else if (event.key === "Enter" && highlightedIndex >= 0) {
+        event.preventDefault();
+        addTicker(items[highlightedIndex].dataset.suggestionTicker || "").catch(() => {});
+      } else if (event.key === "Escape") {
+        closeMenu();
       }
+    });
+    // blur fires before a click on a menu item would register, so delay the
+    // close just long enough for the menu's own mousedown handler to fire
+    // first (that handler also calls closeMenu, so this is just a fallback).
+    addInput.addEventListener("blur", () => window.setTimeout(closeMenu, 150));
+  }
+
+  if (menu instanceof HTMLElement) {
+    menu.addEventListener("mousedown", (event) => {
+      const target = event.target instanceof HTMLElement ? event.target.closest(".ticker-autocomplete-item") : null;
+      if (!target) return;
+      event.preventDefault();
+      addTicker(target.dataset.suggestionTicker || "").catch(() => {});
     });
   }
 
@@ -1685,24 +1744,6 @@ const bindAnalysisSectionPage = () => {
           method: "DELETE",
         });
         render(payload);
-      } catch (error) {
-        showToast(error.message, "error");
-      }
-    });
-  }
-
-  if (suggestionsList) {
-    suggestionsList.addEventListener("click", async (event) => {
-      const target = event.target;
-      if (!(target instanceof HTMLElement) || !target.classList.contains("add-analysis-suggestion")) return;
-      const ticker = target.dataset.suggestionTicker || "";
-      try {
-        const payload = await requestJson(`/api/analysis/${section}/tickers`, {
-          method: "POST",
-          body: JSON.stringify({ ticker }),
-        });
-        render(payload);
-        showToast(`${ticker} added.`, "success");
       } catch (error) {
         showToast(error.message, "error");
       }

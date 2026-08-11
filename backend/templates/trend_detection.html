@@ -9,21 +9,17 @@
     <div data-analysis-errors></div>
 
     <div class="analysis-list-editor" data-analysis-chips></div>
-    <form class="ticker-add-form" data-analysis-add-form>
-        <input type="text" name="ticker" placeholder="Add ticker" maxlength="8" required>
-        <button type="submit" class="ghost-button">Add</button>
-    </form>
+    <div class="ticker-autocomplete">
+        <form class="ticker-add-form" data-analysis-add-form autocomplete="off">
+            <input type="text" name="ticker" placeholder="Add or search AI suggestions" maxlength="8" data-analysis-add-input required>
+            <button type="submit" class="ghost-button">Add</button>
+        </form>
+        <div class="ticker-autocomplete-menu" data-analysis-suggestions hidden></div>
+    </div>
     <p class="analysis-cap-note" data-analysis-cap-note></p>
 
     <div class="price-map-list" data-analysis-rows>
         <p class="muted">Loading trend signals...</p>
-    </div>
-</section>
-
-<section class="panel analysis-suggestions">
-    <div class="panel-head"><h3>AI Suggestions</h3><span>Scanner-driven picks not already in this list</span></div>
-    <div data-analysis-suggestions>
-        <p class="muted">Loading suggestions...</p>
     </div>
 </section>
 {% endblock %}
