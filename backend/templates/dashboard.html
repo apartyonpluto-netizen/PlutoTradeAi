@@ -358,7 +358,7 @@
 <div class="mission-brief-overlay {% if not mission_brief_should_show %}dismissed{% endif %}" id="missionBriefOverlay">
     <article class="mission-brief-card">
         <div class="panel-head">
-            <h3>Good {% if status_summary.current_time and status_summary.current_time[:2]|int < 12 %}Morning{% elif status_summary.current_time and status_summary.current_time[:2]|int < 18 %}Afternoon{% else %}Evening{% endif %}, Captain Curtis.</h3>
+            <h3>Good {% if status_summary.current_time and status_summary.current_time[:2]|int < 12 %}Morning{% elif status_summary.current_time and status_summary.current_time[:2]|int < 18 %}Afternoon{% else %}Evening{% endif %}, Captain {{ current_user.username if current_user else '' }}.</h3>
             <button class="ghost-button" type="button" id="closeMissionBrief">Enter Mission</button>
         </div>
         <p class="eyebrow">Daily Mission Brief</p>

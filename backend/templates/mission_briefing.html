@@ -6,7 +6,7 @@
     <div class="hero-glow" aria-hidden="true"></div>
     <div class="hero-content">
         <p class="eyebrow">Daily Mission Brief</p>
-        <h2>Good evening, Curtis.</h2>
+        <h2>Good evening, Captain {{ current_user.username if current_user else '' }}.</h2>
         <p class="hero-copy">Mission Control is ready. Here is your operational snapshot before entering the dashboard.</p>
     </div>
     <div class="mission-box">
