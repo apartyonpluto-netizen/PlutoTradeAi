@@ -77,3 +77,28 @@ def decrypt(value: str) -> str:
 
 def is_encrypted(value: str) -> bool:
     return bool(value) and value.startswith(ENCRYPTED_PREFIX)
+
+
+def _fernet_for_key_material(key_material: str) -> Fernet:
+    """Same derivation as _fernet(), but for an explicitly-supplied key
+    rather than whatever CREDENTIAL_ENCRYPTION_KEY currently resolves to -
+    used by scripts/rotate_credential_key.py, which needs to decrypt with
+    the old key and encrypt with the new one in the same process."""
+    digest = hashlib.sha256(key_material.encode("utf-8")).digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
+
+
+def decrypt_with_key(value: str, key_material: str) -> str:
+    if not value:
+        return ""
+    if not value.startswith(ENCRYPTED_PREFIX):
+        return value
+    token = value[len(ENCRYPTED_PREFIX):]
+    return _fernet_for_key_material(key_material).decrypt(token.encode("utf-8")).decode("utf-8")
+
+
+def encrypt_with_key(plaintext: str, key_material: str) -> str:
+    if not plaintext:
+        return ""
+    token = _fernet_for_key_material(key_material).encrypt(plaintext.encode("utf-8")).decode("utf-8")
+    return ENCRYPTED_PREFIX + token
