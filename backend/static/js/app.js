@@ -633,24 +633,63 @@ const bindOptionsSuggestions = () => {
 };
 
 const bindSettingsPage = () => {
-  const trustedForm = document.getElementById("trustedAccountForm");
+  const trustedVerifyForm = document.getElementById("trustedAccountVerifyForm");
+  const trustedUsernameInput = document.getElementById("trustedAccountUsernameInput");
+  const verifyButton = document.getElementById("verifyTrustedAccountButton");
+  const verifyResult = document.getElementById("trustedAccountVerifyResult");
   const settingsForm = document.getElementById("platformSettingsForm");
   const trustedList = document.getElementById("trustedAccountsList");
   const missionResetButton = document.getElementById("manualMissionBriefResetButton");
 
-  if (trustedForm instanceof HTMLFormElement) {
-    trustedForm.addEventListener("submit", async (event) => {
+  if (trustedVerifyForm instanceof HTMLFormElement && verifyResult instanceof HTMLElement) {
+    trustedVerifyForm.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const data = new FormData(trustedForm);
+      const username = (trustedUsernameInput instanceof HTMLInputElement ? trustedUsernameInput.value : "").trim();
+      if (!username) return;
+      verifyButton.disabled = true;
+      verifyResult.innerHTML = "<p class=\"muted\">Looking up @" + username.replace(/^@/, "") + "...</p>";
       try {
-        await requestJson("/api/trusted-accounts", {
+        const response = await fetch("/api/trusted-accounts/verify", {
           method: "POST",
-          body: JSON.stringify({ username: data.get("username") }),
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username }),
         });
-        showToast("Trusted account added.", "success");
-        window.location.reload();
+        const result = await response.json();
+        if (!result.found) {
+          verifyResult.innerHTML = "<p class=\"auth-error\">" + (result.error || "Account not found.") + "</p>";
+          return;
+        }
+        const photo = result.profile_image_url
+          ? "<img src=\"" + result.profile_image_url + "\" alt=\"\" style=\"width:40px;height:40px;border-radius:50%;vertical-align:middle;margin-right:8px;\">"
+          : "";
+        const badge = result.verified ? " ✓" : "";
+        verifyResult.innerHTML =
+          "<div class=\"alert-row\">" +
+          "<div>" + photo + "<b>" + result.name + badge + "</b> &middot; @" + result.username +
+          "<p>" + (result.followers_count || 0).toLocaleString() + " followers</p></div>" +
+          "<button type=\"button\" id=\"confirmAddTrustedAccountButton\">Add This Account</button>" +
+          "</div>";
+        const confirmButton = document.getElementById("confirmAddTrustedAccountButton");
+        if (confirmButton instanceof HTMLButtonElement) {
+          confirmButton.addEventListener("click", async () => {
+            confirmButton.disabled = true;
+            try {
+              await requestJson("/api/trusted-accounts", {
+                method: "POST",
+                body: JSON.stringify({ username: result.username }),
+              });
+              showToast("Trusted account added.", "success");
+              window.location.reload();
+            } catch (error) {
+              showToast(error.message, "error");
+              confirmButton.disabled = false;
+            }
+          });
+        }
       } catch (error) {
-        showToast(error.message, "error");
+        verifyResult.innerHTML = "<p class=\"auth-error\">Verification failed - try again.</p>";
+      } finally {
+        verifyButton.disabled = false;
       }
     });
   }

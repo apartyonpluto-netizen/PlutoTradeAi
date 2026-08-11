@@ -18,6 +18,7 @@ data/global_settings.json
 data/strategy_calibration.json
 data/paper_trades.csv
 data/watchlist.csv
+data/trusted_x_accounts.csv
 
 # Multi-user account data - per-user credentials, sessions, watchlists, trades
 data/.flask_secret_key

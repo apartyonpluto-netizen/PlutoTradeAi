@@ -26,7 +26,7 @@ class ProviderResult:
 class MockNewsProvider:
     provider_name = "demo_news"
 
-    def fetch(self, tickers: Sequence[str], limit: int = 20) -> ProviderResult:
+    def fetch(self, tickers: Sequence[str], limit: int = 20, user_id: str = "") -> ProviderResult:
         symbol = (tickers[0] if tickers else "SPY").upper()
         items = [
             {
@@ -47,8 +47,10 @@ class MockNewsProvider:
 class XNewsProvider:
     provider_name = "x_official_api"
 
-    def fetch(self, tickers: Sequence[str], limit: int = 20) -> ProviderResult:
-        items, errors = fetch_x_news_for_watchlist(tickers=list(tickers), limit=limit)
+    def fetch(self, tickers: Sequence[str], limit: int = 20, user_id: str = "") -> ProviderResult:
+        if not user_id:
+            return ProviderResult(provider=self.provider_name, items=[], errors=["No user context for X trusted accounts."])
+        items, errors = fetch_x_news_for_watchlist(user_id=user_id, tickers=list(tickers), limit=limit)
         enriched = [{**item, "provider": self.provider_name} for item in items]
         return ProviderResult(provider=self.provider_name, items=enriched, errors=errors)
 
@@ -56,7 +58,7 @@ class XNewsProvider:
 class AlpacaNewsProvider:
     provider_name = "alpaca_news"
 
-    def fetch(self, tickers: Sequence[str], limit: int = 20) -> ProviderResult:
+    def fetch(self, tickers: Sequence[str], limit: int = 20, user_id: str = "") -> ProviderResult:
         if not alpaca_api.is_configured():
             return ProviderResult(provider=self.provider_name, items=[], errors=["Alpaca API credentials are not configured."])
         try:
@@ -99,8 +101,8 @@ class NewsService:
             {"name": "future_provider_slot", "status": "planned"},
         ]
 
-    def get_news(self, tickers: Sequence[str], limit: int = 20) -> Dict[str, Any]:
-        results: List[ProviderResult] = [provider.fetch(tickers=tickers, limit=limit) for provider in self.providers]
+    def get_news(self, tickers: Sequence[str], limit: int = 20, user_id: str = "") -> Dict[str, Any]:
+        results: List[ProviderResult] = [provider.fetch(tickers=tickers, limit=limit, user_id=user_id) for provider in self.providers]
         items: List[Dict[str, Any]] = []
         errors: List[str] = []
         provider_status: List[Dict[str, Any]] = []
@@ -144,7 +146,7 @@ class NewsService:
         }
 
 
-def fetch_news_bundle(tickers: Sequence[str], limit: int = 20) -> Dict[str, Any]:
+def fetch_news_bundle(tickers: Sequence[str], limit: int = 20, user_id: str = "") -> Dict[str, Any]:
     service = NewsService()
-    return service.get_news(tickers=tickers, limit=limit)
+    return service.get_news(tickers=tickers, limit=limit, user_id=user_id)
 

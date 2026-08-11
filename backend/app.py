@@ -97,6 +97,7 @@ if __package__:
         add_trusted_account,
         fetch_x_news_for_watchlist,
         get_trusted_accounts,
+        lookup_x_user,
         remove_trusted_account,
     )
     from .neural.neural_engine import build_neural_status
@@ -198,6 +199,7 @@ else:
         add_trusted_account,
         fetch_x_news_for_watchlist,
         get_trusted_accounts,
+        lookup_x_user,
         remove_trusted_account,
     )
     from neural.neural_engine import build_neural_status
@@ -832,22 +834,28 @@ def get_reversal_and_trend_data(
     return reversal_rows, trend_rows, errors
 
 
-def get_news_data(watchlist_tickers: List[str], force_refresh: bool = False) -> Tuple[List[Dict[str, object]], List[str]]:
+def get_news_data(watchlist_tickers: List[str], force_refresh: bool = False, user_id: str = "") -> Tuple[List[Dict[str, object]], List[str]]:
+    # Cache key includes user_id - the X provider's results depend on this
+    # user's own trusted-accounts list, so without it two users with the same
+    # watchlist could be served each other's cached news, including posts
+    # sourced from each other's personally-curated trusted accounts.
     ticker_key = _ticker_key(watchlist_tickers)
     if (
         not force_refresh
         and ticker_key == NEWS_CACHE.get("ticker_key")
+        and user_id == NEWS_CACHE.get("user_id")
         and NEWS_CACHE.get("rows")
         and _cache_is_fresh(NEWS_CACHE)
     ):
         return NEWS_CACHE["rows"], NEWS_CACHE["errors"]
 
-    bundle = fetch_news_bundle(tickers=watchlist_tickers, limit=30)
+    bundle = fetch_news_bundle(tickers=watchlist_tickers, limit=30, user_id=user_id)
     rows = bundle.get("items", [])
     errors = bundle.get("errors", [])
     NEWS_CACHE.update(
         {
             "ticker_key": ticker_key,
+            "user_id": user_id,
             "rows": rows,
             "errors": errors,
             "expires_at": _now_utc() + timedelta(seconds=NEWS_CACHE_SECONDS),
@@ -1086,7 +1094,7 @@ def _build_page_context(
     news_rows: List[Dict[str, object]] = []
     news_errors: List[str] = []
     if include_news:
-        news_rows, news_errors = get_news_data(watchlist_tickers=watchlist_tickers, force_refresh=force_refresh)
+        news_rows, news_errors = get_news_data(watchlist_tickers=watchlist_tickers, force_refresh=force_refresh, user_id=user_id)
 
     candle_rows: List[Dict[str, object]] = []
     pattern_rows: List[Dict[str, object]] = []
@@ -1150,7 +1158,9 @@ def _build_page_context(
 
     cached_reversal = reversal_rows or (ANALYTICS_CACHE.get("reversal_rows", []) if _cache_is_fresh(ANALYTICS_CACHE) else [])
     cached_trend = trend_rows or (ANALYTICS_CACHE.get("trend_rows", []) if _cache_is_fresh(ANALYTICS_CACHE) else [])
-    cached_news = news_rows or (NEWS_CACHE.get("rows", []) if _cache_is_fresh(NEWS_CACHE) else [])
+    cached_news = news_rows or (
+        NEWS_CACHE.get("rows", []) if _cache_is_fresh(NEWS_CACHE) and NEWS_CACHE.get("user_id") == user_id else []
+    )
 
     intelligence_tickers = _resolve_analysis_tickers(watchlist_tickers, scanner_rows, limit=6)
     scanner_map = {str(row.get("ticker", "")).upper(): row for row in scanner_rows}
@@ -1334,7 +1344,7 @@ def _build_page_context(
         "autonomy_status": status_summary["autonomy_status"],
     }
     if include_trusted_accounts:
-        context["trusted_accounts"] = get_trusted_accounts()
+        context["trusted_accounts"] = get_trusted_accounts(user_id)
     return context
 
 
@@ -2051,19 +2061,27 @@ def api_patterns():
 
 @app.route("/api/trusted-accounts", methods=["GET", "POST", "DELETE"])
 def api_trusted_accounts():
+    user_id = _current_user_id()
     if request.method == "GET":
-        return jsonify({"accounts": get_trusted_accounts()})
+        return jsonify({"accounts": get_trusted_accounts(user_id)})
 
     payload = request.get_json(silent=True) or {}
     username = payload.get("username", "")
     try:
         if request.method == "POST":
-            account = add_trusted_account(username=username)
+            account = add_trusted_account(user_id=user_id, username=username)
             return jsonify({"ok": True, "account": account})
-        remove_trusted_account(username=username)
+        remove_trusted_account(user_id=user_id, username=username)
         return jsonify({"ok": True})
     except ValueError as error:
         return jsonify({"ok": False, "error": str(error)}), 400
+
+
+@app.route("/api/trusted-accounts/verify", methods=["POST"])
+def api_trusted_accounts_verify():
+    payload = request.get_json(silent=True) or {}
+    result = lookup_x_user(payload.get("username", ""))
+    return jsonify(result)
 
 
 @app.route("/api/settings", methods=["GET", "POST"])

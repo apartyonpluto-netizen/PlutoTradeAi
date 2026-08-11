@@ -24,10 +24,16 @@
 
 <section class="panel">
     <div class="panel-head"><h3>Trusted X Accounts</h3><span>Alert Source Control</span></div>
-    <form id="trustedAccountForm" class="stack-form">
-        <input type="text" name="username" placeholder="@account" required>
-        <button type="submit">Add Trusted Account</button>
+    <p class="muted">
+        X doesn't offer a live search/autocomplete for accounts, so instead: type the exact handle and click Verify -
+        it looks the account up for real and shows you their actual name, photo, and verified badge so you can
+        confirm it's who you meant before adding it.
+    </p>
+    <form id="trustedAccountVerifyForm" class="stack-form">
+        <input type="text" name="username" id="trustedAccountUsernameInput" placeholder="@account" required>
+        <button type="submit" id="verifyTrustedAccountButton">Verify</button>
     </form>
+    <div id="trustedAccountVerifyResult"></div>
     <div id="trustedAccountsList">
         {% for account in trusted_accounts %}
         <div class="alert-row">
