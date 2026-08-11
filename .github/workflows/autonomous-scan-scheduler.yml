@@ -1,9 +1,13 @@
 name: Autonomous scan scheduler
 
-# Fires the live app's cron-trigger endpoint every 15 minutes during US market
+# Fires the live app's cron-trigger endpoint every 5 minutes during US market
 # hours so autonomous mode actually runs unattended, instead of only firing
 # when someone manually clicks "Run Scan." The endpoint itself is a no-op for
 # any user not currently in AUTONOMOUS mode, so this is safe to fire broadly.
+# 5 minutes is GitHub Actions' shortest supported schedule granularity - it
+# also shrinks the worst-case unprotected-position window (see
+# _refresh_stop_confidence / _reconcile_exit_orders in app.py) from ~15
+# minutes down to ~5.
 #
 # Cron is UTC and does not adjust for US daylight saving - 13:00-21:00 UTC
 # covers 9:00am-5:00pm ET during EDT (roughly Mar-Nov) with a comfortable
@@ -13,7 +17,7 @@ name: Autonomous scan scheduler
 # paper-trading app.
 on:
   schedule:
-    - cron: "*/15 13-21 * * 1-5"
+    - cron: "*/5 13-21 * * 1-5"
   workflow_dispatch: {}
 
 jobs:

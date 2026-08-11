@@ -2585,7 +2585,7 @@ def _reconcile_exit_orders(user_id: str, creds: Dict[str, str], account_id: str)
 
 
 def _refresh_stop_confidence(user_id: str, creds: Dict[str, str], account_id: str) -> None:
-    """Runs at the start of every scan tick (same 15-minute cadence as the
+    """Runs at the start of every scan tick (same 5-minute cadence as the
     cron scheduler) and re-scores every open position's ticker against the
     live, calibrated confidence engine - the same one used to find entries.
     If a setup has degraded since entry (confidence dropped a lot, or the
