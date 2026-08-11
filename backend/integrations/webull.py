@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -10,6 +12,52 @@ from typing import Any, Dict, List, Optional
 # is the endpoint, not the key/secret.
 _REGION_ID = "us"
 _SANDBOX_ENDPOINT = "api.sandbox.webull.com"
+
+# The webull SDK's TradeClient logs every request's headers at INFO level,
+# including x-signature (an HMAC derived from the App Secret) and x-app-key
+# - both landed in plaintext in webull_trade_sdk.log. It also re-attaches a
+# fresh file/stream handler to the shared "webull.core" logger on every
+# single API call (one new ApiClient per call, and its default-handler check
+# only looks at that fresh instance), so the file was growing unbounded with
+# duplicate output too. _redact_webull_sdk_logging replaces that with one
+# handler, configured once, that strips sensitive header values before they
+# ever reach disk.
+_SENSITIVE_LOG_FIELD = re.compile(
+    r'("(?:[a-z0-9_-]*(?:app.?key|signature|secret|token|authorization|password)[a-z0-9_-]*)"\s*:\s*")[^"]*(")',
+    re.IGNORECASE,
+)
+_webull_sdk_logging_configured = False
+
+
+class _RedactSensitiveWebullFields(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:  # noqa: BLE001 - never let a logging filter break the request it's logging
+            return True
+        redacted = _SENSITIVE_LOG_FIELD.sub(r"\1***REDACTED***\2", message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
+def _redact_webull_sdk_logging() -> None:
+    global _webull_sdk_logging_configured
+    if _webull_sdk_logging_configured:
+        return
+    sdk_logger = logging.getLogger("webull.core")
+    sdk_logger.setLevel(logging.INFO)
+    handler = logging.FileHandler("webull_trade_sdk.log", encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(thread)d %(asctime)s %(name)s %(levelname)s %(message)s"))
+    # The filter goes on the HANDLER, not the logger. The SDK actually logs
+    # through child loggers (e.g. "webull.core.http.initializer...") that
+    # propagate up to this handler without re-running "webull.core"'s own
+    # logger-level filters - only handler-level filters see every record
+    # regardless of which descendant logger it originated from.
+    handler.addFilter(_RedactSensitiveWebullFields())
+    sdk_logger.addHandler(handler)
+    _webull_sdk_logging_configured = True
 
 
 def is_configured(app_key: str, app_secret: str) -> bool:
@@ -25,7 +73,14 @@ def _get_trade_client(app_key: str, app_secret: str):
     if not app_key or not app_secret:
         raise ValueError("Webull API credentials are not configured for this account.")
 
+    _redact_webull_sdk_logging()
     api_client = ApiClient(app_key, app_secret, _REGION_ID)
+    # Marks this instance as already having its logging configured, so
+    # TradeClient._init_logger skips installing its own (duplicate,
+    # unredacted) handler - _redact_webull_sdk_logging above is the only
+    # handler that ever gets attached, once per process.
+    api_client._stream_logger_set = True
+    api_client._file_logger_set = True
     api_client.add_endpoint(_REGION_ID, _SANDBOX_ENDPOINT)
     return TradeClient(api_client)
 

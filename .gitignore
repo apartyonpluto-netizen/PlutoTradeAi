@@ -22,7 +22,10 @@ data/trusted_x_accounts.csv
 
 # Multi-user account data - per-user credentials, sessions, watchlists, trades
 data/.flask_secret_key
+data/.credential_encryption_key
 data/users.json
 data/users/
+
+.pytest_cache/
 
 .DS_Store

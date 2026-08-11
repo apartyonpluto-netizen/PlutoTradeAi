@@ -11,6 +11,8 @@ services:
         generateValue: true
       - key: CRON_SECRET
         generateValue: true
+      - key: CREDENTIAL_ENCRYPTION_KEY
+        generateValue: true
       - key: PLUTO_DATA_DIR
         value: /var/data
       - key: FORCE_SECURE_COOKIES

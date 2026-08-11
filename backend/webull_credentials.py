@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from typing import Dict, Optional
 
+import crypto_utils
+
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
 USER_DATA_ROOT = DATA_DIR / "users"
@@ -38,9 +40,20 @@ def _write(user_id: str, data: Dict[str, object]) -> None:
 def get_webull_credentials(user_id: str) -> Dict[str, str]:
     """Each user brings their own Webull OpenAPI app key/secret - there is no
     shared/global fallback, so one user can never see or trade on another
-    user's Webull sandbox account."""
+    user's Webull sandbox account. Values are stored encrypted at rest; a
+    file written before encryption existed still decrypts fine (crypto_utils
+    passes legacy plaintext through unchanged) and gets silently upgraded to
+    an encrypted value on this read so it never has to be touched by hand."""
     data = _read(user_id)
-    return {"app_key": str(data.get("app_key", "")), "app_secret": str(data.get("app_secret", ""))}
+    raw_key = str(data.get("app_key", ""))
+    raw_secret = str(data.get("app_secret", ""))
+    app_key = crypto_utils.decrypt(raw_key)
+    app_secret = crypto_utils.decrypt(raw_secret)
+    if (raw_key and not crypto_utils.is_encrypted(raw_key)) or (raw_secret and not crypto_utils.is_encrypted(raw_secret)):
+        data["app_key"] = crypto_utils.encrypt(app_key)
+        data["app_secret"] = crypto_utils.encrypt(app_secret)
+        _write(user_id, data)
+    return {"app_key": app_key, "app_secret": app_secret}
 
 
 def is_webull_configured(user_id: str) -> bool:
@@ -59,10 +72,10 @@ def set_webull_credentials(user_id: str, app_key: str, app_secret: str) -> None:
     # previously-recorded seed balance belongs to the old account and would
     # silently corrupt the virtual balance math for the new one, so drop it
     # and let it get recaptured fresh on the next successful sync.
-    if data.get("app_key") != app_key:
+    if crypto_utils.decrypt(str(data.get("app_key", ""))) != app_key:
         data.pop("seed_balance", None)
-    data["app_key"] = app_key
-    data["app_secret"] = app_secret
+    data["app_key"] = crypto_utils.encrypt(app_key)
+    data["app_secret"] = crypto_utils.encrypt(app_secret)
     _write(user_id, data)
 
 
