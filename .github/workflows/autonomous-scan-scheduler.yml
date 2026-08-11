@@ -1,0 +1,33 @@
+name: Autonomous scan scheduler
+
+# Fires the live app's cron-trigger endpoint every 15 minutes during US market
+# hours so autonomous mode actually runs unattended, instead of only firing
+# when someone manually clicks "Run Scan." The endpoint itself is a no-op for
+# any user not currently in AUTONOMOUS mode, so this is safe to fire broadly.
+#
+# Cron is UTC and does not adjust for US daylight saving - 13:00-21:00 UTC
+# covers 9:00am-5:00pm ET during EDT (roughly Mar-Nov) with a comfortable
+# buffer on both sides of the 9:30-16:00 session. During EST (Nov-Mar) this
+# window runs 8:00am-4:00pm ET instead - still covers the full session, just
+# shifted. Not worth the complexity of a DST-aware schedule for a two-person
+# paper-trading app.
+on:
+  schedule:
+    - cron: "*/15 13-21 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  trigger-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call the autonomous scan endpoint
+        run: |
+          response=$(curl -s -o /tmp/response.json -w "%{http_code}" \
+            -X POST "https://plutotradeai-tqsl.onrender.com/api/autonomy/cron-trigger" \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}")
+          echo "HTTP status: $response"
+          cat /tmp/response.json
+          if [ "$response" -ne 200 ]; then
+            echo "Cron trigger failed with status $response"
+            exit 1
+          fi
