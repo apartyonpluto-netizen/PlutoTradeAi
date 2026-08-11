@@ -66,7 +66,14 @@ if __package__:
         mark_all_read,
         unread_count,
     )
-    from .analytics import build_reversal_and_trend_payload
+    from .analysis_lists import (
+        MAX_TICKERS_PER_SECTION,
+        add_focus_ticker,
+        add_section_ticker,
+        get_section_tickers,
+        remove_section_ticker,
+    )
+    from .analytics import build_reversal_and_trend_payload, build_reversal_map, detect_early_trends, fetch_price_history
     from .candle_brain import analyze_candles
     from .core.errors import PlutoTradeError, ValidationError
     from .core.logger import get_logger, setup_logging
@@ -168,7 +175,14 @@ else:
         mark_all_read,
         unread_count,
     )
-    from analytics import build_reversal_and_trend_payload
+    from analysis_lists import (
+        MAX_TICKERS_PER_SECTION,
+        add_focus_ticker,
+        add_section_ticker,
+        get_section_tickers,
+        remove_section_ticker,
+    )
+    from analytics import build_reversal_and_trend_payload, build_reversal_map, detect_early_trends, fetch_price_history
     from candle_brain import analyze_candles
     from core.errors import PlutoTradeError, ValidationError
     from core.logger import get_logger, setup_logging
@@ -952,6 +966,131 @@ def _resolve_analysis_tickers(watchlist_tickers: Sequence[str], scanner_rows: Se
     return ordered
 
 
+def _default_analysis_section_tickers(user_id: str) -> List[str]:
+    """The starting-point ticker list for an Analysis section before a user
+    has customized it - matches what these pages showed before per-section
+    lists existed, so nobody's view goes blank on first load."""
+    watchlist_tickers = get_watchlist_tickers(user_id)
+    return watchlist_tickers[:6] or CORE_SCAN_UNIVERSE[:6]
+
+
+# Every open viewer of an Analysis page polls every 5-10s, and each user can
+# have their own custom ticker list per section - without a shared cache that
+# fans out into a Yahoo Finance call per ticker per viewer per poll, which is
+# exactly the kind of load that tripped the sandbox rate limit earlier. Keyed
+# by (compute_kind, ticker) rather than by user or section, so two users (or
+# two sections, for the reversal/trend pair) watching the same ticker share
+# one fetch instead of duplicating it.
+ANALYSIS_LIVE_CACHE: Dict[Tuple[str, str], Dict[str, object]] = {}
+ANALYSIS_LIVE_CACHE_SECONDS = 8
+
+
+def _cached_ticker_compute(compute_kind: str, ticker: str, compute_fn):
+    key = (compute_kind, ticker)
+    cached = ANALYSIS_LIVE_CACHE.get(key)
+    if (
+        isinstance(cached, dict)
+        and isinstance(cached.get("expires_at"), datetime)
+        and cached["expires_at"] > _now_utc()
+    ):
+        return cached["payload"], cached.get("error")
+    try:
+        payload = compute_fn()
+        error = None
+    except Exception as exc:  # noqa: BLE001 - one bad ticker shouldn't break the whole section
+        payload = None
+        error = str(exc)
+    ANALYSIS_LIVE_CACHE[key] = {
+        "payload": payload,
+        "error": error,
+        "expires_at": _now_utc() + timedelta(seconds=ANALYSIS_LIVE_CACHE_SECONDS),
+    }
+    return payload, error
+
+
+def _live_candle_row(ticker: str) -> Tuple[object | None, str | None]:
+    return _cached_ticker_compute("candle", ticker, lambda: analyze_candles(ticker))
+
+
+def _live_pattern_row(ticker: str) -> Tuple[object | None, str | None]:
+    return _cached_ticker_compute("pattern", ticker, lambda: analyze_patterns(ticker))
+
+
+def _live_reversal_and_trend(ticker: str, current_price: float | None) -> Tuple[object | None, str | None]:
+    def _compute():
+        history = fetch_price_history(ticker=ticker, period="3mo", interval="1d")
+        reversal_row = build_reversal_map(ticker=ticker, history=history, current_price=current_price)
+        trend_signals = detect_early_trends(
+            history=history, support=float(reversal_row["support"]), resistance=float(reversal_row["resistance"])
+        )
+        return {
+            "reversal": reversal_row,
+            "trend": {"ticker": ticker, **trend_signals, "last_updated": reversal_row["last_updated"]},
+        }
+
+    return _cached_ticker_compute("reversal_trend", ticker, _compute)
+
+
+ANALYSIS_SECTION_ROW_KEY = {
+    "candle_brain": "candle",
+    "pattern_brain": "pattern",
+    "volume_intelligence": "trend",
+    "support_resistance": "reversal",
+}
+
+
+def _build_section_payload(user_id: str, section: str, focus_ticker: str = "") -> Dict[str, object]:
+    if section not in ANALYSIS_SECTION_ROW_KEY:
+        raise ValidationError(f"Unknown analysis section: {section}")
+
+    default_tickers = _default_analysis_section_tickers(user_id)
+    focus_ticker = focus_ticker.strip().upper()
+    if focus_ticker:
+        tickers = add_focus_ticker(user_id, section, focus_ticker, default_tickers)
+    else:
+        tickers = get_section_tickers(user_id, section, default_tickers)
+
+    scanner_rows, _, _ = get_market_data(force_refresh=False)
+    scanner_price_lookup = {
+        str(row.get("ticker", "")).upper(): float(row.get("price", 0) or 0) for row in scanner_rows if row.get("ticker")
+    }
+
+    rows: List[object] = []
+    errors: List[str] = []
+
+    if tickers:
+        with ThreadPoolExecutor(max_workers=len(tickers)) as executor:
+            if section == "candle_brain":
+                results = executor.map(_live_candle_row, tickers)
+            elif section == "pattern_brain":
+                results = executor.map(_live_pattern_row, tickers)
+            else:
+                results = executor.map(
+                    lambda ticker: _live_reversal_and_trend(ticker, scanner_price_lookup.get(ticker)), tickers
+                )
+
+            row_key = ANALYSIS_SECTION_ROW_KEY[section]
+            for ticker, (payload, error) in zip(tickers, results):
+                if error:
+                    errors.append(f"{ticker}: {error}")
+                    continue
+                if payload is None:
+                    continue
+                rows.append(payload[row_key] if section in ("volume_intelligence", "support_resistance") else payload)
+
+    suggestions = build_watchlist_suggestions(scanner_rows=scanner_rows, watchlist_tickers=tickers, limit=6)
+
+    return {
+        "section": section,
+        "tickers": tickers,
+        "max_tickers": MAX_TICKERS_PER_SECTION,
+        "rows": rows,
+        "errors": errors,
+        "suggestions": suggestions,
+        "last_updated": _now_utc().isoformat(),
+    }
+
+
 def _broker_framework_status() -> Dict[str, object]:
     etrade = ETradeBroker()
     webull = WebullBroker()
@@ -1413,18 +1552,18 @@ def scanner_page() -> str:
 @app.route("/support-resistance")
 def reversal_map_page() -> str:
     focus_ticker = request.args.get("ticker", "").strip().upper()
-    return render_template(
-        "reversal_map.html", **_build_page_context(include_reversal=True, include_trend=True, focus_ticker=focus_ticker)
-    )
+    context = _build_page_context(focus_ticker=focus_ticker)
+    context["analysis_section"] = "support_resistance"
+    return render_template("reversal_map.html", **context)
 
 
 @app.route("/trend-detection")
 @app.route("/volume-scanner")
 def trend_detection_page() -> str:
     focus_ticker = request.args.get("ticker", "").strip().upper()
-    return render_template(
-        "trend_detection.html", **_build_page_context(include_reversal=True, include_trend=True, focus_ticker=focus_ticker)
-    )
+    context = _build_page_context(focus_ticker=focus_ticker)
+    context["analysis_section"] = "volume_intelligence"
+    return render_template("trend_detection.html", **context)
 
 
 def _build_price_chart(ticker: str) -> Dict[str, object]:
@@ -1685,13 +1824,17 @@ def api_close_webull_position():
 @app.route("/candle-brain")
 def candle_brain_page() -> str:
     focus_ticker = request.args.get("ticker", "").strip().upper()
-    return render_template("candle_brain.html", **_build_page_context(include_patterns=True, focus_ticker=focus_ticker))
+    context = _build_page_context(focus_ticker=focus_ticker)
+    context["analysis_section"] = "candle_brain"
+    return render_template("candle_brain.html", **context)
 
 
 @app.route("/pattern-brain")
 def pattern_brain_page() -> str:
     focus_ticker = request.args.get("ticker", "").strip().upper()
-    return render_template("pattern_brain.html", **_build_page_context(include_patterns=True, focus_ticker=focus_ticker))
+    context = _build_page_context(focus_ticker=focus_ticker)
+    context["analysis_section"] = "pattern_brain"
+    return render_template("pattern_brain.html", **context)
 
 
 @app.route("/neural-engine")
@@ -1970,6 +2113,42 @@ def api_scanner():
         last_updated=last_updated,
         ok=True,
     )
+
+
+@app.route("/api/analysis/<section>/tickers", methods=["GET"])
+@api_guard
+def api_analysis_section_get(section: str):
+    focus_ticker = request.args.get("focus", "").strip().upper()
+    payload = _build_section_payload(_current_user_id(), section, focus_ticker=focus_ticker)
+    return _api_success(payload, **payload, ok=True)
+
+
+@app.route("/api/analysis/<section>/tickers", methods=["POST"])
+@api_guard
+def api_analysis_section_add(section: str):
+    body = request.get_json(silent=True) or {}
+    ticker = str(body.get("ticker", "")).strip().upper()
+    if not ticker:
+        raise ValidationError("Ticker is required.")
+    user_id = _current_user_id()
+    try:
+        add_section_ticker(user_id, section, ticker, _default_analysis_section_tickers(user_id))
+    except ValueError as error:
+        raise ValidationError(str(error)) from error
+    payload = _build_section_payload(user_id, section)
+    return _api_success(payload, **payload, ok=True)
+
+
+@app.route("/api/analysis/<section>/tickers/<ticker>", methods=["DELETE"])
+@api_guard
+def api_analysis_section_remove(section: str, ticker: str):
+    user_id = _current_user_id()
+    try:
+        remove_section_ticker(user_id, section, ticker, _default_analysis_section_tickers(user_id))
+    except ValueError as error:
+        raise ValidationError(str(error)) from error
+    payload = _build_section_payload(user_id, section)
+    return _api_success(payload, **payload, ok=True)
 
 
 @app.route("/api/live-data-status", methods=["GET"])

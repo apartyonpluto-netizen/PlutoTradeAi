@@ -1483,6 +1483,236 @@ const bindGlobalSearch = () => {
   });
 };
 
+const ANALYSIS_LIVE_REFRESH_SECONDS = 8;
+
+const buildCandlePatternCard = (row) => `
+  <article class="price-map-card">
+    <div class="price-map-head"><h4>${escapeHtml(row.ticker)}</h4><span>${escapeHtml(row.last_updated || "")}</span></div>
+    <div class="price-map-grid">
+      ${(row.patterns || [])
+        .slice(0, 8)
+        .map(
+          (pattern) =>
+            `<div><small>${escapeHtml(pattern.pattern)}</small><b>${Math.round((pattern.confidence || 0) * 100)}%</b></div>`
+        )
+        .join("")}
+    </div>
+  </article>`;
+
+const buildReversalCard = (row) => `
+  <div class="price-map-card">
+    <div class="price-map-head">
+      <h4>${escapeHtml(row.ticker)}</h4>
+      <span>$${escapeHtml(row.current_price)}</span>
+    </div>
+    <div class="price-map-grid">
+      <div><small>Support</small><b>$${escapeHtml(row.support)}</b></div>
+      <div><small>Resistance</small><b>$${escapeHtml(row.resistance)}</b></div>
+      <div><small>Breakout Price</small><b>$${escapeHtml(row.breakout_price)}</b></div>
+      <div><small>Breakdown Price</small><b>$${escapeHtml(row.breakdown_price)}</b></div>
+      <div><small>Reversal Zone</small><b>${escapeHtml(row.reversal_zone)}</b></div>
+      <div><small>Target Zone</small><b>${escapeHtml(row.target_zone)}</b></div>
+      <div><small>Suggested Entry</small><b>$${escapeHtml(row.suggested_entry)}</b></div>
+      <div><small>Suggested Stop</small><b>$${escapeHtml(row.suggested_stop)}</b></div>
+      <div><small>Invalidation</small><b>$${escapeHtml(row.invalidation_level)}</b></div>
+    </div>
+    <p class="ai-context">${escapeHtml(row.setup_explanation)}</p>
+  </div>`;
+
+const ANALYSIS_TREND_TAGS = [
+  ["volume_compression", "Volume Compression"],
+  ["volume_expansion", "Volume Expansion"],
+  ["higher_highs", "Higher Highs"],
+  ["higher_lows", "Higher Lows"],
+  ["lower_highs", "Lower Highs"],
+  ["lower_lows", "Lower Lows"],
+  ["bull_flag", "Bull Flag"],
+  ["bear_flag", "Bear Flag"],
+  ["failed_breakout", "Failed Breakout"],
+  ["failed_breakdown", "Failed Breakdown"],
+  ["trend_continuation", "Trend Continuation"],
+  ["trend_reversal", "Trend Reversal"],
+  ["institutional_buying", "Institutional Buying"],
+  ["sector_momentum", "Sector Momentum"],
+  ["relative_strength", "Relative Strength"],
+  ["gap_up", "Gap Up"],
+  ["gap_down", "Gap Down"],
+  ["unusual_volume", "Unusual Volume"],
+];
+
+const buildTrendCard = (row) => `
+  <article class="price-map-card">
+    <div class="price-map-head"><h4>${escapeHtml(row.ticker)}</h4><span>${escapeHtml(row.last_updated || "")}</span></div>
+    <div class="detect-tags">
+      ${ANALYSIS_TREND_TAGS.filter(([key]) => row[key])
+        .map(([, label]) => `<span>${label}</span>`)
+        .join("")}
+    </div>
+    <p class="muted">Latest close ${escapeHtml(row.latest_close)} · high ${escapeHtml(row.latest_high)} · low ${escapeHtml(row.latest_low)}</p>
+  </article>`;
+
+const ANALYSIS_SECTION_ROW_RENDERERS = {
+  candle_brain: buildCandlePatternCard,
+  pattern_brain: buildCandlePatternCard,
+  volume_intelligence: buildTrendCard,
+  support_resistance: buildReversalCard,
+};
+
+// Shared by Candle Brain, Pattern Brain, Volume Intelligence, and Support &
+// Resistance - each page has its own independently-editable ticker list
+// (backend/analysis_lists.py) and polls the same live-refresh endpoint
+// shape, so one binder driven by data-analysis-section covers all four
+// instead of four near-identical copies.
+const bindAnalysisSectionPage = () => {
+  const root = document.querySelector("[data-analysis-section]");
+  if (!(root instanceof HTMLElement)) return;
+  const section = root.dataset.analysisSection || "";
+  const renderRow = ANALYSIS_SECTION_ROW_RENDERERS[section];
+  const list = root.querySelector("[data-analysis-rows]");
+  if (!renderRow || !list) return;
+
+  const chipRow = root.querySelector("[data-analysis-chips]");
+  const addForm = root.querySelector("[data-analysis-add-form]");
+  const addInput = addForm ? addForm.querySelector("input") : null;
+  // Lives in its own <section> below the ticker list, not inside root, so it
+  // has to be looked up from the document rather than scoped to root.
+  const suggestionsList = document.querySelector("[data-analysis-suggestions]");
+  const errorsNode = root.querySelector("[data-analysis-errors]");
+  const liveBadge = root.querySelector("[data-analysis-live-badge]");
+  const capNote = root.querySelector("[data-analysis-cap-note]");
+  const emptyLabel = root.dataset.analysisEmptyLabel || "No signals available yet.";
+
+  const focusTicker = new URLSearchParams(window.location.search).get("ticker") || "";
+  let firstLoad = true;
+
+  const render = (payload) => {
+    const rows = payload.rows || [];
+    const tickers = (payload.tickers || []).map((ticker) => String(ticker).toUpperCase());
+
+    list.innerHTML = rows.length
+      ? rows.map((row) => renderRow(row)).join("")
+      : `<p class="muted">${escapeHtml(emptyLabel)}</p>`;
+
+    if (chipRow) {
+      chipRow.innerHTML = tickers
+        .map(
+          (ticker) => `
+          <span class="ticker-chip" data-ticker="${escapeHtml(ticker)}">
+            ${escapeHtml(ticker)}
+            <button type="button" class="ticker-chip-remove" data-remove-ticker="${escapeHtml(ticker)}" aria-label="Remove ${escapeHtml(ticker)}">✕</button>
+          </span>`
+        )
+        .join("");
+    }
+
+    if (suggestionsList) {
+      const suggestions = (payload.suggestions || []).filter((s) => !tickers.includes(String(s.ticker || "").toUpperCase()));
+      suggestionsList.innerHTML = suggestions.length
+        ? suggestions
+            .map(
+              (s) => `
+            <div class="alert-row" data-suggestion-ticker="${escapeHtml(s.ticker)}">
+              <div>
+                <b>${escapeHtml(s.ticker)} · Score ${escapeHtml(s.scanner_score)}</b>
+                <p>${escapeHtml(s.reason || "")}</p>
+              </div>
+              <div class="action-row">
+                <button type="button" class="ghost-button add-analysis-suggestion" data-suggestion-ticker="${escapeHtml(s.ticker)}">Add</button>
+              </div>
+            </div>`
+            )
+            .join("")
+        : '<p class="muted">No AI suggestions right now.</p>';
+    }
+
+    if (errorsNode) {
+      const errors = payload.errors || [];
+      errorsNode.innerHTML = errors.length ? `<p class="error">${errors.map((e) => escapeHtml(e)).join(" | ")}</p>` : "";
+    }
+
+    if (liveBadge) {
+      liveBadge.textContent = `Live updates every ${ANALYSIS_LIVE_REFRESH_SECONDS}s · ${new Date().toLocaleTimeString()}`;
+    }
+
+    const maxTickers = payload.max_tickers || 8;
+    const atCap = tickers.length >= maxTickers;
+    if (addInput instanceof HTMLInputElement) addInput.disabled = atCap;
+    if (addForm) {
+      const submitBtn = addForm.querySelector('button[type="submit"]');
+      if (submitBtn instanceof HTMLButtonElement) submitBtn.disabled = atCap;
+    }
+    if (capNote) capNote.textContent = atCap ? `Limit reached (${maxTickers} tickers) - remove one to add another.` : "";
+  };
+
+  const load = async () => {
+    try {
+      const qs = firstLoad && focusTicker ? `?focus=${encodeURIComponent(focusTicker)}` : "";
+      firstLoad = false;
+      const payload = await requestJson(`/api/analysis/${section}/tickers${qs}`);
+      render(payload);
+    } catch (error) {
+      showToast(error.message, "error");
+    }
+  };
+
+  if (addForm instanceof HTMLFormElement) {
+    addForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const ticker = (addInput instanceof HTMLInputElement ? addInput.value : "").trim().toUpperCase();
+      if (!ticker) return;
+      try {
+        const payload = await requestJson(`/api/analysis/${section}/tickers`, {
+          method: "POST",
+          body: JSON.stringify({ ticker }),
+        });
+        render(payload);
+        if (addInput instanceof HTMLInputElement) addInput.value = "";
+        showToast(`${ticker} added.`, "success");
+      } catch (error) {
+        showToast(error.message, "error");
+      }
+    });
+  }
+
+  if (chipRow) {
+    chipRow.addEventListener("click", async (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const ticker = target.dataset.removeTicker;
+      if (!ticker) return;
+      try {
+        const payload = await requestJson(`/api/analysis/${section}/tickers/${encodeURIComponent(ticker)}`, {
+          method: "DELETE",
+        });
+        render(payload);
+      } catch (error) {
+        showToast(error.message, "error");
+      }
+    });
+  }
+
+  if (suggestionsList) {
+    suggestionsList.addEventListener("click", async (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement) || !target.classList.contains("add-analysis-suggestion")) return;
+      const ticker = target.dataset.suggestionTicker || "";
+      try {
+        const payload = await requestJson(`/api/analysis/${section}/tickers`, {
+          method: "POST",
+          body: JSON.stringify({ ticker }),
+        });
+        render(payload);
+        showToast(`${ticker} added.`, "success");
+      } catch (error) {
+        showToast(error.message, "error");
+      }
+    });
+  }
+
+  load();
+  window.setInterval(load, ANALYSIS_LIVE_REFRESH_SECONDS * 1000);
+};
+
 const bindMobileNav = () => {
   const sidebar = document.getElementById("sidebar");
   const backdrop = document.getElementById("sidebarBackdrop");
@@ -1539,6 +1769,7 @@ onReady(() => {
   bindWebullPositionsPage();
   bindAiChartMarks();
   bindScannerPage();
+  bindAnalysisSectionPage();
   bindOptionsSuggestions();
   bindSettingsPage();
   bindAccountHubPage();

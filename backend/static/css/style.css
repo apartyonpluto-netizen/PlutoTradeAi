@@ -3182,3 +3182,88 @@ select:focus {
     border-radius: 999px;
     background: var(--accent-primary);
 }
+
+.analysis-list-editor {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: var(--space-3);
+}
+
+.ticker-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 6px 5px 12px;
+    border-radius: 999px;
+    border: 1px solid rgba(180, 116, 255, 0.4);
+    background: rgba(137, 83, 198, 0.15);
+    color: var(--text-primary);
+    font-size: 0.8rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+
+.ticker-chip-remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: none;
+    background: rgba(248, 244, 255, 0.1);
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 0.75rem;
+    line-height: 1;
+    padding: 0;
+}
+
+.ticker-chip-remove:hover {
+    background: rgba(255, 108, 108, 0.35);
+    color: var(--text-primary);
+}
+
+.ticker-add-form {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.ticker-add-form input {
+    width: 110px;
+    padding: 7px 10px;
+    border-radius: 999px;
+    border: 1px dashed rgba(180, 116, 255, 0.45);
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+}
+
+.ticker-add-form button {
+    padding: 7px 14px;
+    border-radius: 999px;
+    font-size: 0.8rem;
+}
+
+.analysis-cap-note {
+    width: 100%;
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    margin-top: 2px;
+}
+
+.analysis-suggestions {
+    margin-top: var(--space-3);
+}
+
+.analysis-suggestions .alert-row {
+    align-items: center;
+}
+
+.analysis-suggestions .alert-row b {
+    color: var(--text-primary);
+}

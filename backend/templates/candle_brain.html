@@ -1,29 +1,29 @@
 {% extends "base.html" %}
 {% block title %}PlutoTrade AI · Candle Brain{% endblock %}
 {% block content %}
-<section class="panel">
+<section class="panel" data-analysis-section="{{ analysis_section }}" data-analysis-empty-label="No Candle Signals - add a ticker below.">
     <div class="panel-head">
         <h3>Candle Brain</h3>
-        <span>Pattern Recognition</span>
+        <span data-analysis-live-badge>Live updates every 8s</span>
     </div>
-    {% if pattern_errors %}<p class="error">{{ pattern_errors|join(' | ') }}</p>{% endif %}
-    <div class="price-map-list">
-        {% for row in candle_rows %}
-        <article class="price-map-card">
-            <div class="price-map-head"><h4>{{ row.ticker }}</h4><span>{{ row.last_updated }}</span></div>
-            <div class="price-map-grid">
-                {% for pattern in row.patterns[:8] %}
-                <div><small>{{ pattern.pattern }}</small><b>{{ (pattern.confidence * 100)|round|int }}%</b></div>
-                {% endfor %}
-            </div>
-        </article>
-        {% else %}
-        <article class="future-platform-card">
-            <h4>No Candle Signals</h4>
-            <p>Waiting for market data.</p>
-            <span>Standby</span>
-        </article>
-        {% endfor %}
+    <div data-analysis-errors></div>
+
+    <div class="analysis-list-editor" data-analysis-chips></div>
+    <form class="ticker-add-form" data-analysis-add-form>
+        <input type="text" name="ticker" placeholder="Add ticker" maxlength="8" required>
+        <button type="submit" class="ghost-button">Add</button>
+    </form>
+    <p class="analysis-cap-note" data-analysis-cap-note></p>
+
+    <div class="price-map-list" data-analysis-rows>
+        <p class="muted">Loading candle signals...</p>
+    </div>
+</section>
+
+<section class="panel analysis-suggestions">
+    <div class="panel-head"><h3>AI Suggestions</h3><span>Scanner-driven picks not already in this list</span></div>
+    <div data-analysis-suggestions>
+        <p class="muted">Loading suggestions...</p>
     </div>
 </section>
 {% endblock %}

@@ -1,32 +1,29 @@
 {% extends "base.html" %}
 {% block title %}PlutoTrade AI · Support & Resistance{% endblock %}
 {% block content %}
-<section class="panel">
-    <div class="panel-head"><h3>Reversal Map</h3><span>Support · Resistance · Invalidation</span></div>
-    {% if trend_errors %}<p class="error">{{ trend_errors|join(' | ') }}</p>{% endif %}
-    <div class="price-map-list">
-        {% for row in reversal_rows %}
-        <div class="price-map-card">
-            <div class="price-map-head">
-                <h4>{{ row.ticker }}</h4>
-                <span>${{ row.current_price }}</span>
-            </div>
-            <div class="price-map-grid">
-                <div><small>Support</small><b>${{ row.support }}</b></div>
-                <div><small>Resistance</small><b>${{ row.resistance }}</b></div>
-                <div><small>Breakout Price</small><b>${{ row.breakout_price }}</b></div>
-                <div><small>Breakdown Price</small><b>${{ row.breakdown_price }}</b></div>
-                <div><small>Reversal Zone</small><b>{{ row.reversal_zone }}</b></div>
-                <div><small>Target Zone</small><b>{{ row.target_zone }}</b></div>
-                <div><small>Suggested Entry</small><b>${{ row.suggested_entry }}</b></div>
-                <div><small>Suggested Stop</small><b>${{ row.suggested_stop }}</b></div>
-                <div><small>Invalidation</small><b>${{ row.invalidation_level }}</b></div>
-            </div>
-            <p class="ai-context">{{ row.setup_explanation }}</p>
-        </div>
-        {% else %}
-        <p class="muted">No reversal rows available.</p>
-        {% endfor %}
+<section class="panel" data-analysis-section="{{ analysis_section }}" data-analysis-empty-label="No reversal rows available - add a ticker below.">
+    <div class="panel-head">
+        <h3>Reversal Map</h3>
+        <span data-analysis-live-badge>Live updates every 8s</span>
+    </div>
+    <div data-analysis-errors></div>
+
+    <div class="analysis-list-editor" data-analysis-chips></div>
+    <form class="ticker-add-form" data-analysis-add-form>
+        <input type="text" name="ticker" placeholder="Add ticker" maxlength="8" required>
+        <button type="submit" class="ghost-button">Add</button>
+    </form>
+    <p class="analysis-cap-note" data-analysis-cap-note></p>
+
+    <div class="price-map-list" data-analysis-rows>
+        <p class="muted">Loading reversal map...</p>
+    </div>
+</section>
+
+<section class="panel analysis-suggestions">
+    <div class="panel-head"><h3>AI Suggestions</h3><span>Scanner-driven picks not already in this list</span></div>
+    <div data-analysis-suggestions>
+        <p class="muted">Loading suggestions...</p>
     </div>
 </section>
 {% endblock %}
