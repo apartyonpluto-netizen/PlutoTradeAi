@@ -3098,3 +3098,87 @@ select:focus {
 .auth-switch a {
     color: var(--accent);
 }
+
+/* Risk Limits sliders - smooth range inputs, live % + $ preview, no boxes/dropdowns */
+.risk-slider-stack {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    margin-top: var(--space-3);
+}
+
+.risk-slider-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.risk-slider-label {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+}
+
+.risk-slider-label b {
+    color: var(--text-primary);
+    font-size: 1rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.risk-slider-preview {
+    margin: 0;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+}
+
+.risk-slider-row input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 6px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent-primary) var(--slider-fill, 50%), var(--bg-elevated-soft) var(--slider-fill, 50%));
+    outline: none;
+    cursor: pointer;
+}
+
+.risk-slider-row input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--text-primary);
+    border: 3px solid var(--accent-primary);
+    box-shadow: var(--shadow-1);
+    cursor: pointer;
+    transition: transform 0.15s ease;
+}
+
+.risk-slider-row input[type="range"]::-webkit-slider-thumb:hover {
+    transform: scale(1.15);
+}
+
+.risk-slider-row input[type="range"]::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--text-primary);
+    border: 3px solid var(--accent-primary);
+    box-shadow: var(--shadow-1);
+    cursor: pointer;
+}
+
+.risk-slider-row input[type="range"]::-moz-range-track {
+    height: 6px;
+    border-radius: 999px;
+    background: var(--bg-elevated-soft);
+}
+
+.risk-slider-row input[type="range"]::-moz-range-progress {
+    height: 6px;
+    border-radius: 999px;
+    background: var(--accent-primary);
+}

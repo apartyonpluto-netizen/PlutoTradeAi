@@ -63,8 +63,8 @@
     <div class="panel-head"><h3>Autonomy Settings</h3></div>
     <div class="price-map-grid">
         <div><small>Mode</small><b>{{ autonomy_status.current_mode }}</b></div>
-        <div><small>Daily Loss Limit</small><b>${{ "{:,.2f}".format(autonomy_status.daily_loss_limit|float) }}</b></div>
-        <div><small>Max Trade Size</small><b>${{ "{:,.2f}".format(autonomy_status.max_trade_size|float) }}</b></div>
+        <div><small>Daily Loss Limit</small><b>{{ autonomy_status.daily_loss_limit_percent }}% of balance</b></div>
+        <div><small>Risk Per Trade</small><b>{{ autonomy_status.risk_percent_of_balance }}% of balance</b></div>
         <div><small>Max Positions</small><b>{{ autonomy_status.max_positions }}</b></div>
         <div><small>Emergency Stop</small><b>{{ "Enabled" if autonomy_status.emergency_stop_enabled else "Off" }}</b></div>
     </div>

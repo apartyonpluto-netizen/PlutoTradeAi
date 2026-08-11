@@ -34,8 +34,8 @@ def _default_settings() -> Dict[str, object]:
         "live_trading_enabled": False,
         "paper_trading_enabled": False,
         "approval_required": False,
-        "daily_loss_limit": global_defaults["default_daily_loss_limit"],
-        "max_trade_size": global_defaults["default_max_trade_size"],
+        "daily_loss_limit_percent": global_defaults["default_daily_loss_limit_percent"],
+        "risk_percent_of_balance": global_defaults["default_risk_percent_of_balance"],
         "max_positions": global_defaults["default_max_positions"],
         "emergency_stop_enabled": False,
         "last_mode_change": now,
@@ -100,19 +100,19 @@ def set_mode(user_id: str, mode: str, reason: str = "") -> Dict[str, object]:
 
 def update_risk_settings(
     user_id: str,
-    daily_loss_limit: float | None = None,
-    max_trade_size: float | None = None,
+    daily_loss_limit_percent: float | None = None,
+    risk_percent_of_balance: float | None = None,
     max_positions: int | None = None,
 ) -> Dict[str, object]:
     settings = _load(user_id)
-    if daily_loss_limit is not None:
-        if daily_loss_limit < 0:
-            raise ValueError("Daily loss limit must be zero or positive.")
-        settings["daily_loss_limit"] = float(daily_loss_limit)
-    if max_trade_size is not None:
-        if max_trade_size < 0:
-            raise ValueError("Max trade size must be zero or positive.")
-        settings["max_trade_size"] = float(max_trade_size)
+    if daily_loss_limit_percent is not None:
+        if not (0 <= daily_loss_limit_percent <= 100):
+            raise ValueError("Daily loss limit percent must be between 0 and 100.")
+        settings["daily_loss_limit_percent"] = float(daily_loss_limit_percent)
+    if risk_percent_of_balance is not None:
+        if not (0 <= risk_percent_of_balance <= 100):
+            raise ValueError("Risk percent of balance must be between 0 and 100.")
+        settings["risk_percent_of_balance"] = float(risk_percent_of_balance)
     if max_positions is not None:
         if max_positions < 0:
             raise ValueError("Max positions must be zero or positive.")

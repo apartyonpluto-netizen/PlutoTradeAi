@@ -1547,6 +1547,7 @@ def account_hub_page() -> str:
     context["accounts"] = get_accounts(user_id)
     context["webull_configured"] = is_webull_configured(user_id)
     context["anthropic_configured"] = is_anthropic_configured(user_id)
+    context["webull_balance"] = _get_live_webull_balance(user_id)
     return render_template("account_hub.html", **context)
 
 
@@ -2170,8 +2171,8 @@ def api_autonomy_risk_settings():
     try:
         result = update_risk_settings(
             _current_user_id(),
-            daily_loss_limit=payload.get("daily_loss_limit"),
-            max_trade_size=payload.get("max_trade_size"),
+            daily_loss_limit_percent=payload.get("daily_loss_limit_percent"),
+            risk_percent_of_balance=payload.get("risk_percent_of_balance"),
             max_positions=payload.get("max_positions"),
         )
     except (ValueError, TypeError) as error:
@@ -2435,20 +2436,31 @@ def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
     if risk_settings.get("emergency_stop_enabled"):
         raise ValidationError("Emergency stop is enabled - reset it in Account Hub before running the scan.")
 
-    daily_loss_limit = float(risk_settings.get("daily_loss_limit", 0) or 0)
-    if daily_loss_limit > 0:
-        balance = webull_api.get_account_balance(creds["app_key"], creds["app_secret"], account_id)
+    # Risk limits are set as a percent of balance, not a flat dollar amount,
+    # so they stay meaningful as the balance changes rather than becoming a
+    # stale number - computed here off the same virtual balance shown on the
+    # dashboard, not Webull's real (inflated) sandbox seed.
+    balance = webull_api.get_account_balance(creds["app_key"], creds["app_secret"], account_id)
+    real_net_liquidation_value = float(balance.get("total_net_liquidation_value", 0) or 0)
+    virtual_balance = get_virtual_net_account_value(user_id, real_net_liquidation_value)
+    current_balance = virtual_balance if virtual_balance is not None else real_net_liquidation_value
+
+    daily_loss_limit_percent = float(risk_settings.get("daily_loss_limit_percent", 0) or 0)
+    if daily_loss_limit_percent > 0:
+        daily_loss_limit = current_balance * (daily_loss_limit_percent / 100)
         day_pnl = float(balance.get("total_day_profit_loss", 0) or 0)
         if day_pnl <= -daily_loss_limit:
             raise ValidationError(
-                f"Daily loss limit reached (today's P/L ${day_pnl:.2f} vs -${daily_loss_limit:.2f} limit). No new trades until tomorrow."
+                f"Daily loss limit reached (today's P/L ${day_pnl:.2f} vs -${daily_loss_limit:.2f} limit, "
+                f"{daily_loss_limit_percent:.1f}% of ${current_balance:,.2f} balance). No new trades until tomorrow."
             )
 
     max_positions = int(risk_settings.get("max_positions", 0) or 0)
     open_position_count = len(webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id))
     available_position_slots = max(0, max_positions - open_position_count) if max_positions > 0 else OVERNIGHT_MAX_ORDERS_PER_RUN
 
-    max_trade_size = float(risk_settings.get("max_trade_size", 0) or 0)
+    risk_percent_of_balance = float(risk_settings.get("risk_percent_of_balance", 0) or 0)
+    max_trade_size = current_balance * (risk_percent_of_balance / 100) if risk_percent_of_balance > 0 else 0
 
     context = _build_page_context(include_reversal=True, include_trend=True)
     opportunities = context.get("upcoming_opportunities", [])

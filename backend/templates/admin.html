@@ -113,12 +113,12 @@
             <input type="number" id="gsConfidence" min="0" max="100" value="{{ global_settings.default_ai_confidence_threshold }}">
         </label>
         <label>
-            Default daily loss limit ($)
-            <input type="number" id="gsDailyLossLimit" min="0" step="1" value="{{ global_settings.default_daily_loss_limit }}">
+            Default daily loss limit (% of balance)
+            <input type="number" id="gsDailyLossLimit" min="0" max="100" step="0.5" value="{{ global_settings.default_daily_loss_limit_percent }}">
         </label>
         <label>
-            Default max trade size ($)
-            <input type="number" id="gsMaxTradeSize" min="0" step="1" value="{{ global_settings.default_max_trade_size }}">
+            Default risk per trade (% of balance)
+            <input type="number" id="gsMaxTradeSize" min="0" max="100" step="0.5" value="{{ global_settings.default_risk_percent_of_balance }}">
         </label>
         <label>
             Default max positions
@@ -288,8 +288,8 @@
                 await callAdminApi("/api/admin/global-settings", {
                     registration_open: document.getElementById("gsRegistrationOpen").checked,
                     default_ai_confidence_threshold: Number(document.getElementById("gsConfidence").value),
-                    default_daily_loss_limit: Number(document.getElementById("gsDailyLossLimit").value),
-                    default_max_trade_size: Number(document.getElementById("gsMaxTradeSize").value),
+                    default_daily_loss_limit_percent: Number(document.getElementById("gsDailyLossLimit").value),
+                    default_risk_percent_of_balance: Number(document.getElementById("gsMaxTradeSize").value),
                     default_max_positions: Number(document.getElementById("gsMaxPositions").value),
                 });
                 showToast("Global settings saved.", "success");

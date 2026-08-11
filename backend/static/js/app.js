@@ -998,24 +998,79 @@ const bindAutonomyControls = () => {
     });
   }
 
+  const riskStack = document.querySelector(".risk-slider-stack");
   const saveRiskBtn = document.getElementById("saveRiskSettingsButton");
-  const dailyLossInput = document.getElementById("riskDailyLossLimit");
-  const maxTradeSizeInput = document.getElementById("riskMaxTradeSize");
-  const maxPositionsInput = document.getElementById("riskMaxPositions");
+  const riskPercentSlider = document.getElementById("riskPercentSlider");
+  const dailyLossPercentSlider = document.getElementById("dailyLossPercentSlider");
+  const maxPositionsSlider = document.getElementById("maxPositionsSlider");
+  const confidenceThresholdSlider = document.getElementById("confidenceThresholdSlider");
+
+  if (riskStack instanceof HTMLElement) {
+    const balance = Number(riskStack.dataset.balance) || 2000;
+    const money = (value) => "$" + value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+    const wireSlider = (slider, valueLabelId, onInput) => {
+      if (!(slider instanceof HTMLInputElement)) return;
+      const valueLabel = document.getElementById(valueLabelId);
+      const update = () => {
+        const min = Number(slider.min) || 0;
+        const max = Number(slider.max) || 100;
+        const percent = ((Number(slider.value) - min) / (max - min)) * 100;
+        slider.style.setProperty("--slider-fill", percent + "%");
+        onInput(slider, valueLabel);
+      };
+      slider.addEventListener("input", update);
+      update();
+    };
+
+    wireSlider(riskPercentSlider, "riskPercentValue", (slider, label) => {
+      const percent = Number(slider.value);
+      if (label) label.textContent = percent + "%";
+      const preview = document.getElementById("riskPercentPreview");
+      if (preview) preview.textContent = "≈ " + money(balance * (percent / 100)) + " per trade at your current balance";
+    });
+
+    wireSlider(dailyLossPercentSlider, "dailyLossPercentValue", (slider, label) => {
+      const percent = Number(slider.value);
+      if (label) label.textContent = percent + "%";
+      const preview = document.getElementById("dailyLossPercentPreview");
+      if (preview) preview.textContent = "≈ " + money(balance * (percent / 100)) + " stop-out today";
+    });
+
+    wireSlider(maxPositionsSlider, "maxPositionsValue", (slider, label) => {
+      if (label) label.textContent = slider.value;
+    });
+
+    wireSlider(confidenceThresholdSlider, "confidenceThresholdValue", (slider, label) => {
+      if (label) label.textContent = slider.value + "%";
+    });
+  }
+
   if (saveRiskBtn instanceof HTMLButtonElement) {
     saveRiskBtn.addEventListener("click", async () => {
+      saveRiskBtn.disabled = true;
       try {
-        await requestJson("/api/autonomy/risk-settings", {
-          method: "POST",
-          body: JSON.stringify({
-            daily_loss_limit: dailyLossInput instanceof HTMLInputElement ? Number(dailyLossInput.value) : undefined,
-            max_trade_size: maxTradeSizeInput instanceof HTMLInputElement ? Number(maxTradeSizeInput.value) : undefined,
-            max_positions: maxPositionsInput instanceof HTMLInputElement ? Number(maxPositionsInput.value) : undefined,
+        await Promise.all([
+          requestJson("/api/autonomy/risk-settings", {
+            method: "POST",
+            body: JSON.stringify({
+              daily_loss_limit_percent: dailyLossPercentSlider instanceof HTMLInputElement ? Number(dailyLossPercentSlider.value) : undefined,
+              risk_percent_of_balance: riskPercentSlider instanceof HTMLInputElement ? Number(riskPercentSlider.value) : undefined,
+              max_positions: maxPositionsSlider instanceof HTMLInputElement ? Number(maxPositionsSlider.value) : undefined,
+            }),
           }),
-        });
+          requestJson("/api/settings", {
+            method: "POST",
+            body: JSON.stringify({
+              ai_confidence_threshold: confidenceThresholdSlider instanceof HTMLInputElement ? Number(confidenceThresholdSlider.value) : undefined,
+            }),
+          }),
+        ]);
         showToast("Risk limits saved.", "success");
       } catch (error) {
         showToast(error.message, "error");
+      } finally {
+        saveRiskBtn.disabled = false;
       }
     });
   }

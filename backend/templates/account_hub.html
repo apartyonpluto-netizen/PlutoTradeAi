@@ -197,22 +197,34 @@
         <h3>Risk Limits</h3>
         <span>Enforced on every autonomous scan</span>
     </div>
-    <p class="muted">These caps are checked before any order is placed &mdash; a limit hit skips the trade (or the whole scan) with the reason logged in Trade Journal.</p>
-    <div class="grid-form">
-        <label>
-            Daily loss limit ($)
-            <input type="number" id="riskDailyLossLimit" min="0" step="1" value="{{ autonomy_status.daily_loss_limit if autonomy_status else 500 }}">
-        </label>
-        <label>
-            Max trade size ($)
-            <input type="number" id="riskMaxTradeSize" min="0" step="1" value="{{ autonomy_status.max_trade_size if autonomy_status else 250 }}">
-        </label>
-        <label>
-            Max open positions
-            <input type="number" id="riskMaxPositions" min="0" step="1" value="{{ autonomy_status.max_positions if autonomy_status else 3 }}">
-        </label>
-        <button type="button" id="saveRiskSettingsButton">Save Risk Limits</button>
+    <p class="muted">
+        Set as a percent of your account balance instead of a fixed dollar figure, so they stay meaningful as your
+        balance changes. Checked before any order is placed &mdash; a limit hit skips the trade (or the whole scan)
+        with the reason logged in Trade Journal.
+    </p>
+    <div class="risk-slider-stack"
+         data-balance="{{ webull_balance.balance.net_liquidation_value if webull_balance and webull_balance.balance else 2000 }}">
+        <div class="risk-slider-row">
+            <div class="risk-slider-label"><span>Risk per trade</span><b id="riskPercentValue">{{ autonomy_status.risk_percent_of_balance if autonomy_status else 5 }}%</b></div>
+            <input type="range" id="riskPercentSlider" min="0.5" max="25" step="0.5" value="{{ autonomy_status.risk_percent_of_balance if autonomy_status else 5 }}">
+            <p class="risk-slider-preview" id="riskPercentPreview">&nbsp;</p>
+        </div>
+        <div class="risk-slider-row">
+            <div class="risk-slider-label"><span>Daily loss limit</span><b id="dailyLossPercentValue">{{ autonomy_status.daily_loss_limit_percent if autonomy_status else 10 }}%</b></div>
+            <input type="range" id="dailyLossPercentSlider" min="1" max="50" step="0.5" value="{{ autonomy_status.daily_loss_limit_percent if autonomy_status else 10 }}">
+            <p class="risk-slider-preview" id="dailyLossPercentPreview">&nbsp;</p>
+        </div>
+        <div class="risk-slider-row">
+            <div class="risk-slider-label"><span>Max open positions</span><b id="maxPositionsValue">{{ autonomy_status.max_positions if autonomy_status else 3 }}</b></div>
+            <input type="range" id="maxPositionsSlider" min="1" max="20" step="1" value="{{ autonomy_status.max_positions if autonomy_status else 3 }}">
+        </div>
+        <div class="risk-slider-row">
+            <div class="risk-slider-label"><span>AI confidence threshold</span><b id="confidenceThresholdValue">{{ settings_payload.ai_confidence_threshold if settings_payload else 68 }}%</b></div>
+            <input type="range" id="confidenceThresholdSlider" min="0" max="99" step="1" value="{{ settings_payload.ai_confidence_threshold if settings_payload else 68 }}">
+            <p class="risk-slider-preview">Only setups scoring at or above this clear the autonomous scan.</p>
+        </div>
     </div>
+    <button type="button" id="saveRiskSettingsButton">Save Risk Limits</button>
 </section>
 
 <div class="setup-modal" id="autonomyWarningModal" aria-hidden="true">

@@ -14,8 +14,8 @@ def _defaults() -> Dict[str, Any]:
     return {
         "registration_open": True,
         "default_ai_confidence_threshold": 68,
-        "default_daily_loss_limit": 500.0,
-        "default_max_trade_size": 250.0,
+        "default_daily_loss_limit_percent": 10.0,
+        "default_risk_percent_of_balance": 5.0,
         "default_max_positions": 3,
     }
 
@@ -50,17 +50,17 @@ def update_global_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError("Confidence threshold must be between 0 and 100.")
         settings["default_ai_confidence_threshold"] = value
 
-    if "default_daily_loss_limit" in updates:
-        value = float(updates["default_daily_loss_limit"])
-        if value < 0:
-            raise ValueError("Daily loss limit cannot be negative.")
-        settings["default_daily_loss_limit"] = value
+    if "default_daily_loss_limit_percent" in updates:
+        value = float(updates["default_daily_loss_limit_percent"])
+        if not (0 <= value <= 100):
+            raise ValueError("Daily loss limit percent must be between 0 and 100.")
+        settings["default_daily_loss_limit_percent"] = value
 
-    if "default_max_trade_size" in updates:
-        value = float(updates["default_max_trade_size"])
-        if value < 0:
-            raise ValueError("Max trade size cannot be negative.")
-        settings["default_max_trade_size"] = value
+    if "default_risk_percent_of_balance" in updates:
+        value = float(updates["default_risk_percent_of_balance"])
+        if not (0 <= value <= 100):
+            raise ValueError("Risk percent of balance must be between 0 and 100.")
+        settings["default_risk_percent_of_balance"] = value
 
     if "default_max_positions" in updates:
         value = int(updates["default_max_positions"])
