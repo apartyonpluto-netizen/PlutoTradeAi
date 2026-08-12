@@ -160,6 +160,106 @@ def test_unknown_submission_state_resolves_to_entry_submitted_once_confirmed():
     assert entry["lifecycle_state"] == ol.ENTRY_FILLED
 
 
+# --- MANUALLY_RESOLVED_NO_ORDER: the human, evidence-based outcome ---------
+
+
+def test_unknown_submission_state_can_resolve_to_manually_resolved_no_order():
+    entry = {}
+    ol.initialize(entry)
+    ol.transition(entry, ol.UNKNOWN_SUBMISSION_STATE, error="timeout")
+    ol.transition(
+        entry, ol.MANUALLY_RESOLVED_NO_ORDER,
+        administrator="admin-1", reason="confirmed clean via all four checks",
+    )
+    assert entry["lifecycle_state"] == ol.MANUALLY_RESOLVED_NO_ORDER
+    assert entry["administrator"] == "admin-1"
+
+
+def test_manually_resolved_no_order_is_terminal():
+    assert ol.MANUALLY_RESOLVED_NO_ORDER in ol.TERMINAL_STATES
+    assert ol.is_transitional({"lifecycle_state": ol.MANUALLY_RESOLVED_NO_ORDER}) is False
+
+
+def test_manually_resolved_no_order_is_distinct_from_entry_failed():
+    # The whole point: a human's evidence-based judgment call is never the
+    # same claim as a broker's own definite rejection - they must not
+    # collapse into the same state.
+    assert ol.MANUALLY_RESOLVED_NO_ORDER != ol.ENTRY_FAILED
+    entry = {}
+    ol.initialize(entry)
+    ol.transition(entry, ol.UNKNOWN_SUBMISSION_STATE, error="timeout")
+    ol.transition(entry, ol.MANUALLY_RESOLVED_NO_ORDER, administrator="admin-1", reason="x")
+    assert entry["lifecycle_state"] != ol.ENTRY_FAILED
+
+
+@pytest.mark.parametrize(
+    "from_state",
+    [ol.ENTRY_SUBMITTED, ol.ENTRY_FILLED, ol.PROTECTION_CONFIRMED_ACTIVE, ol.ENTRY_FAILED, ol.CLOSED],
+)
+def test_manually_resolved_no_order_is_only_reachable_from_unknown_submission_state(from_state):
+    entry = {"lifecycle_state": from_state}
+    with pytest.raises(ValueError, match="Invalid order lifecycle transition"):
+        ol.transition(entry, ol.MANUALLY_RESOLVED_NO_ORDER)
+
+
+# --- MANUAL_LINK_IN_PROGRESS: the non-terminal manual-link marker ----------
+
+
+def test_unknown_submission_state_can_transition_to_manual_link_in_progress():
+    entry = {}
+    ol.initialize(entry)
+    ol.transition(entry, ol.UNKNOWN_SUBMISSION_STATE, error="timeout")
+    ol.transition(entry, ol.MANUAL_LINK_IN_PROGRESS, manual_resolution_id="res-1")
+    assert entry["lifecycle_state"] == ol.MANUAL_LINK_IN_PROGRESS
+    assert entry["manual_resolution_id"] == "res-1"
+
+
+def test_manual_link_in_progress_is_not_terminal():
+    assert ol.MANUAL_LINK_IN_PROGRESS not in ol.TERMINAL_STATES
+    assert ol.is_transitional({"lifecycle_state": ol.MANUAL_LINK_IN_PROGRESS}) is True
+
+
+def test_manual_link_in_progress_is_a_frozen_state():
+    assert ol.MANUAL_LINK_IN_PROGRESS in ol.FROZEN_STATES
+    assert ol.UNKNOWN_SUBMISSION_STATE in ol.FROZEN_STATES
+
+
+def test_manual_link_in_progress_can_advance_to_partially_filled_filled_or_failed():
+    for target in (ol.ENTRY_PARTIALLY_FILLED, ol.ENTRY_FILLED, ol.ENTRY_FAILED):
+        entry = {"lifecycle_state": ol.MANUAL_LINK_IN_PROGRESS}
+        ol.transition(entry, target)
+        assert entry["lifecycle_state"] == target
+
+
+def test_manual_link_in_progress_cannot_jump_straight_to_protection_states():
+    # _poll_fill_and_protect always passes through an ENTRY_* state first -
+    # MANUAL_LINK_IN_PROGRESS mirrors ENTRY_SUBMITTED's own first-jump set,
+    # nothing deeper in the chain.
+    for target in (ol.PROTECTION_PENDING, ol.PROTECTION_CONFIRMED_ACTIVE, ol.PROTECTION_FAILED, ol.CLOSED, ol.MANUALLY_RESOLVED_NO_ORDER):
+        entry = {"lifecycle_state": ol.MANUAL_LINK_IN_PROGRESS}
+        with pytest.raises(ValueError, match="Invalid order lifecycle transition"):
+            ol.transition(entry, target)
+
+
+@pytest.mark.parametrize(
+    "from_state",
+    [ol.ENTRY_SUBMITTED, ol.ENTRY_FILLED, ol.PROTECTION_CONFIRMED_ACTIVE, ol.ENTRY_FAILED, ol.CLOSED, ol.MANUALLY_RESOLVED_NO_ORDER],
+)
+def test_manual_link_in_progress_is_only_reachable_from_unknown_submission_state(from_state):
+    entry = {"lifecycle_state": from_state}
+    with pytest.raises(ValueError, match="Invalid order lifecycle transition"):
+        ol.transition(entry, ol.MANUAL_LINK_IN_PROGRESS)
+
+
+def test_frozen_states_are_a_subset_of_non_terminal_states():
+    # A frozen state that was somehow also terminal would mean an entry
+    # could get stuck blocking new autonomous entries forever, with no
+    # transition ever able to clear it - structurally impossible given how
+    # TERMINAL_STATES/FROZEN_STATES are each built, but worth asserting
+    # directly since the whole freeze mechanism depends on it.
+    assert ol.FROZEN_STATES.isdisjoint(ol.TERMINAL_STATES)
+
+
 def test_terminal_states_are_never_transitional():
     for state in ol.TERMINAL_STATES:
         assert ol.is_transitional({"lifecycle_state": state}) is False

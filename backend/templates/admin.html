@@ -36,8 +36,14 @@
         (a timeout, dropped connection, or similar) - the affected account's autonomous entries are frozen until this
         is resolved. Resolving ALWAYS re-checks order detail, open orders, positions, and order history fresh, right
         now, regardless of what's shown below - never trust a stale view. "Release" only succeeds if all four checks
-        come back clean; "Link" only succeeds if at least one of them found something. Every resolution is
-        permanently recorded in that user's audit trail.
+        come back completely clean (a check that fails, times out, or returns an incomplete/truncated result blocks
+        release just like finding a match would); "Link" only succeeds if a match was found that's strongly
+        correlated to this specific order (client order ID, or quantity/price/time-plausible), not merely a
+        same-ticker position that could belong to unrelated activity - and a linked filled or partially filled order
+        immediately enters normal fill-protection handling, it does not just clear the freeze. Every resolution
+        requires typed confirmation of the ticker and is written to a tamper-evident, hash-chained audit record
+        <strong>before</strong> the freeze is released - not a claim of immutability; anyone with direct disk access
+        could still alter the underlying file, but doing so is then detectable.
     </p>
     <table id="ambiguousSubmissionsTable">
         <thead><tr><th>User</th><th>Ticker</th><th>Ambiguous Since</th><th>Confirmations</th><th>Actions</th></tr></thead>
@@ -220,14 +226,22 @@
 
             const action = isRelease ? "release" : "link";
             const confirmMessage = isRelease
-                ? `Release ${ticker} for this user? This re-checks order detail, open orders, positions, and order history FRESH right now, and only succeeds if ALL FOUR come back clean. Proceeding will permanently unfreeze new autonomous entries for this account.`
-                : `Link ${ticker} for this user? This re-checks the broker fresh and only succeeds if something is actually found to link to.`;
+                ? `Release ${ticker} for this user? This re-checks order detail, open orders, positions, and order history FRESH right now, and only succeeds if ALL FOUR come back completely clean. Proceeding will unfreeze new autonomous entries for this account.`
+                : `Link ${ticker} for this user? This re-checks the broker fresh and only succeeds if a strongly-correlated match is found - a linked filled or partially filled order immediately enters protection handling.`;
             if (!window.confirm(confirmMessage)) return;
             const reason = window.prompt(
-                `Reason for this ${action} (required, recorded permanently in this user's audit trail):`
+                `Reason for this ${action} (required, written to a tamper-evident audit record):`
             );
             if (!reason || !reason.trim()) {
                 showToast("A reason is required - resolution cancelled.", "error");
+                return;
+            }
+            const confirmation = window.prompt(
+                `Type the ticker exactly (${ticker}) to confirm this ${action} - this is a deliberate check against ` +
+                `acting on the wrong row:`
+            );
+            if (!confirmation || confirmation.trim().toUpperCase() !== ticker.trim().toUpperCase()) {
+                showToast("Confirmation text did not match the ticker - resolution cancelled.", "error");
                 return;
             }
 
@@ -238,6 +252,7 @@
                     entry_client_order_id: entryClientOrderId,
                     action,
                     reason,
+                    confirmation,
                 });
                 row.remove();
                 showToast(`${ticker} ${action}d.`, "success");

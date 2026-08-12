@@ -463,5 +463,74 @@ def test_get_order_history_raises_on_malformed_orders_field():
     response.json.return_value = {"orders": "not-a-list"}
     client.order_v2.get_order_history.return_value = response
     with patch.object(webull_api, "_get_trade_client", return_value=client):
-        with pytest.raises(ValueError, match="malformed"):
+        with pytest.raises(ValueError, match="not a list"):
             webull_api.get_order_history("key", "secret", "acct1")
+
+
+def test_get_order_history_raises_on_non_dict_row():
+    client = MagicMock()
+    client.order_v2.get_order_history.return_value = _order_history_response([{"order_id": "a"}, "garbage-row"])
+    with patch.object(webull_api, "_get_trade_client", return_value=client):
+        with pytest.raises(ValueError, match="not a JSON object"):
+            webull_api.get_order_history("key", "secret", "acct1")
+
+
+def test_get_order_history_row_missing_order_id_fails_closed():
+    client = MagicMock()
+    client.order_v2.get_order_history.return_value = _order_history_response(
+        [{"order_id": "a"}, {"client_order_id": "b-only"}]
+    )
+    with patch.object(webull_api, "_get_trade_client", return_value=client):
+        with pytest.raises(ValueError, match="stable order_id"):
+            webull_api.get_order_history("key", "secret", "acct1")
+
+
+def test_get_order_history_walks_multiple_pages_until_a_short_page():
+    page_size = webull_api.ORDER_HISTORY_PAGE_SIZE
+    page_1 = [{"order_id": f"o{i}", "client_order_id": f"c{i}"} for i in range(page_size)]
+    page_2 = [{"order_id": "o-last", "client_order_id": "c-last"}]  # short - signals the end
+    client = MagicMock()
+    client.order_v2.get_order_history.side_effect = [_order_history_response(page_1), _order_history_response(page_2)]
+    with patch.object(webull_api, "_get_trade_client", return_value=client):
+        result = webull_api.get_order_history("key", "secret", "acct1")
+    assert len(result) == page_size + 1
+    assert client.order_v2.get_order_history.call_count == 2
+    second_call_kwargs = client.order_v2.get_order_history.call_args_list[1].kwargs
+    assert second_call_kwargs["last_order_id"] == f"o{page_size - 1}"
+    assert second_call_kwargs["last_client_order_id"] == f"c{page_size - 1}"
+
+
+def test_get_order_history_raises_if_the_broker_ignores_pagination_instead_of_returning_partial_results():
+    # A truncated "nothing found" here would wrongly justify releasing a
+    # capital freeze - see the function's docstring. Must raise, not
+    # silently return the one page it saw.
+    page_size = webull_api.ORDER_HISTORY_PAGE_SIZE
+    full_page = [{"order_id": f"o{i}", "client_order_id": f"c{i}"} for i in range(page_size)]
+    client = MagicMock()
+    client.order_v2.get_order_history.return_value = _order_history_response(full_page)  # identical every call
+    with patch.object(webull_api, "_get_trade_client", return_value=client):
+        with pytest.raises(ValueError, match="cursor did not advance"):
+            webull_api.get_order_history("key", "secret", "acct1")
+
+
+def test_get_order_history_raises_instead_of_silently_returning_a_truncated_result_when_pages_keep_growing():
+    page_size = webull_api.ORDER_HISTORY_PAGE_SIZE
+
+    def _endless_pages(account_id, page_size=None, start_date=None, end_date=None, last_order_id=None, last_client_order_id=None):
+        start = int(last_order_id[1:]) + 1 if last_order_id else 0
+        return _order_history_response([{"order_id": f"o{i}", "client_order_id": f"c{i}"} for i in range(start, start + page_size)])
+
+    client = MagicMock()
+    client.order_v2.get_order_history.side_effect = _endless_pages
+    with patch.object(webull_api, "_get_trade_client", return_value=client):
+        with pytest.raises(ValueError, match="exhausted the .*-page limit"):
+            webull_api.get_order_history("key", "secret", "acct1")
+    assert client.order_v2.get_order_history.call_count == webull_api._ORDER_HISTORY_MAX_PAGES
+
+
+def test_get_order_history_empty_orders_returns_empty_list():
+    client = MagicMock()
+    client.order_v2.get_order_history.return_value = _order_history_response([])
+    with patch.object(webull_api, "_get_trade_client", return_value=client):
+        result = webull_api.get_order_history("key", "secret", "acct1")
+    assert result == []

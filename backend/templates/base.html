@@ -173,6 +173,19 @@
         </div>
         {% endif %}
 
+        {% if admin_frozen_account_count %}
+        <div class="ambiguous-freeze-banner admin-wide-freeze-banner" role="alert" id="adminAmbiguousFreezeBanner">
+            <strong>{{ admin_frozen_account_count }} account{{ "s" if admin_frozen_account_count != 1 else "" }}
+            platform-wide {{ "are" if admin_frozen_account_count != 1 else "is" }} frozen on an unresolved ambiguous
+            order submission.</strong>
+            This is visible only to administrators and reflects every account, not just this one. Existing
+            positions on affected accounts are still monitored and protected normally; only new autonomous entries
+            are paused. <a href="{{ url_for('admin_page') }}">Review and resolve in the admin panel.</a> This
+            banner is not a notification and cannot be dismissed - it clears automatically once every account is
+            resolved.
+        </div>
+        {% endif %}
+
         {% block content %}{% endblock %}
     </main>
 </div>

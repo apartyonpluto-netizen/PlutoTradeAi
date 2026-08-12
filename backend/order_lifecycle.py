@@ -27,6 +27,32 @@ CLOSED = "closed"
 # types are told apart, and _reconcile_unknown_submission for how this
 # eventually gets resolved.
 UNKNOWN_SUBMISSION_STATE = "unknown_submission_state"
+# A human administrator manually determined - via mandatory fresh broker
+# checks, not a broker response - that no order or position exists for an
+# entry stuck in UNKNOWN_SUBMISSION_STATE, and released its capital
+# reservation. Deliberately its OWN state, never collapsed into
+# ENTRY_FAILED: ENTRY_FAILED specifically means the BROKER told this app
+# the order failed (a ValueError/DefiniteOrderRejection from a real
+# response) - conflating a human's evidence-based judgment call with that
+# would misrepresent the actual source and strength of the claim to anyone
+# reading the record later. See _resolve_ambiguous_submission in app.py -
+# it preserves the entry's original ambiguity fields (error,
+# first_definite_rejection_at, definite_rejection_count) AND records the
+# evidence snapshot, administrator, and reason directly on the entry
+# itself, not only in the separate audit log.
+MANUALLY_RESOLVED_NO_ORDER = "manually_resolved_no_order"
+# The non-terminal, in-progress marker for a manual "link" resolution
+# (_resolve_ambiguous_submission in app.py) between the moment it's
+# persisted - deliberately BEFORE any polling or protective-order
+# placement begins - and the moment fill-confirmation/protection
+# concludes. Distinct from ENTRY_SUBMITTED so this account's new-entry
+# freeze (see FROZEN_STATES) stays keyed to an explicit, purpose-specific
+# state rather than overloading a state that also means "a normal
+# autonomous entry was just placed" - and so restart recovery
+# (_recover_incomplete_manual_resolutions) can tell "an admin's manual
+# link is mid-flight" apart from every other reason an entry might be
+# sitting in ENTRY_SUBMITTED.
+MANUAL_LINK_IN_PROGRESS = "manual_link_in_progress"
 
 ALL_STATES = {
     ENTRY_SUBMITTED,
@@ -38,14 +64,30 @@ ALL_STATES = {
     PROTECTION_FAILED,
     CLOSED,
     UNKNOWN_SUBMISSION_STATE,
+    MANUALLY_RESOLVED_NO_ORDER,
+    MANUAL_LINK_IN_PROGRESS,
 }
+
+# States that must block every NEW autonomous entry for the account (see
+# _has_unresolved_ambiguous_submission_locally in app.py) - not just
+# UNKNOWN_SUBMISSION_STATE itself, but also a manual link resolution
+# that's still mid-flight, since that entry's real fill/protection
+# outcome isn't knowable yet either. Note this is necessary but not
+# SUFFICIENT for the freeze predicate in app.py - a resolution whose
+# audit trail never durably confirmed completion (see
+# ambiguous_resolution_audit.find_incomplete_resolutions) must keep
+# blocking new entries even after the affected entry's own
+# lifecycle_state has already moved past everything in this set.
+FROZEN_STATES = {UNKNOWN_SUBMISSION_STATE, MANUAL_LINK_IN_PROGRESS}
 
 # Terminal states need no further monitoring. Everything else is
 # "transitional" - the set the fast monitor and restart-recovery scan both
 # look for (see monitor scan logic in app.py / order_monitor.py).
 # UNKNOWN_SUBMISSION_STATE is deliberately NOT terminal - an order left
 # there is exactly what needs monitoring most, not less.
-TERMINAL_STATES = {ENTRY_FAILED, CLOSED}
+# MANUALLY_RESOLVED_NO_ORDER IS terminal - a human, backed by fresh
+# evidence, already concluded there is nothing left to monitor.
+TERMINAL_STATES = {ENTRY_FAILED, CLOSED, MANUALLY_RESOLVED_NO_ORDER}
 
 VALID_TRANSITIONS: Dict[str, set] = {
     ENTRY_SUBMITTED: {ENTRY_PARTIALLY_FILLED, ENTRY_FILLED, ENTRY_FAILED, UNKNOWN_SUBMISSION_STATE},
@@ -56,15 +98,37 @@ VALID_TRANSITIONS: Dict[str, set] = {
     PROTECTION_FAILED: {PROTECTION_PENDING, CLOSED},
     ENTRY_FAILED: set(),
     CLOSED: set(),
-    # Reconciliation (_reconcile_unknown_submission) has three outcomes:
-    # confirms the order reached the broker and is still live, resuming
-    # normal fill tracking from ENTRY_SUBMITTED; confirms - via a well-formed
-    # DefiniteOrderRejection, or a successful lookup whose status is
-    # CANCELLED/FAILED - that it definitely never went through (or didn't
-    # survive), resolving straight to ENTRY_FAILED without passing back
-    # through ENTRY_SUBMITTED first; or still can't tell, and self-loops to
-    # record another audit-trail entry without forcing a resolution.
-    UNKNOWN_SUBMISSION_STATE: {ENTRY_SUBMITTED, ENTRY_FAILED, UNKNOWN_SUBMISSION_STATE},
+    MANUALLY_RESOLVED_NO_ORDER: set(),
+    # Reconciliation (_reconcile_unknown_submission) has three AUTOMATIC
+    # outcomes: confirms the order reached the broker and is still live,
+    # resuming normal fill tracking from ENTRY_SUBMITTED; confirms - via a
+    # well-formed DefiniteOrderRejection, or a successful lookup whose
+    # status is CANCELLED/FAILED - that it definitely never went through
+    # (or didn't survive), resolving straight to ENTRY_FAILED without
+    # passing back through ENTRY_SUBMITTED first; or still can't tell, and
+    # self-loops to record another audit-trail entry without forcing a
+    # resolution. MANUALLY_RESOLVED_NO_ORDER and MANUAL_LINK_IN_PROGRESS
+    # are the two HUMAN outcomes - see _resolve_ambiguous_submission in
+    # app.py, reachable only through that function's mandatory-fresh-
+    # evidence gate, never automatically.
+    UNKNOWN_SUBMISSION_STATE: {
+        ENTRY_SUBMITTED,
+        ENTRY_FAILED,
+        UNKNOWN_SUBMISSION_STATE,
+        MANUALLY_RESOLVED_NO_ORDER,
+        MANUAL_LINK_IN_PROGRESS,
+    },
+    # Mirrors ENTRY_SUBMITTED's own first-jump target set (minus
+    # UNKNOWN_SUBMISSION_STATE, which a manual link resumption never goes
+    # back into) - _poll_fill_and_protect's first transition call, invoked
+    # directly against an entry sitting in MANUAL_LINK_IN_PROGRESS (see
+    # _resolve_ambiguous_submission and _recover_incomplete_manual_resolutions
+    # in app.py), lands on exactly one of these three. If nothing fills
+    # within the bounded poll window, _poll_fill_and_protect returns
+    # without transitioning at all - the entry stays MANUAL_LINK_IN_PROGRESS
+    # (still frozen, still transitional), ready for a later scan's restart
+    # recovery to poll again.
+    MANUAL_LINK_IN_PROGRESS: {ENTRY_PARTIALLY_FILLED, ENTRY_FILLED, ENTRY_FAILED},
 }
 
 

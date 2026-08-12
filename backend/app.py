@@ -6,6 +6,7 @@ import math
 import os
 import secrets as secrets_module
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from datetime import datetime, timedelta, timezone
@@ -98,7 +99,14 @@ if __package__:
     from . import order_lifecycle as ol
     from .anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from .autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
-    from .autonomy.ambiguous_resolution_audit import list_ambiguous_resolution_audit, record_ambiguous_resolution_audit
+    from .autonomy.ambiguous_resolution_audit import (
+        find_incomplete_resolutions,
+        list_ambiguous_resolution_audit,
+        record_ambiguous_resolution_audit,
+        RESOLUTION_PHASE_COMPLETED,
+        RESOLUTION_PHASE_FAILED,
+        RESOLUTION_PHASE_STARTED,
+    )
     from .backtest_engine import run_backtest
     from .calibration import get_calibration, start_calibration
     from .market_scanner import scan_market
@@ -210,7 +218,14 @@ else:
     import order_lifecycle as ol
     from anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
-    from autonomy.ambiguous_resolution_audit import list_ambiguous_resolution_audit, record_ambiguous_resolution_audit
+    from autonomy.ambiguous_resolution_audit import (
+        find_incomplete_resolutions,
+        list_ambiguous_resolution_audit,
+        record_ambiguous_resolution_audit,
+        RESOLUTION_PHASE_COMPLETED,
+        RESOLUTION_PHASE_FAILED,
+        RESOLUTION_PHASE_STARTED,
+    )
     from backtest_engine import run_backtest
     from calibration import get_calibration, start_calibration
     from market_scanner import scan_market
@@ -742,6 +757,7 @@ def api_admin_resolve_ambiguous_submission():
             entry_client_order_id=str(payload.get("entry_client_order_id", "")),
             action=str(payload.get("action", "")),
             reason=str(payload.get("reason", "")),
+            confirmation=str(payload.get("confirmation", "")),
         )
     except ValidationError as error:
         return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
@@ -1549,6 +1565,13 @@ def _build_page_context(
         # this banner (or the actual entry freeze it reflects) go away -
         # only _resolve_ambiguous_submission can do that.
         "has_unresolved_ambiguous_submission": _has_unresolved_ambiguous_submission_locally(user_id),
+        # Admin-only, system-wide variant of the same banner - see
+        # _count_users_with_unresolved_ambiguous_submissions. Zero for a
+        # non-admin viewer, so base.html's admin-wide banner block is a
+        # simple truthiness check with no separate role check needed there.
+        "admin_frozen_account_count": (
+            _count_users_with_unresolved_ambiguous_submissions() if is_admin(user_id) else 0
+        ),
     }
     if include_trusted_accounts:
         context["trusted_accounts"] = get_trusted_accounts(user_id)
@@ -3784,17 +3807,305 @@ def _reconcile_unknown_submissions(user_id: str, creds: Dict[str, str], account_
     return any(order.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE for order in pending)
 
 
+def _recover_incomplete_manual_resolutions(user_id: str, creds: Dict[str, str], account_id: str) -> bool:
+    """Runs at the start of every scan, alongside _reconcile_unknown_submissions,
+    to resume any manual resolution transaction (_resolve_ambiguous_submission)
+    that was interrupted - by a crash, a worker restart, or any other
+    process death - somewhere between writing its resolution_started audit
+    record and successfully writing resolution_completed. See
+    ambiguous_resolution_audit.find_incomplete_resolutions for exactly what
+    "interrupted" means (an orphaned resolution_started record with no
+    matching completed/failed record later in the chain) - the same
+    orphaned-record signal is ALSO the durable freeze marker consulted by
+    _has_unresolved_ambiguous_submission_locally, independent of whatever
+    lifecycle_state the affected entry itself currently shows.
+
+    Recovery is decided by the affected entry's CURRENT on-disk
+    lifecycle_state, not by which stage the failure record (if one even
+    exists) says it broke at - the state on disk is ground truth for what
+    actually happened; the failure record is only ever a hint:
+      - MANUAL_LINK_IN_PROGRESS: the link transaction's poll/protect step
+        never finished. Resuming means calling _poll_fill_and_protect
+        again - safe to simply retry (see _resolve_ambiguous_submission's
+        docstring on why resubmitting a protective order under the same
+        deterministic client_order_id is never a duplicate), then
+        persisting the result and writing resolution_completed to close
+        the transaction out.
+      - UNKNOWN_SUBMISSION_STATE: the crash landed before step 1 (persisting
+        MANUAL_LINK_IN_PROGRESS / MANUALLY_RESOLVED_NO_ORDER) ever
+        completed - the entry is untouched and safely back to needing a
+        fresh manual resolution attempt. Nothing to resume; this closes
+        the orphaned transaction with resolution_failed so a future
+        attempt isn't blocked by it forever.
+      - Anything else (most commonly MANUALLY_RESOLVED_NO_ORDER, or a link
+        that had already progressed past MANUAL_LINK_IN_PROGRESS before
+        the crash): the state change already happened and was durably
+        persisted - only the CLOSING audit write is missing. This
+        retroactively writes resolution_completed to confirm it; nothing
+        about the entry itself needs to change.
+      - No matching entry found at all (defensive - should not normally
+        happen): closes the transaction with resolution_failed rather
+        than leaving it orphaned forever with nothing left to resume
+        against.
+
+    Best-effort per transaction, same as _reconcile_unknown_submissions -
+    one incomplete resolution failing to recover must not block another
+    from being tried, or block the rest of the scan; it simply stays
+    orphaned (and the account stays frozen) for the next scan to retry.
+
+    Returns True if anything is still incomplete after this pass -
+    combined with _reconcile_unknown_submissions' own return value, this
+    is what _run_autonomous_trade_scan_locked gates new entries on."""
+    incomplete = find_incomplete_resolutions(user_id)
+    if not incomplete:
+        return False
+
+    orders = list_overnight_orders(user_id)
+    orders_by_entry_id = {str(o.get("entry_client_order_id")): o for o in orders if o.get("entry_client_order_id")}
+
+    for started in incomplete:
+        resolution_id = str(started.get("resolution_id") or "")
+        entry_client_order_id = str(started.get("entry_client_order_id") or "")
+        admin_user_id = str(started.get("administrator") or "")
+        entry = orders_by_entry_id.get(entry_client_order_id)
+        try:
+            if entry is None:
+                record_ambiguous_resolution_audit(
+                    user_id,
+                    {
+                        "phase": RESOLUTION_PHASE_FAILED,
+                        "resolution_id": resolution_id,
+                        "administrator": admin_user_id,
+                        "target_user_id": user_id,
+                        "entry_client_order_id": entry_client_order_id,
+                        "timestamp": _now_utc().isoformat(),
+                        "error": "restart recovery: no matching overnight_orders entry found for this resolution",
+                        "stage": "restart_recovery",
+                    },
+                )
+                continue
+
+            if entry.get("lifecycle_state") == ol.MANUAL_LINK_IN_PROGRESS:
+                entry = _poll_fill_and_protect(
+                    user_id=user_id,
+                    creds=creds,
+                    account_id=account_id,
+                    ticker=str(entry.get("ticker", "")),
+                    entry_client_order_id=entry_client_order_id,
+                    limit_price=float(entry.get("limit_price") or 0),
+                    stop_price=float(entry.get("stop") or 0),
+                    target_price=float(entry.get("target") or 0),
+                    trading_day=str(entry.get("trading_day") or ""),
+                    entry=entry,
+                )
+                replace_overnight_orders(user_id, orders)
+                record_ambiguous_resolution_audit(
+                    user_id,
+                    {
+                        "phase": RESOLUTION_PHASE_COMPLETED,
+                        "resolution_id": resolution_id,
+                        "administrator": admin_user_id,
+                        "target_user_id": user_id,
+                        "entry_client_order_id": entry_client_order_id,
+                        "timestamp": _now_utc().isoformat(),
+                        "final_state": entry.get("lifecycle_state"),
+                        "protective_order_ids": {"stop": entry.get("stop_client_order_id"), "target": entry.get("target_client_order_id")},
+                        "recovered_by": "restart_recovery",
+                    },
+                )
+            elif entry.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE:
+                record_ambiguous_resolution_audit(
+                    user_id,
+                    {
+                        "phase": RESOLUTION_PHASE_FAILED,
+                        "resolution_id": resolution_id,
+                        "administrator": admin_user_id,
+                        "target_user_id": user_id,
+                        "entry_client_order_id": entry_client_order_id,
+                        "timestamp": _now_utc().isoformat(),
+                        "error": "restart recovery: entry was never actually transitioned - state persistence did not complete before the process stopped",
+                        "stage": "restart_recovery",
+                    },
+                )
+            else:
+                record_ambiguous_resolution_audit(
+                    user_id,
+                    {
+                        "phase": RESOLUTION_PHASE_COMPLETED,
+                        "resolution_id": resolution_id,
+                        "administrator": admin_user_id,
+                        "target_user_id": user_id,
+                        "entry_client_order_id": entry_client_order_id,
+                        "timestamp": _now_utc().isoformat(),
+                        "final_state": entry.get("lifecycle_state"),
+                        "protective_order_ids": (
+                            {"stop": entry.get("stop_client_order_id"), "target": entry.get("target_client_order_id")}
+                            if entry.get("stop_client_order_id") or entry.get("target_client_order_id")
+                            else None
+                        ),
+                        "recovered_by": "restart_recovery",
+                    },
+                )
+        except Exception:  # noqa: BLE001 - one bad recovery attempt must not block the others or the scan itself
+            continue
+
+    return bool(find_incomplete_resolutions(user_id))
+
+
 def _has_unresolved_ambiguous_submission_locally(user_id: str) -> bool:
     """Fast, LOCAL-ONLY check (no broker calls) for the persistent dashboard
     banner - reads whatever the last scan/reconciliation pass already
     persisted, so it's cheap enough to call on every page load. Mirrors
     _reconcile_unknown_submissions' own "is anything still unresolved"
-    check, but never attempts to resolve anything itself - purely a read."""
-    return any(order.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE for order in list_overnight_orders(user_id))
+    check, but never attempts to resolve anything itself - purely a read.
+
+    Two INDEPENDENT signals, either one enough to freeze:
+      - any entry sitting in one of order_lifecycle.FROZEN_STATES
+        (UNKNOWN_SUBMISSION_STATE itself, or MANUAL_LINK_IN_PROGRESS - a
+        manual link resolution still mid-flight);
+      - find_incomplete_resolutions being non-empty - a manual resolution
+        (release OR link) whose resolution_completed audit record was
+        never durably confirmed written, EVEN IF the affected entry's own
+        lifecycle_state has already moved past every FROZEN_STATE (a
+        released entry is MANUALLY_RESOLVED_NO_ORDER; a completed link
+        may already be PROTECTION_CONFIRMED_ACTIVE) - see
+        _resolve_ambiguous_submission's docstring for why the closing
+        audit write, not the state change itself, is what's allowed to
+        lift the freeze. This is also a LOCAL-ONLY disk read (the audit
+        log is a local file, not a broker call), so it doesn't violate
+        this function's own no-broker-calls contract."""
+    if any(order.get("lifecycle_state") in ol.FROZEN_STATES for order in list_overnight_orders(user_id)):
+        return True
+    return bool(find_incomplete_resolutions(user_id))
+
+
+def _count_users_with_unresolved_ambiguous_submissions() -> int:
+    """Same LOCAL-ONLY, no-broker-calls reasoning as
+    _has_unresolved_ambiguous_submission_locally, but system-wide - drives
+    the admin-facing variant of the persistent freeze banner (see base.html)
+    so an admin whose OWN account is not frozen still sees, on every page
+    (not just the dedicated /admin table), that some OTHER user's account
+    is. Only called when the current user is already confirmed to be an
+    admin - see _build_page_context."""
+    count = 0
+    for user in list_all_users():
+        target_user_id = user.get("id", "")
+        if target_user_id and _has_unresolved_ambiguous_submission_locally(target_user_id):
+            count += 1
+    return count
 
 
 AMBIGUOUS_RESOLUTION_RELEASE = "release"
 AMBIGUOUS_RESOLUTION_LINK = "link"
+
+
+def _order_history_lookback_days(entry: Dict[str, object]) -> int:
+    """The evidence-gathering lookback window must cover from the entry's
+    OWN original submission date to now, not just a fixed recent window -
+    a stale ambiguous entry that sat unresolved for a while would otherwise
+    get a false "nothing found in order history" simply because its real
+    historical record has aged out of a fixed 7-day default, not because
+    it doesn't exist. Falls back to the module default if trading_day is
+    missing or unparseable (an old/legacy entry) - fails toward a WIDER
+    window, not a narrower one, on any parsing trouble."""
+    trading_day_raw = str(entry.get("trading_day") or "")
+    try:
+        trading_day = datetime.fromisoformat(trading_day_raw).date()
+    except ValueError:
+        return webull_api.ORDER_HISTORY_LOOKBACK_DAYS
+    days_since = (datetime.now(timezone.utc).date() - trading_day).days
+    return max(webull_api.ORDER_HISTORY_LOOKBACK_DAYS, days_since + 1)
+
+
+def _correlation_is_plausible(candidate: Dict[str, object], entry: Dict[str, object]) -> bool:
+    """Sanity correlation for a client_order_id-matched candidate against
+    what this entry actually recorded requesting - defense in depth beyond
+    the exact ID match alone, and the gate between "found" (blocks
+    release) and "found_strong" (required for link).
+
+    Deliberately STRICT, not best-effort: a field that's simply MISSING on
+    the candidate counts as inconclusive - this candidate does NOT qualify
+    as a strong correlation - rather than being silently skipped as "no
+    red flag". A prior version of this function treated a missing field as
+    no evidence either way, on the reasoning that open_orders/order_history's
+    row shape wasn't confirmed to expose it; that reasoning is backwards
+    for what found_strong is actually used for (justifying LINK, which
+    immediately attaches real protective orders to real shares) - the
+    absence of a field this app needs to check should never make a
+    candidate look MORE trustworthy than one where the field was present
+    and simply happened to fail the check.
+
+    Required fields: symbol, side, quantity, and price all present and
+    consistent.
+      - symbol/side are held to this bar because get_open_orders rows are
+        ALREADY relied upon elsewhere in this app to reliably carry them -
+        _compute_committed_virtual_capital raises rather than defaults if
+        either is absent from an open_orders row, since a malformed
+        open-order record there would silently under-count committed
+        capital. That is the closest thing to a confirmed schema this app
+        has for that endpoint (not an official Webull schema document -
+        this app doesn't have one), so the same fields are required here,
+        for the same endpoint, for consistency.
+      - No equivalent load-bearing precedent exists yet for
+        get_order_history's row shape - nothing else in this app treats
+        any of its fields (beyond client_order_id itself) as reliably
+        present. An order_history candidate is held to the exact same bar
+        regardless, which in practice means it will not qualify as
+        found_strong until that's established - the correct, honest
+        default given no proof either way, not a guess in either
+        direction.
+      - Webull's account_id is not re-checked per candidate row: every
+        evidence source is already queried with the ONE account_id this
+        resolution is scoped to (see _gather_ambiguous_submission_evidence),
+        so account identity is satisfied by construction, not by a
+        per-row field - none of these endpoints have been confirmed to
+        even return an account identifier on each row to check against.
+      - Submission/fill TIMING is not checked - no field name for it has
+        been confirmed present on any of get_order_detail/get_open_orders/
+        get_order_history's response shapes anywhere in this app (the
+        same "don't guess a field name" discipline applied to
+        _CONFIRMED_DEFINITE_REJECTION_ERROR_CODES in integrations/webull.py).
+        This is a known, deliberate gap, not an oversight - implementing a
+        timing check against a guessed field name would risk exactly the
+        false confidence this whole function exists to avoid."""
+    ticker = str(entry.get("ticker", "")).upper()
+    candidate_symbol = candidate.get("symbol")
+    if not candidate_symbol or not isinstance(candidate_symbol, str) or candidate_symbol.upper() != ticker:
+        return False
+
+    candidate_side = candidate.get("side")
+    if not candidate_side or not isinstance(candidate_side, str) or candidate_side.upper() != "BUY":
+        return False
+
+    requested_quantity_raw = entry.get("quantity")
+    candidate_quantity_raw = candidate.get("total_quantity")
+    if requested_quantity_raw is None or candidate_quantity_raw is None:
+        return False
+    try:
+        requested_quantity = float(requested_quantity_raw)
+        candidate_quantity = float(candidate_quantity_raw)
+    except (TypeError, ValueError):
+        return False
+    if requested_quantity <= 0 or candidate_quantity <= 0:
+        return False
+    if abs(candidate_quantity - requested_quantity) > max(1.0, requested_quantity * 0.05):
+        return False
+
+    requested_price_raw = entry.get("limit_price")
+    candidate_price_raw = candidate.get("limit_price")
+    if requested_price_raw is None or candidate_price_raw is None:
+        return False
+    try:
+        requested_price = float(requested_price_raw)
+        candidate_price = float(candidate_price_raw)
+    except (TypeError, ValueError):
+        return False
+    if requested_price <= 0 or candidate_price <= 0:
+        return False
+    if abs(candidate_price - requested_price) > max(0.50, requested_price * 0.10):
+        return False
+
+    return True
 
 
 def _gather_ambiguous_submission_evidence(creds: Dict[str, str], account_id: str, entry: Dict[str, object]) -> Dict[str, object]:
@@ -3805,37 +4116,55 @@ def _gather_ambiguous_submission_evidence(creds: Dict[str, str], account_id: str
     (which could be stale by the time an admin actually acts) or anything
     an admin might claim to have already checked themselves:
       - order_detail: the direct client_order_id lookup
-        _reconcile_unknown_submission itself uses;
-      - open_orders: is it currently resting, unfilled, at the broker;
-      - positions: does the ticker show up as a currently-held position
-        (can't distinguish this order's shares from other shares of the
-        same ticker bought some other way - the same known, accepted
-        limitation noted elsewhere in this app - so a match here is still
-        treated as "something found", conservatively);
-      - order_history: did it fill/cancel/reject within the lookback
-        window - catches an order no longer "open" but with a real
-        historical record (get_open_orders alone would miss this).
+        _reconcile_unknown_submission itself uses - STRONG evidence;
+      - open_orders: is it currently resting, unfilled, at the broker,
+        matched by client_order_id - STRONG evidence;
+      - order_history: did it fill/cancel/reject within a lookback window
+        that covers back to this entry's OWN submission date (see
+        _order_history_lookback_days), matched by client_order_id -
+        STRONG evidence;
+      - positions: does the ticker show up as a currently-held position -
+        WEAK evidence only. Webull's position API aggregates by symbol,
+        not by originating order, so a match here can't be distinguished
+        from a manual trade on the same ticker (the same known, accepted
+        limitation noted elsewhere in this app) - it's real enough to
+        block a RELEASE (conservative: don't release capital while
+        something unexplained sits on this ticker) but never strong enough
+        to justify a LINK (attaching protective orders to shares that
+        might not even be this entry's).
 
     Each source is checked independently and its own success/failure is
     recorded separately - one flaky call must never make the OTHERS'
-    evidence look more conclusive than it actually is. Returns
-    {"found": bool, "checks": {...}, "errors": {...}, "gathered_at": str}.
-    "found" is True only if at least one check POSITIVELY located the
-    order/position. A check that itself failed (network error, broker
-    error, an ambiguous classification) is recorded in "errors" and counts
-    as neither finding nor not-finding anything - it's simply inconclusive,
-    and _resolve_ambiguous_submission treats ANY entry in "errors" as
-    reason enough to refuse a "release" outright."""
+    evidence look more conclusive than it actually is. Every STRONG match
+    is additionally sanity-correlated against this entry's own recorded
+    quantity/limit_price (_correlation_is_plausible) - a mismatch demotes
+    it out of "found_strong" (it still counts toward "found").
+
+    Returns {"found": bool, "found_strong": bool, "checks": {...},
+    "errors": {...}, "gathered_at": str}. "found" is True if ANY check
+    (strong or weak) positively located something - used to block RELEASE.
+    "found_strong" is True only if a client_order_id-correlated,
+    quantity/price-plausible match was found - required for LINK. A check
+    that itself failed (network error, broker error, an ambiguous
+    classification) is recorded in "errors" and counts as neither finding
+    nor not-finding anything - it's simply inconclusive, and
+    _resolve_ambiguous_submission treats ANY entry in "errors" as reason
+    enough to refuse a "release" outright."""
     ticker = str(entry.get("ticker", "")).upper()
     entry_client_order_id = str(entry.get("entry_client_order_id") or "")
     checks: Dict[str, object] = {}
     errors: Dict[str, str] = {}
     found = False
+    found_strong = False
 
     try:
         detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, entry_client_order_id)
-        checks["order_detail"] = ol.summarize_fill(detail)
+        fill = ol.summarize_fill(detail)
+        checks["order_detail"] = fill
         found = True
+        # get_order_detail is looked up BY entry_client_order_id already -
+        # the strongest possible correlation, no further matching needed.
+        found_strong = True
     except webull_api.DefiniteOrderRejection:
         checks["order_detail"] = None
     except Exception as error:  # noqa: BLE001 - inconclusive, not a "not found" - see docstring
@@ -3845,7 +4174,9 @@ def _gather_ambiguous_submission_evidence(creds: Dict[str, str], account_id: str
         open_orders = webull_api.get_open_orders(creds["app_key"], creds["app_secret"], account_id)
         matches = [order for order in open_orders if order.get("client_order_id") == entry_client_order_id]
         checks["open_orders"] = matches
-        found = found or bool(matches)
+        if matches:
+            found = True
+            found_strong = found_strong or any(_correlation_is_plausible(m, entry) for m in matches)
     except Exception as error:  # noqa: BLE001
         errors["open_orders"] = str(error)
 
@@ -3853,23 +4184,61 @@ def _gather_ambiguous_submission_evidence(creds: Dict[str, str], account_id: str
         positions = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
         matches = [position for position in positions if str(position.get("symbol", "")).upper() == ticker]
         checks["positions"] = matches
+        # Deliberately WEAK - see docstring - never contributes to found_strong.
         found = found or bool(matches)
     except Exception as error:  # noqa: BLE001
         errors["positions"] = str(error)
 
     try:
-        history = webull_api.get_order_history(creds["app_key"], creds["app_secret"], account_id)
+        history = webull_api.get_order_history(
+            creds["app_key"], creds["app_secret"], account_id, days_back=_order_history_lookback_days(entry)
+        )
         matches = [order for order in history if order.get("client_order_id") == entry_client_order_id]
         checks["order_history"] = matches
-        found = found or bool(matches)
+        if matches:
+            found = True
+            found_strong = found_strong or any(_correlation_is_plausible(m, entry) for m in matches)
     except Exception as error:  # noqa: BLE001
         errors["order_history"] = str(error)
 
-    return {"found": found, "checks": checks, "errors": errors, "gathered_at": _now_utc().isoformat()}
+    return {
+        "found": found,
+        "found_strong": found_strong,
+        "checks": checks,
+        "errors": errors,
+        "gathered_at": _now_utc().isoformat(),
+    }
+
+
+def _record_resolution_failed(
+    target_user_id: str, resolution_id: str, admin_user_id: str, entry_client_order_id: str, error: BaseException, stage: str
+) -> None:
+    """Best-effort - see _resolve_ambiguous_submission's docstring for why
+    a failure writing THIS record must never itself raise: the orphaned
+    resolution_started record is still sitting in the chain either way,
+    which is exactly what keeps the account frozen (see
+    ambiguous_resolution_audit.find_incomplete_resolutions) whether or not
+    this closing "failed" stamp manages to land."""
+    try:
+        record_ambiguous_resolution_audit(
+            target_user_id,
+            {
+                "phase": RESOLUTION_PHASE_FAILED,
+                "resolution_id": resolution_id,
+                "administrator": admin_user_id,
+                "target_user_id": target_user_id,
+                "entry_client_order_id": entry_client_order_id,
+                "timestamp": _now_utc().isoformat(),
+                "error": str(error),
+                "stage": stage,
+            },
+        )
+    except Exception:  # noqa: BLE001 - see docstring
+        pass
 
 
 def _resolve_ambiguous_submission(
-    target_user_id: str, admin_user_id: str, entry_client_order_id: str, action: str, reason: str
+    target_user_id: str, admin_user_id: str, entry_client_order_id: str, action: str, reason: str, confirmation: str
 ) -> Dict[str, object]:
     """The ONLY code path allowed to move an entry out of
     UNKNOWN_SUBMISSION_STATE outside the automatic (grace-period-gated,
@@ -3883,30 +4252,100 @@ def _resolve_ambiguous_submission(
     place - so it never trusts anything it wasn't handed a chance to verify
     itself.
 
+    Requires BOTH a typed reason AND a typed confirmation (must exactly
+    match the entry's own ticker, case/whitespace-insensitive) - two
+    separate deliberate inputs, not one, so a stray click or a
+    copy-pasted-without-reading reason can't execute an action the admin
+    didn't actually mean to take on THIS specific entry. This is
+    single-admin approval, not two-person approval - genuine two-person
+    sign-off (a second, different administrator independently confirming
+    before execution) is NOT implemented and is a HARD PREREQUISITE before
+    this mechanism is ever used against a real-money account; it is
+    acceptable only for the current paper-trading phase.
+
     Always re-gathers evidence FRESH, right now
     (_gather_ambiguous_submission_evidence) - never the evidence an admin
     might be looking at on a page that's since gone stale, and never a
-    client-submitted "I checked, it's fine" claim.
+    client-submitted "I checked, it's fine" claim. Every precondition
+    check (action/reason/confirmation validity, the fresh-evidence gate
+    itself) happens BEFORE the transaction described below even begins -
+    a refused call raises here with NOTHING written yet, since nothing has
+    happened yet to audit.
 
-    action="release" (confirm no order or position exists): refuses
-    (raises ValidationError) unless the evidence found NOTHING *and* every
-    one of the four checks actually SUCCEEDED. A check that itself failed
-    is inconclusive, never treated as "checked and clean" - so a single
-    flaky broker call is enough to block a release. Only once all four
-    checks affirmatively ran and found nothing does this transition the
-    entry to ENTRY_FAILED and release the reservation.
+    From here on this is a PHASED transaction, not a single audit write
+    followed by a state change - see the specific concern that motivated
+    this: writing one "it succeeded" audit record before the state change
+    and protection work is actually attempted can leave that record
+    claiming success when persistence or protection LATER fails. Three
+    audit phases (autonomy.ambiguous_resolution_audit.RESOLUTION_PHASE_*),
+    sharing one resolution_id:
+      - resolution_started: written FIRST, before any state change. Says
+        what was requested and what evidence justified it. If even THIS
+        write fails, this raises immediately with the entry completely
+        untouched, same guarantee as before.
+      - resolution_completed: written LAST, only once the state change (and,
+        for link, protection) has fully succeeded AND been durably
+        persisted. Only this record is allowed to claim success.
+      - resolution_failed: written if anything between started and
+        completed raises, tagged with the STAGE it broke at
+        (state_persistence / protection / final_persistence) - best-effort
+        (see _record_resolution_failed): if even this write fails, the
+        orphaned resolution_started record left behind is itself the
+        durable signal (see find_incomplete_resolutions) that keeps the
+        account frozen regardless.
 
-    action="link" (resume monitoring): refuses unless the evidence found
-    something concrete to link to. Transitions to ENTRY_SUBMITTED so the
-    normal fill-polling/protection path (_poll_fill_and_protect) picks it
-    up on the very next scan.
+    A resolution_completed write that itself fails is handled differently
+    on purpose: the state change already genuinely happened and was
+    durably persisted by that point, so writing resolution_failed would
+    misrepresent what happened. Nothing is written for it - the orphaned
+    resolution_started record is left as the durable freeze marker,
+    exactly as if this had never gotten a completed record in the first
+    place, and either a later scan's restart recovery
+    (_recover_incomplete_manual_resolutions) or a retried write closes the
+    loop later. This is why _has_unresolved_ambiguous_submission_locally
+    checks find_incomplete_resolutions independently of the entry's own
+    lifecycle_state - a released or fully-linked entry can be sitting in a
+    perfectly good final state while the account STILL correctly reads as
+    frozen, because the transaction that produced it was never durably
+    confirmed complete.
 
-    Every call that reaches a decision - release or link, never a refusal -
-    writes an IMMUTABLE audit record (autonomy.ambiguous_resolution_audit)
-    with the administrator, a timestamp, the full evidence gathered, the
-    reason given, and the entry's previous and new lifecycle state, before
-    returning. A refused call raises before any state changes or audit
-    record - there is nothing to audit yet, since nothing happened."""
+    action="release" (confirm no order or position exists): refuses unless
+    the evidence found NOTHING (strong OR weak) *and* every one of the
+    four checks actually SUCCEEDED - a check that itself failed is
+    inconclusive, never "checked and clean". Once permitted: transitions
+    directly to MANUALLY_RESOLVED_NO_ORDER (deliberately NOT ENTRY_FAILED
+    - that state specifically means the BROKER said so; this means a
+    human, on evidence, did) and persists it - a single atomic step, no
+    intermediate state, since there's no async work in between. The
+    original ambiguity fields (error, first_definite_rejection_at,
+    definite_rejection_count) are left untouched; this only ADDS the
+    administrator, reason, confirmation, resolution_id, and evidence
+    snapshot alongside them.
+
+    action="link" (resume monitoring): refuses unless evidence["found_strong"]
+    - a client_order_id-correlated match, strictly sanity-checked against
+    this entry's own recorded ticker/side/quantity/limit_price (see
+    _correlation_is_plausible) - was found. Once permitted, this is FOUR
+    distinct steps, each persisted or audited before the next begins:
+      1. Transition to MANUAL_LINK_IN_PROGRESS and persist it immediately -
+         BEFORE any polling or protective-order placement - so a crash
+         from this point forward leaves the account correctly frozen via
+         the entry's own on-disk lifecycle_state, not just the audit
+         marker.
+      2. Poll the linked order and protect any filled quantity
+         (_poll_fill_and_protect), using the SAME deterministic
+         client_order_ids (order_lifecycle.deterministic_client_order_id)
+         normal entry submission uses - safe to retry from any point,
+         since resubmitting an already-placed leg under the same id is
+         Webull's own idempotency guard (_place_order_with_retry), not a
+         duplicate.
+      3. Persist whatever lifecycle state and protective-order ids that
+         produced.
+      4. Only once ALL of the above has succeeded is resolution_completed
+         written - new entries are not "permitted" merely because the
+         entry's own lifecycle_state cleared MANUAL_LINK_IN_PROGRESS (see
+         above); they're permitted once find_incomplete_resolutions no
+         longer lists this transaction."""
     if action not in (AMBIGUOUS_RESOLUTION_RELEASE, AMBIGUOUS_RESOLUTION_LINK):
         raise ValidationError(f"Unknown resolution action: {action!r}")
     if not reason or not reason.strip():
@@ -3922,6 +4361,9 @@ def _resolve_ambiguous_submission(
         raise ValidationError(
             f"This entry is not currently in an unresolved ambiguous state (lifecycle_state={entry.get('lifecycle_state')})."
         )
+    ticker = str(entry.get("ticker", ""))
+    if not confirmation or confirmation.strip().upper() != ticker.strip().upper():
+        raise ValidationError(f"Confirmation text must exactly match the ticker ({ticker!r}) to proceed.")
 
     creds = get_webull_credentials(target_user_id)
     accounts = get_accounts(target_user_id)
@@ -3949,30 +4391,116 @@ def _resolve_ambiguous_submission(
                 "Cannot release - fresh checks found matching evidence (an order, position, or history record) "
                 "for this entry. Use 'link' instead, or investigate further before taking any action."
             )
-        ol.transition(entry, ol.ENTRY_FAILED, error=f"manually resolved by admin ({admin_user_id}): {reason.strip()}")
     else:
-        if not evidence["found"]:
-            raise ValidationError("Cannot link - fresh checks found nothing at the broker to link this entry to.")
-        ol.transition(entry, ol.ENTRY_SUBMITTED, error=None)
+        if not evidence["found_strong"]:
+            reason_detail = (
+                "a match was found (by ticker or by client order ID) but cannot be reliably attributed to this "
+                "specific order - either a weak ticker-only position match, or a client-order-id match missing "
+                "the symbol/side/quantity/price fields needed to verify it"
+                if evidence["found"]
+                else "nothing at the broker to link this entry to"
+            )
+            raise ValidationError(f"Cannot link - fresh checks found {reason_detail}.")
 
-    new_state = entry.get("lifecycle_state")
-    replace_overnight_orders(target_user_id, orders)
-
-    audit_record = record_ambiguous_resolution_audit(
+    resolution_id = uuid.uuid4().hex
+    record_ambiguous_resolution_audit(
         target_user_id,
         {
+            "phase": RESOLUTION_PHASE_STARTED,
+            "resolution_id": resolution_id,
             "administrator": admin_user_id,
             "target_user_id": target_user_id,
             "entry_client_order_id": entry_client_order_id,
             "ticker": entry.get("ticker"),
             "timestamp": _now_utc().isoformat(),
-            "action": action,
+            "requested_action": action,
             "reason": reason.strip(),
+            "confirmation": confirmation.strip(),
             "evidence": evidence,
             "previous_state": previous_state,
-            "new_state": new_state,
         },
     )
+
+    common_manual_fields = dict(
+        manual_resolution_id=resolution_id,
+        manual_resolution_administrator=admin_user_id,
+        manual_resolution_reason=reason.strip(),
+        manual_resolution_confirmation=confirmation.strip(),
+        manual_resolution_evidence=evidence,
+        manual_resolution_at=_now_utc().isoformat(),
+    )
+    protective_order_ids: Optional[Dict[str, object]] = None
+
+    if action == AMBIGUOUS_RESOLUTION_RELEASE:
+        try:
+            ol.transition(entry, ol.MANUALLY_RESOLVED_NO_ORDER, **common_manual_fields)
+            replace_overnight_orders(target_user_id, orders)
+        except Exception as error:  # noqa: BLE001 - state_persistence stage, see docstring
+            _record_resolution_failed(target_user_id, resolution_id, admin_user_id, entry_client_order_id, error, stage="state_persistence")
+            raise
+    else:
+        try:
+            # Step 1: persist the in-progress marker BEFORE any polling or
+            # placement work begins - see docstring. error=None clears the
+            # stale ambiguity error (e.g. "timeout") now that a strong
+            # match has been found and this is actively being linked - it
+            # would otherwise keep showing on an entry that's about to be
+            # confirmed protected and monitored normally.
+            ol.transition(entry, ol.MANUAL_LINK_IN_PROGRESS, error=None, **common_manual_fields)
+            replace_overnight_orders(target_user_id, orders)
+        except Exception as error:  # noqa: BLE001
+            _record_resolution_failed(target_user_id, resolution_id, admin_user_id, entry_client_order_id, error, stage="state_persistence")
+            raise
+
+        try:
+            # Steps 2-3: poll and protect, using the SAME deterministic
+            # client_order_ids normal entry submission uses - safe to
+            # retry from any point (see docstring and
+            # order_lifecycle.deterministic_client_order_id).
+            entry = _poll_fill_and_protect(
+                user_id=target_user_id,
+                creds=creds,
+                account_id=account_id,
+                ticker=str(entry.get("ticker", "")),
+                entry_client_order_id=entry_client_order_id,
+                limit_price=float(entry.get("limit_price") or 0),
+                stop_price=float(entry.get("stop") or 0),
+                target_price=float(entry.get("target") or 0),
+                trading_day=str(entry.get("trading_day") or ""),
+                entry=entry,
+            )
+        except Exception as error:  # noqa: BLE001 - protection stage
+            _record_resolution_failed(target_user_id, resolution_id, admin_user_id, entry_client_order_id, error, stage="protection")
+            raise
+
+        try:
+            replace_overnight_orders(target_user_id, orders)
+        except Exception as error:  # noqa: BLE001 - final_persistence stage
+            _record_resolution_failed(target_user_id, resolution_id, admin_user_id, entry_client_order_id, error, stage="final_persistence")
+            raise
+
+        protective_order_ids = {"stop": entry.get("stop_client_order_id"), "target": entry.get("target_client_order_id")}
+
+    # Step 4 (link) / final step (release): only written once everything
+    # above has fully succeeded and been durably persisted. A failure
+    # writing THIS specific record is deliberately NOT treated as
+    # resolution_failed - see docstring for why.
+    try:
+        completed_record = record_ambiguous_resolution_audit(
+            target_user_id,
+            {
+                "phase": RESOLUTION_PHASE_COMPLETED,
+                "resolution_id": resolution_id,
+                "administrator": admin_user_id,
+                "target_user_id": target_user_id,
+                "entry_client_order_id": entry_client_order_id,
+                "timestamp": _now_utc().isoformat(),
+                "final_state": entry.get("lifecycle_state"),
+                "protective_order_ids": protective_order_ids,
+            },
+        )
+    except Exception:  # noqa: BLE001 - see docstring: the orphaned resolution_started record is the durable marker
+        completed_record = None
 
     try:
         add_manual_alert(
@@ -3981,15 +4509,15 @@ def _resolve_ambiguous_submission(
                 "type": "ambiguous_submission_resolved",
                 "ticker": entry.get("ticker"),
                 "message": (
-                    f"{entry.get('ticker')}: an ambiguous order submission was manually {action}d by an "
-                    f"administrator. Reason: {reason.strip()}"
+                    f"{entry.get('ticker')}: an ambiguous order submission was manually {action}ed by an "
+                    f"administrator (now {entry.get('lifecycle_state')}). Reason: {reason.strip()}"
                 ),
             },
         )
     except Exception:  # noqa: BLE001 - never let alerting itself break the resolution
         pass
 
-    return {"entry": entry, "evidence": evidence, "audit_record": audit_record}
+    return {"entry": entry, "evidence": evidence, "audit_record": completed_record, "resolution_id": resolution_id}
 
 
 def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
@@ -4023,12 +4551,18 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
     _reconcile_exit_orders(user_id, creds, account_id)
     _refresh_stop_confidence(user_id, creds, account_id)
     # True if ANY entry - from this scan or an earlier one - is still stuck
-    # in UNKNOWN_SUBMISSION_STATE after this reconciliation attempt. Gates
-    # every NEW entry below (see the comment above entries_allowed) - this
-    # account's true committed capital isn't confidently known while that's
-    # true, so nothing new gets sized against it, no matter how many scans
-    # ago the ambiguity first occurred.
+    # in UNKNOWN_SUBMISSION_STATE after this reconciliation attempt, OR any
+    # manual resolution transaction (_resolve_ambiguous_submission) is
+    # still incomplete after restart recovery has had a chance to resume
+    # it (see _recover_incomplete_manual_resolutions - covers both a
+    # link stuck in MANUAL_LINK_IN_PROGRESS and a resolution whose closing
+    # audit write never durably landed). Gates every NEW entry below (see
+    # the comment above entries_allowed) - this account's true committed
+    # capital isn't confidently known while either is true, so nothing new
+    # gets sized against it, no matter how many scans ago the ambiguity
+    # first occurred.
     has_unresolved_ambiguous_submission = _reconcile_unknown_submissions(user_id, creds, account_id)
+    has_incomplete_manual_resolution = _recover_incomplete_manual_resolutions(user_id, creds, account_id)
 
     risk_settings = get_autonomy_status(user_id)
     if risk_settings.get("emergency_stop_enabled"):
@@ -4142,6 +4676,12 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
             "a prior order submission returned an ambiguous broker response and remains unresolved - no new "
             "autonomous entries will be placed for this account until it is conclusively resolved or manually "
             "cleared (existing positions are still monitored and protected normally)"
+        )
+    elif has_incomplete_manual_resolution:
+        new_entries_blocked_reason = (
+            "a manual resolution of a prior ambiguous order submission has not been durably confirmed complete - "
+            "no new autonomous entries will be placed for this account until it is (existing positions are still "
+            "monitored and protected normally)"
         )
     else:
         new_entries_blocked_reason = ""

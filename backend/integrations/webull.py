@@ -403,47 +403,101 @@ ORDER_HISTORY_LOOKBACK_DAYS = 7
 ORDER_HISTORY_PAGE_SIZE = 100
 
 
+_ORDER_HISTORY_MAX_PAGES = 50  # same reasoning as _OPEN_ORDERS_MAX_PAGES - no genuine account/window has any business exceeding 5,000 historical orders
+
+
 def get_order_history(app_key: str, app_secret: str, account_id: str, days_back: int = ORDER_HISTORY_LOOKBACK_DAYS) -> List[Dict[str, Any]]:
     """Historical (filled/cancelled/rejected) orders over the last
-    `days_back` days - the SDK's own docstring confirms this is supported
-    for Webull US (unlike get_order_open's pagination, which is HK-only),
-    so it's usable for this sandbox's region.
+    `days_back` days - the SDK's own docstring confirms pagination
+    (last_order_id/last_client_order_id) is supported for Webull US on this
+    endpoint (unlike get_order_open's pagination, which is HK-only), so it's
+    usable for this sandbox's region.
 
-    Exists specifically as ONE of several independent evidence sources
-    when manually resolving an entry stuck in UNKNOWN_SUBMISSION_STATE
-    (see _gather_ambiguous_submission_evidence in app.py): get_open_orders
-    only shows currently-RESTING orders, so an order that already filled,
-    was cancelled, or was rejected days ago has already fallen out of that
-    view - this is what still has a record of it. NOT used for capital
-    tracking (unlike get_open_orders), so it does not need that function's
-    same fail-closed-on-any-ambiguity pagination hardening - a malformed
-    response still raises (the evidence-gathering step treats a raised
-    exception as "this particular check is inconclusive", the same
-    fail-safe outcome as any other check failing), but this reads a single
-    page only; the 7-day/100-row default window is generous for what this
-    is used for (confirming or ruling out ONE specific client_order_id) and
-    getting a partial account-wide history here is not the same risk as
-    get_open_orders silently under-counting live committed capital."""
+    Exists specifically as ONE of several independent evidence sources when
+    manually resolving an entry stuck in UNKNOWN_SUBMISSION_STATE (see
+    _gather_ambiguous_submission_evidence in app.py): get_open_orders only
+    shows currently-RESTING orders, so an order that already filled, was
+    cancelled, or was rejected days ago has already fallen out of that view
+    - this is what still has a record of it.
+
+    A manual "release" decision relies on this coming back COMPLETE for the
+    requested window - a silently truncated single page (an account with
+    more than ORDER_HISTORY_PAGE_SIZE historical orders in the window) would
+    read as "nothing found here" exactly as easily as a genuinely clean
+    history would, which is the wrong-direction failure for a check that
+    exists to justify releasing a capital freeze. So this now applies the
+    SAME fail-closed pagination hardening as get_open_orders, for the same
+    reasons - see that function's docstring for the exact list of conditions
+    that raise instead of guessing:
+      - the payload itself must be a JSON object;
+      - it must contain an "orders" key (missing key != empty list);
+      - "orders" must be a list of JSON objects;
+      - every row must carry a stable, truthy order_id;
+      - a repeated page (cursor did not advance) raises rather than
+        silently stopping with a partial result;
+      - exhausting _ORDER_HISTORY_MAX_PAGES without reaching a legitimate
+        end (a short or empty page) raises rather than returning whatever
+        was accumulated so far.
+    A raised exception here is still treated by the evidence-gathering step
+    as "this particular check is inconclusive" - the same fail-safe outcome
+    as any other check failing - so callers do not need their own separate
+    handling for the truncation case; it surfaces as exactly the same
+    "errors" entry any other broker-side failure would."""
     trade_client = _get_trade_client(app_key, app_secret)
     end_date = _today_utc_isoformat()
     start_date = _days_before_utc_isoformat(days_back)
-    response = trade_client.order_v2.get_order_history(
-        account_id,
-        page_size=ORDER_HISTORY_PAGE_SIZE,
-        start_date=start_date,
-        end_date=end_date,
-    )
-    if response.status_code != 200:
-        raise ValueError(f"Webull API error (order history): HTTP {response.status_code}")
-    payload = response.json()
-    if not isinstance(payload, dict):
-        raise ValueError(f"Webull API error (order history): expected a JSON object response, got {type(payload).__name__}")
-    if "orders" not in payload:
-        raise ValueError("Webull API error (order history): response is missing the 'orders' field")
-    orders = payload["orders"]
-    if not isinstance(orders, list) or not all(isinstance(order, dict) for order in orders):
-        raise ValueError("Webull API error (order history): 'orders' field is malformed")
-    return orders
+    all_orders: List[Dict[str, Any]] = []
+    seen_order_ids: set = set()
+    last_order_id: Optional[str] = None
+    last_client_order_id: Optional[str] = None
+
+    for _ in range(_ORDER_HISTORY_MAX_PAGES):
+        response = trade_client.order_v2.get_order_history(
+            account_id,
+            page_size=ORDER_HISTORY_PAGE_SIZE,
+            start_date=start_date,
+            end_date=end_date,
+            last_order_id=last_order_id,
+            last_client_order_id=last_client_order_id,
+        )
+        if response.status_code != 200:
+            raise ValueError(f"Webull API error (order history): HTTP {response.status_code}")
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError(f"Webull API error (order history): expected a JSON object response, got {type(payload).__name__}")
+        if "orders" not in payload:
+            raise ValueError("Webull API error (order history): response is missing the 'orders' field")
+        page_orders = payload["orders"]
+        if not isinstance(page_orders, list):
+            raise ValueError(f"Webull API error (order history): 'orders' field is not a list ({type(page_orders).__name__})")
+        if not all(isinstance(order, dict) for order in page_orders):
+            raise ValueError("Webull API error (order history): one or more order rows is not a JSON object")
+        if not all(order.get("order_id") for order in page_orders):
+            raise ValueError("Webull API error (order history): one or more order rows is missing a stable order_id")
+        if not page_orders:
+            break
+
+        new_orders = [order for order in page_orders if order["order_id"] not in seen_order_ids]
+        if not new_orders:
+            raise ValueError(
+                "Webull API error (order history): the same page was returned again (cursor did not advance) - "
+                "cannot safely continue without risking a truncated (incomplete) order history"
+            )
+        all_orders.extend(new_orders)
+        seen_order_ids.update(order["order_id"] for order in new_orders)
+
+        if len(page_orders) < ORDER_HISTORY_PAGE_SIZE:
+            break  # short page - this was the last one
+
+        last_order_id = page_orders[-1]["order_id"]
+        last_client_order_id = page_orders[-1].get("client_order_id") or last_client_order_id
+    else:
+        raise ValueError(
+            f"Webull API error (order history): exhausted the {_ORDER_HISTORY_MAX_PAGES}-page limit without reaching "
+            "the end of the account's order history for this window - the result would be incomplete"
+        )
+
+    return all_orders
 
 
 def _today_utc_isoformat() -> str:
