@@ -163,6 +163,16 @@
             <div class="topbar-avatar" aria-hidden="true" title="{{ current_user.username if current_user else '' }}"></div>
         </header>
 
+        {% if has_unresolved_ambiguous_submission %}
+        <div class="ambiguous-freeze-banner" role="alert" id="ambiguousFreezeBanner">
+            <strong>Autonomous entries paused.</strong>
+            A prior order submission returned an ambiguous broker response that has not been resolved. No new
+            autonomous trades will be placed for this account until an administrator resolves it. Existing positions
+            are still monitored and protected normally. This banner is not a notification and cannot be dismissed -
+            it reflects the account's actual state and clears automatically once resolved.
+        </div>
+        {% endif %}
+
         {% block content %}{% endblock %}
     </main>
 </div>

@@ -18,6 +18,15 @@ PROTECTION_CONFIRMED_ACTIVE = "protection_confirmed_active"
 ENTRY_FAILED = "entry_failed"
 PROTECTION_FAILED = "protection_failed"
 CLOSED = "closed"
+# The broker's true response to an entry submission is unknown - e.g. a
+# timeout or dropped connection after the request was sent, where the order
+# may have been accepted anyway. Deliberately distinct from both
+# ENTRY_SUBMITTED (which means the placement call itself definitely
+# succeeded) and ENTRY_FAILED (which means it definitely didn't) - see
+# _submit_and_protect_entry's docstring in app.py for how the two exception
+# types are told apart, and _reconcile_unknown_submission for how this
+# eventually gets resolved.
+UNKNOWN_SUBMISSION_STATE = "unknown_submission_state"
 
 ALL_STATES = {
     ENTRY_SUBMITTED,
@@ -28,15 +37,18 @@ ALL_STATES = {
     ENTRY_FAILED,
     PROTECTION_FAILED,
     CLOSED,
+    UNKNOWN_SUBMISSION_STATE,
 }
 
 # Terminal states need no further monitoring. Everything else is
 # "transitional" - the set the fast monitor and restart-recovery scan both
 # look for (see monitor scan logic in app.py / order_monitor.py).
+# UNKNOWN_SUBMISSION_STATE is deliberately NOT terminal - an order left
+# there is exactly what needs monitoring most, not less.
 TERMINAL_STATES = {ENTRY_FAILED, CLOSED}
 
 VALID_TRANSITIONS: Dict[str, set] = {
-    ENTRY_SUBMITTED: {ENTRY_PARTIALLY_FILLED, ENTRY_FILLED, ENTRY_FAILED},
+    ENTRY_SUBMITTED: {ENTRY_PARTIALLY_FILLED, ENTRY_FILLED, ENTRY_FAILED, UNKNOWN_SUBMISSION_STATE},
     ENTRY_PARTIALLY_FILLED: {ENTRY_PARTIALLY_FILLED, ENTRY_FILLED, PROTECTION_PENDING, ENTRY_FAILED},
     ENTRY_FILLED: {PROTECTION_PENDING},
     PROTECTION_PENDING: {PROTECTION_CONFIRMED_ACTIVE, PROTECTION_FAILED},
@@ -44,6 +56,15 @@ VALID_TRANSITIONS: Dict[str, set] = {
     PROTECTION_FAILED: {PROTECTION_PENDING, CLOSED},
     ENTRY_FAILED: set(),
     CLOSED: set(),
+    # Reconciliation (_reconcile_unknown_submission) has three outcomes:
+    # confirms the order reached the broker and is still live, resuming
+    # normal fill tracking from ENTRY_SUBMITTED; confirms - via a well-formed
+    # DefiniteOrderRejection, or a successful lookup whose status is
+    # CANCELLED/FAILED - that it definitely never went through (or didn't
+    # survive), resolving straight to ENTRY_FAILED without passing back
+    # through ENTRY_SUBMITTED first; or still can't tell, and self-loops to
+    # record another audit-trail entry without forcing a resolution.
+    UNKNOWN_SUBMISSION_STATE: {ENTRY_SUBMITTED, ENTRY_FAILED, UNKNOWN_SUBMISSION_STATE},
 }
 
 

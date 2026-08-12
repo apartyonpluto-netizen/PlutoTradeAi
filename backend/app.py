@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import math
 import os
 import secrets as secrets_module
 import time
@@ -9,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -94,8 +95,10 @@ if __package__:
     )
     from .webull_stop_orders import pop_exit_orders, pop_exit_orders_by_type, record_exit_order, tracked_tickers as webull_tracked_tickers
     from .scan_lock import ScanAlreadyRunningError, user_scan_lock
+    from . import order_lifecycle as ol
     from .anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from .autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
+    from .autonomy.ambiguous_resolution_audit import list_ambiguous_resolution_audit, record_ambiguous_resolution_audit
     from .backtest_engine import run_backtest
     from .calibration import get_calibration, start_calibration
     from .market_scanner import scan_market
@@ -204,8 +207,10 @@ else:
     )
     from webull_stop_orders import pop_exit_orders, pop_exit_orders_by_type, record_exit_order, tracked_tickers as webull_tracked_tickers
     from scan_lock import ScanAlreadyRunningError, user_scan_lock
+    import order_lifecycle as ol
     from anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
+    from autonomy.ambiguous_resolution_audit import list_ambiguous_resolution_audit, record_ambiguous_resolution_audit
     from backtest_engine import run_backtest
     from calibration import get_calibration, start_calibration
     from market_scanner import scan_market
@@ -534,6 +539,15 @@ def admin_page():
     context["current_user_id"] = _current_user_id()
     context["global_settings"] = get_global_settings()
     context["calibration"] = get_calibration()
+    pending_ambiguous: List[Dict[str, object]] = []
+    for user in context["all_users"]:
+        target_user_id = user.get("id", "")
+        if not target_user_id:
+            continue
+        for order in list_overnight_orders(target_user_id):
+            if order.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE:
+                pending_ambiguous.append({**order, "user_id": target_user_id, "username": user.get("username", "")})
+    context["pending_ambiguous_submissions"] = pending_ambiguous
     return render_template("admin.html", **context)
 
 
@@ -687,6 +701,51 @@ def api_admin_global_settings():
     except ValueError as error:
         return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
     return _api_success(settings, ok=True)
+
+
+@app.route("/api/admin/ambiguous-submissions", methods=["GET"])
+def api_admin_list_ambiguous_submissions():
+    """Every entry, across every user, currently stuck in
+    UNKNOWN_SUBMISSION_STATE - the admin-facing view of exactly what's
+    freezing autonomous entries for each affected account, and the only
+    entry point to _resolve_ambiguous_submission."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    pending: List[Dict[str, object]] = []
+    for user in list_all_users():
+        target_user_id = user.get("id", "")
+        if not target_user_id:
+            continue
+        for order in list_overnight_orders(target_user_id):
+            if order.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE:
+                pending.append({**order, "user_id": target_user_id, "username": user.get("username", "")})
+    return _api_success({"pending": pending}, ok=True, pending=pending)
+
+
+@app.route("/api/admin/ambiguous-submissions/resolve", methods=["POST"])
+def api_admin_resolve_ambiguous_submission():
+    """The only route that can move an entry out of UNKNOWN_SUBMISSION_STATE
+    by manual admin action - see _resolve_ambiguous_submission for the
+    mandatory-fresh-evidence, audit-everything logic this delegates to.
+    Never trusts the admin's own claim about what they checked - the fresh
+    checks happen server-side, right here, regardless of what the request
+    body does or doesn't say about evidence."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = _resolve_ambiguous_submission(
+            target_user_id=str(payload.get("user_id", "")),
+            admin_user_id=_current_user_id(),
+            entry_client_order_id=str(payload.get("entry_client_order_id", "")),
+            action=str(payload.get("action", "")),
+            reason=str(payload.get("reason", "")),
+        )
+    except ValidationError as error:
+        return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
+    return _api_success({"entry": result["entry"]}, ok=True, entry=result["entry"])
 
 
 def _now_utc() -> datetime:
@@ -1483,6 +1542,13 @@ def _build_page_context(
         "mission_queue": mission_queue[:3],
         "mission_brief_should_show": status_summary["mission_brief_should_show"],
         "autonomy_status": status_summary["autonomy_status"],
+        # Drives the persistent freeze banner in base.html - a LOCAL-only
+        # read (no broker calls), computed fresh on every page load,
+        # deliberately independent of the alerts/notifications drawer's
+        # read/dismissed state. Dismissing a notification must never make
+        # this banner (or the actual entry freeze it reflects) go away -
+        # only _resolve_ambiguous_submission can do that.
+        "has_unresolved_ambiguous_submission": _has_unresolved_ambiguous_submission_locally(user_id),
     }
     if include_trusted_accounts:
         context["trusted_accounts"] = get_trusted_accounts(user_id)
@@ -2366,6 +2432,39 @@ OVERNIGHT_MAX_ORDERS_PER_RUN = 5
 OVERNIGHT_ORDER_QUANTITY = 1
 CONFIDENCE_DEGRADATION_THRESHOLD = 15  # how many confidence points a held position can drop before its stop gets tightened
 
+# How long _submit_and_protect_entry waits, synchronously, for an entry to
+# fill and then for both protective legs to be confirmed resting, before
+# giving up on THIS scan tick and leaving the order in whatever transitional
+# lifecycle state it reached - the next scan tick's _monitor_transitional_orders
+# picks it back up from there. This bound exists so one slow-to-fill ticker
+# can't stall the rest of the candidate batch; it is not the only chance the
+# order gets to be protected.
+ENTRY_FILL_POLL_ATTEMPTS = 8
+ENTRY_FILL_POLL_INTERVAL_SECONDS = 2.0
+PROTECTION_CONFIRM_POLL_ATTEMPTS = 5
+PROTECTION_CONFIRM_POLL_INTERVAL_SECONDS = 2.0
+
+# _reconcile_unknown_submission: even a well-formed, parsed "order not
+# found" response (webull_api.DefiniteOrderRejection) is not treated as
+# immediately conclusive - Webull has not published a read-after-write
+# consistency guarantee for order lookups, so a "not found" moments after
+# an ambiguous submission could reflect broker-side replication lag rather
+# than the order never having existed. The SAME definite absence must be
+# confirmed this many separate times, spread across at least this many
+# seconds since the FIRST such sighting, before the reservation is released
+# and the entry resolves to ENTRY_FAILED. Sized off the scan cadence
+# (~5 minutes) - 15 minutes and 3 confirmations means at least two full
+# scan cycles' worth of independent "still not found" answers, not a
+# single unlucky lookup. This ONLY mitigates read-after-write lag - it does
+# NOT make an unverified error code authoritative. The grace period can
+# only ever fire for a code already on
+# webull_api._CONFIRMED_DEFINITE_REJECTION_ERROR_CODES (empirically
+# confirmed, currently empty - see that constant's docstring), which is the
+# thing actually establishing authority; this just guards against acting on
+# a confirmed code's answer too soon.
+UNKNOWN_SUBMISSION_GRACE_PERIOD_SECONDS = 900
+MIN_DEFINITE_REJECTION_CONFIRMATIONS = 3
+
 POSITIONS_CACHE: Dict[str, Dict[str, object]] = {}
 POSITIONS_CACHE_SECONDS = 30
 BALANCE_CACHE: Dict[str, Dict[str, object]] = {}
@@ -2608,22 +2707,439 @@ def _available_position_slots(max_positions: int, open_position_count: int, defa
     return max(0, max_positions - open_position_count)
 
 
-def _compute_max_trade_size(current_balance: float, risk_percent_of_balance: float) -> float:
-    """risk_percent_of_balance <= 0 means the risk-per-trade limit is disabled
-    (returns 0, which callers treat as "no cap" - see _compute_position_quantity)."""
+def _compute_risk_budget(current_balance: float, risk_percent_of_balance: float) -> float:
+    """The dollar amount you're willing to LOSE if this trade's stop is hit -
+    equity x risk_percent_of_balance. Not a spend cap (see
+    _compute_position_quantity for why that distinction is the whole point).
+    risk_percent_of_balance <= 0 means risk-based sizing is disabled (returns
+    0, which _compute_position_quantity treats as "no risk-based constraint" -
+    affordability and the exposure cap, if set, still apply)."""
     if risk_percent_of_balance <= 0:
         return 0.0
     return current_balance * (risk_percent_of_balance / 100)
 
 
-def _compute_position_quantity(max_trade_size: float, limit_price: float, fallback_quantity: int) -> int:
-    """Share count sized off max_trade_size (see _compute_max_trade_size) - at
-    least 1 share once a trade is deemed affordable, never 0. Falls back to a
-    fixed quantity when sizing is disabled (max_trade_size <= 0) or the price
-    isn't usable."""
-    if max_trade_size > 0 and limit_price > 0:
-        return max(1, int(max_trade_size // limit_price))
-    return fallback_quantity
+def _compute_position_exposure_cap(current_balance: float, max_position_exposure_percent: float) -> float:
+    """Optional hard ceiling on total dollars committed to a single position,
+    independent of stop distance - guards against a position sizing itself
+    very large purely because its stop happens to be extremely tight.
+    max_position_exposure_percent <= 0 means this cap is disabled (no
+    setting currently exposes it in the UI - it defaults to 0/disabled for
+    every account until one does)."""
+    if max_position_exposure_percent <= 0:
+        return 0.0
+    return current_balance * (max_position_exposure_percent / 100)
+
+
+def _extract_broker_buying_power(balance: Dict[str, object]) -> Optional[float]:
+    """Pulls the REAL broker-reported buying power out of a get_account_balance
+    payload - same field path already used for display in
+    _get_live_webull_balance (account_currency_assets[0].buying_power).
+    Returns None (not 0.0) on anything malformed or missing, since "we
+    couldn't read it" and "the broker says zero" are different failure
+    modes and only one of them is safe to size against - see
+    _compute_position_quantity's fail-closed handling of a None
+    broker_buying_power.
+
+    Also rejects a value that parses but isn't finite (NaN or +/-Infinity).
+    float("nan") and float("inf") both succeed without raising, and NaN in
+    particular compares False to everything including `< 0`, so a NaN
+    reading would have silently sailed past the negative-value check below
+    and been returned as a "valid" buying power - which would then corrupt
+    every downstream Decimal conversion/comparison it touches
+    (Decimal("NaN") propagates through arithmetic rather than raising in
+    most operations, or raises InvalidOperation in others, neither of which
+    is a safe way to discover a bad reading three functions away from where
+    it was parsed)."""
+    try:
+        assets = balance.get("account_currency_assets") or [{}]
+        raw = assets[0].get("buying_power", None)
+        if raw is None or raw == "":
+            return None
+        value = float(raw)
+        if not math.isfinite(value) or value < 0:
+            return None
+        return value
+    except (TypeError, ValueError, IndexError, AttributeError):
+        return None
+
+
+def _to_decimal(value: float) -> "Decimal":
+    """Converts via str(), not Decimal(x) directly, so a float's own binary
+    imprecision never enters the Decimal - str() gives the same decimal text
+    a human would write (str(20.1) == '20.1', not the 20.100000000000001...
+    Decimal(20.1) would produce)."""
+    from decimal import Decimal
+
+    return Decimal(str(value))
+
+
+def _floor_shares(numerator: "Decimal", denominator: "Decimal") -> int:
+    """Floor division for money math in Decimal throughout - both inputs
+    must already be Decimal (see _to_decimal), not float, or the float
+    imprecision this exists to avoid can already be baked into them before
+    they arrive here. A plain float floor-divide can silently under-size at
+    an exact boundary: $3.00 risk over a $0.10 risk-per-share (a $20.10
+    entry, $20.00 stop - both perfectly ordinary stock prices) should floor
+    to exactly 30, but entry_price - stop_price computed in float first
+    gives 0.10000000000000142, and 3.0 // 0.10000000000000142 floors to 29 -
+    a real, silent one-share under-size from a subtraction most callers
+    would never think to distrust. Converting entry_price and stop_price to
+    Decimal BEFORE subtracting (not just before the final division) is what
+    actually fixes this - see _compute_position_quantity."""
+    from decimal import ROUND_DOWN
+
+    if denominator <= 0:
+        return 0
+    return int((numerator / denominator).to_integral_value(rounding=ROUND_DOWN))
+
+
+def _compute_position_quantity(
+    risk_budget: Optional[float],
+    entry_price: Optional[float],
+    stop_price: Optional[float],
+    available_buying_power: Optional[float],
+    broker_buying_power: Optional[float],
+    position_exposure_cap: float = 0.0,
+    portfolio_risk_remaining: Optional[float] = None,
+) -> Dict[str, object]:
+    """Sizes a position by risk-at-stop, not by raw share price - fixes a
+    real bug found in production this session where "risk per trade" was
+    being used as a maximum SPEND (budget // share_price) with the stop
+    distance never entering the calculation at all. Two setups with the same
+    entry price but very different stop distances used to size identically
+    regardless of how much money was actually at risk if stopped out, and
+    any stock priced above the (mislabeled) "risk" budget was hard-skipped
+    even when a properly risk-sized quantity would have been affordable and
+    well within the real risk budget.
+
+    Every input is Optional and every failure mode fails CLOSED (quantity 0)
+    rather than falling back to a default that could permit an unintended
+    trade - "risk disabled" is defined precisely as risk_budget being None,
+    <= 0, or otherwise unusable, and in every one of those cases this
+    refuses to size a trade at all rather than substituting a fallback
+    quantity. There is deliberately no fallback-to-N-shares path anymore: a
+    trade that can't be risk-sized is a trade this function will not size,
+    full stop. Missing entry_price, stop_price, available_buying_power, or
+    broker_buying_power (None - the caller couldn't determine them, e.g. a
+    failed balance fetch) are treated the same way, not coerced to 0 and
+    sized as if "definitely zero dollars available" - that's a different,
+    more specific failure than "we don't actually know."
+
+    available_buying_power is the ISOLATED VIRTUAL allocation (this user's
+    chosen virtual equity minus capital this app has already committed to
+    its own tracked tickers) - it is what actually controls strategy sizing
+    day to day. broker_buying_power is the REAL account's buying power as
+    reported by the broker, and is layered on top as a hard ceiling per the
+    formula quantity = min(risk, virtual allocation, broker buying power,
+    position cap): a large sandbox balance will not normally bind, but
+    checking it costs one extra constraint and prevents this architecture
+    from becoming dangerous if it's ever pointed at a smaller or live
+    account. The two are deliberately not merged into one number - they
+    answer different questions and either one alone can be the tightest
+    constraint depending on account state.
+
+    Returns a structured result (all five keys always present) instead of a
+    single reason string, so a successful sizing and a tied constraint are
+    both auditable, not just the one label that happened to win a tie:
+        {
+          "quantity": int,
+          "constraints": {"risk": int, "buying_power": int, "broker_buying_power": int, "position_cap": int, "portfolio_risk": int|None},
+          "binding_constraints": [str, ...],   # every constraint tied for the minimum, not just one
+          "reason": str,                        # "" on success, else a combined human-readable message
+        }
+    Constraint values in "constraints" are each independently computed
+    (ignoring the others) so the full picture is visible even when only one
+    ends up binding. A disabled constraint (risk_budget <= 0/None,
+    position_exposure_cap <= 0, portfolio_risk_remaining is None) reports
+    None in "constraints" rather than a number, and is excluded from the
+    min() - it never binds, it just isn't evaluated.
+
+    entry_price <= 0/None, or stop_price missing/invalid (<= 0, or at/above
+    entry_price - not a valid long stop) both fail closed immediately with
+    quantity 0 and no constraint breakdown, since risk-per-share can't be
+    computed at all without a valid stop.
+
+    Whole shares only - Webull's OpenAPI quantity field hasn't been verified
+    to accept a fractional value, so this floors rather than guessing."""
+    if entry_price is None or entry_price <= 0:
+        return {"quantity": 0, "constraints": {}, "binding_constraints": ["entry_price"], "reason": "no valid entry price"}
+    if stop_price is None or stop_price <= 0 or stop_price >= entry_price:
+        return {
+            "quantity": 0,
+            "constraints": {},
+            "binding_constraints": ["stop_price"],
+            "reason": "no valid stop below entry price to size risk against",
+        }
+
+    from decimal import Decimal
+
+    # Converted to Decimal immediately, before ANY arithmetic (including the
+    # subtraction below) touches them as float - see _floor_shares for why
+    # doing this only at the final division is not enough.
+    entry_price_dec = _to_decimal(entry_price)
+    stop_price_dec = _to_decimal(stop_price)
+    risk_per_share = entry_price_dec - stop_price_dec
+
+    constraints: Dict[str, Optional[int]] = {
+        "risk": None,
+        "buying_power": None,
+        "broker_buying_power": None,
+        "position_cap": None,
+        "portfolio_risk": None,
+    }
+
+    risk_disabled = risk_budget is None or risk_budget <= 0
+    if not risk_disabled:
+        constraints["risk"] = _floor_shares(_to_decimal(risk_budget), risk_per_share)
+
+    buying_power_unknown = available_buying_power is None
+    if not buying_power_unknown:
+        constraints["buying_power"] = _floor_shares(_to_decimal(max(0.0, available_buying_power)), entry_price_dec)
+
+    broker_buying_power_unknown = broker_buying_power is None
+    if not broker_buying_power_unknown:
+        constraints["broker_buying_power"] = _floor_shares(_to_decimal(max(0.0, broker_buying_power)), entry_price_dec)
+
+    if position_exposure_cap and position_exposure_cap > 0:
+        constraints["position_cap"] = _floor_shares(_to_decimal(position_exposure_cap), entry_price_dec)
+
+    if portfolio_risk_remaining is not None:
+        constraints["portfolio_risk"] = _floor_shares(_to_decimal(max(0.0, portfolio_risk_remaining)), risk_per_share)
+
+    reasons_by_key = {
+        "risk": "risk budget too small for one share at this stop",
+        "buying_power": "insufficient buying power",
+        "broker_buying_power": "insufficient real broker buying power",
+        "position_cap": "position exposure cap reached",
+        "portfolio_risk": "remaining portfolio risk too small for one share at this stop",
+    }
+
+    # Risk being disabled/unknown, or either buying-power figure being
+    # unknown, fails closed outright rather than sizing off whatever
+    # constraints remain - "we don't know if this is safe" is not the same
+    # as "size it anyway".
+    if risk_disabled:
+        return {
+            "quantity": 0,
+            "constraints": constraints,
+            "binding_constraints": ["risk"],
+            "reason": "risk-based sizing is disabled or unavailable - refusing to size a trade without a valid risk budget",
+        }
+    if buying_power_unknown:
+        return {
+            "quantity": 0,
+            "constraints": constraints,
+            "binding_constraints": ["buying_power"],
+            "reason": "available buying power could not be determined - refusing to size a trade against stale or missing account data",
+        }
+    if broker_buying_power_unknown:
+        return {
+            "quantity": 0,
+            "constraints": constraints,
+            "binding_constraints": ["broker_buying_power"],
+            "reason": "real broker buying power could not be determined - refusing to size a trade against stale or missing account data",
+        }
+
+    active = {key: value for key, value in constraints.items() if value is not None}
+    minimum = min(active.values())
+    binding = [key for key, value in active.items() if value == minimum]
+
+    if minimum < 1:
+        reason = " and ".join(reasons_by_key[key] for key in binding)
+        return {"quantity": 0, "constraints": constraints, "binding_constraints": binding, "reason": reason}
+    return {"quantity": minimum, "constraints": constraints, "binding_constraints": binding, "reason": ""}
+
+
+def _compute_committed_virtual_capital(
+    real_open_positions: Sequence[Dict[str, object]],
+    real_open_orders: Sequence[Dict[str, object]],
+    tracked_tickers: Sequence[str],
+) -> float:
+    """Dollars already committed or reserved - deliberately broker-
+    authoritative, NOT derived from this app's own lifecycle_state
+    bookkeeping. Nothing in this codebase currently transitions an entry to
+    the CLOSED lifecycle state when a position actually exits (stop hit,
+    target hit, manual close) - order_lifecycle.py defines CLOSED as
+    terminal, but no code path ever calls ol.transition(entry, ol.CLOSED,
+    ...). Trusting lifecycle_state here would mean every position this app
+    ever opens counts as "still committing capital" forever, well past when
+    it's actually closed. Checking the broker's own current positions and
+    open orders instead means a stale, missing, or legacy (pre-dating the
+    state machine entirely) local record can never cause an under- or
+    over-release of committed capital - see test_capital_reconciliation.py.
+
+    Two things commit capital, both read live from Webull:
+      1. Shares currently HELD for a ticker this app has ever traded
+         (matched against real_open_positions, filtered to tracked_tickers
+         so a ticker the user only ever traded manually - never through
+         autonomous mode - isn't pulled into this budget) - valued at
+         CURRENT market price (quantity x last_price), never historical
+         entry cost. Net liquidation value already reflects any unrealized
+         gain/loss on that market value; subtracting cost basis from a
+         net-liq figure that already includes the current (possibly
+         appreciated) market value would let an unrealized gain masquerade
+         as available cash that isn't actually free to deploy.
+      2. The UNFILLED remainder of any resting BUY order (real_open_orders,
+         side == BUY, total_quantity - filled_quantity), valued at its
+         limit price - the actual dollar amount the broker holds against
+         buying power until it fills or cancels. Only the unfilled portion,
+         specifically so a partially-filled order's already-held shares
+         (counted once, in #1, at current market value) are never also
+         counted against their own still-resting remainder (counted here,
+         at limit price) - a partial fill is one position's worth of
+         capital, not two.
+
+    Known limitation: if the SAME ticker is traded both autonomously and
+    manually, real_open_positions can't distinguish which shares came from
+    which source - the full held quantity for that ticker counts here,
+    which can overstate committed capital if some of those shares are the
+    user's own manual trade rather than this app's. Webull's position API
+    doesn't expose per-lot/per-source tracking to resolve this further.
+
+    Schema validation here rejects MISSING or NONSENSICAL required fields,
+    not just the wrong container type (a non-dict record already raises on
+    the first .get() call, which _build_capital_snapshot's caller-level
+    try/except already turns into a fail-closed None). A field silently
+    defaulted via .get(key, 0) - a missing quantity, price, or side - or a
+    negative quantity/price, would previously pass through arithmetic
+    without ever raising, silently UNDER-counting committed capital (the
+    dangerous direction: it overstates available buying power, not
+    understates it). Every field this function actually uses to decide
+    whether a record counts, and how much, is validated to be present and
+    non-negative before it's used; any violation raises ValueError, which
+    fails the ENTIRE calculation closed via the same caller-level
+    try/except - one malformed record must not let every OTHER record's
+    good data compute a wrong (too permissive) answer."""
+    tracked = {ticker.strip().upper() for ticker in tracked_tickers if ticker}
+
+    position_value = _to_decimal(0.0)
+    for position in real_open_positions:
+        symbol = position.get("symbol")
+        if not symbol or not isinstance(symbol, str):
+            raise ValueError(f"malformed position record: missing or invalid symbol ({symbol!r})")
+        ticker = symbol.upper()
+        if ticker not in tracked:
+            continue
+        quantity_raw = position.get("quantity")
+        price_raw = position.get("last_price")
+        if quantity_raw is None or price_raw is None:
+            raise ValueError(f"malformed position record for {ticker}: missing quantity or last_price")
+        quantity = _to_decimal(float(quantity_raw))
+        price = _to_decimal(float(price_raw))
+        if quantity < 0 or price < 0:
+            raise ValueError(
+                f"malformed position record for {ticker}: negative quantity ({quantity_raw!r}) or last_price ({price_raw!r})"
+            )
+        position_value += quantity * price
+
+    reserved_value = _to_decimal(0.0)
+    for order in real_open_orders:
+        side_raw = order.get("side")
+        if side_raw is None or not isinstance(side_raw, str):
+            raise ValueError(f"malformed open order record: missing or invalid side ({side_raw!r})")
+        if side_raw.upper() != "BUY":
+            continue
+        symbol = order.get("symbol")
+        if not symbol or not isinstance(symbol, str):
+            raise ValueError(f"malformed open order record: missing or invalid symbol ({symbol!r})")
+        ticker = symbol.upper()
+        if ticker not in tracked:
+            continue
+        total_quantity_raw = order.get("total_quantity")
+        filled_quantity_raw = order.get("filled_quantity")
+        limit_price_raw = order.get("limit_price")
+        if total_quantity_raw is None or filled_quantity_raw is None or limit_price_raw is None:
+            raise ValueError(f"malformed open order record for {ticker}: missing total_quantity/filled_quantity/limit_price")
+        total_quantity = _to_decimal(float(total_quantity_raw))
+        filled_quantity = _to_decimal(float(filled_quantity_raw))
+        limit_price = _to_decimal(float(limit_price_raw))
+        if total_quantity < 0 or filled_quantity < 0 or limit_price < 0:
+            raise ValueError(
+                f"malformed open order record for {ticker}: negative total_quantity/filled_quantity/limit_price"
+            )
+        unfilled_quantity = total_quantity - filled_quantity
+        if unfilled_quantity <= 0:
+            continue
+        reserved_value += unfilled_quantity * limit_price
+
+    return float(position_value + reserved_value)
+
+
+def _compute_available_buying_power(total_equity: float, committed_capital: float) -> float:
+    """total_equity (net liquidation value) is not the same thing as
+    available buying power - it doesn't subtract capital already tied up in
+    open positions or reserved by pending orders. This does."""
+    return max(0.0, float(_to_decimal(total_equity) - _to_decimal(committed_capital)))
+
+
+def _compute_available_buying_power_with_reservations(
+    snapshot_available_buying_power: Optional[float], local_reservations: "Decimal | float"
+) -> Optional[float]:
+    """Available buying power for ONE candidate, layered over a single
+    broker snapshot taken once at the start of the scan plus every
+    reservation already added for candidates earlier in this SAME run - see
+    the comment in _run_autonomous_trade_scan_locked for why re-reading the
+    broker before each candidate does not solve broker-side eventual
+    consistency. None propagates through unchanged (the snapshot itself
+    could not be determined - see _compute_committed_virtual_capital's
+    caller - so no candidate this tick can be sized, not just this one).
+    local_reservations is normally already a Decimal (see _reservation_notional
+    and the local_reservations accumulator in _run_autonomous_trade_scan_locked) -
+    _to_decimal round-trips a Decimal through str() losslessly, so a plain
+    float is still accepted too (e.g. from a test calling this directly)."""
+    if snapshot_available_buying_power is None:
+        return None
+    return max(0.0, float(_to_decimal(snapshot_available_buying_power) - _to_decimal(local_reservations)))
+
+
+def _reservation_notional(quantity: float, limit_price: float) -> "Decimal":
+    """The full requested notional (not just what ends up filling) reserved
+    the instant an order is accepted - conservative on purpose, the same
+    convention _compute_committed_virtual_capital uses for a resting
+    order's unfilled remainder: it still holds real buying power at the
+    broker until it fills or is cancelled.
+
+    Returns a Decimal, not a float, specifically so the local_reservations
+    accumulator in _run_autonomous_trade_scan_locked can do `+=` in true
+    Decimal arithmetic across every candidate in a scan - each individual
+    call was already Decimal-safe internally, but accumulating the RESULTS
+    as float (0.1 + 0.2 != 0.3) could still reintroduce binary-imprecision
+    at the addition step across many candidates, even though no single
+    multiplication ever touched a float. A negative result should never be
+    possible (quantity and limit_price are always positive by construction
+    upstream) - raising here rather than silently letting it through is a
+    canary against a future caller bug, not a case expected in practice."""
+    notional = _to_decimal(quantity) * _to_decimal(limit_price)
+    if notional < 0:
+        raise ValueError(f"reservation notional must never be negative (quantity={quantity!r}, limit_price={limit_price!r})")
+    return notional
+
+
+def _build_capital_snapshot(
+    fetch_open_orders,
+    real_open_positions: Sequence[Dict[str, object]],
+    tracked_tickers: Sequence[str],
+    total_equity: float,
+) -> Optional[float]:
+    """The one-time-per-scan broker snapshot _run_autonomous_trade_scan_locked
+    takes before sizing any candidate. fetch_open_orders is a zero-arg
+    callable (already bound to creds/account_id by the caller) rather than
+    the orders list directly, specifically so a single try/except here
+    covers BOTH failure modes the same way: the fetch itself raising
+    (network error, auth failure) and the fetch succeeding but returning
+    something malformed enough that processing it raises (unexpected shape,
+    missing fields past what .get() defaults can absorb). Either way this
+    returns None - never a partial number, never a value computed from only
+    some of the real commitments - so every candidate in this scan tick
+    fails closed together rather than some sizing against good data and
+    others silently against wrong data."""
+    try:
+        real_open_orders = fetch_open_orders()
+        committed_capital = _compute_committed_virtual_capital(real_open_positions, real_open_orders, tracked_tickers)
+        return _compute_available_buying_power(total_equity, committed_capital)
+    except Exception:  # noqa: BLE001 - intentionally broad, see docstring
+        return None
 
 
 def _new_entries_allowed(trading_session: str) -> bool:
@@ -2635,6 +3151,23 @@ def _new_entries_allowed(trading_session: str) -> bool:
     that gap - acceptable for retrying a stop on an existing position, not
     for opening a brand new one with no protection plan at all."""
     return trading_session == "CORE"
+
+
+def _entry_fill_is_final(status: str) -> bool:
+    """True once an entry order's fill status won't change further without a
+    brand new placement - FILLED (done) or CANCELLED/FAILED (never will).
+    SUBMITTED/"PARTIAL FILLED" mean keep polling - real Webull OrderStatus
+    values, confirmed live this session via get_order_detail."""
+    return status in ("FILLED", "CANCELLED", "FAILED")
+
+
+def _protective_leg_is_active(status: str) -> bool:
+    """True if a protective order is genuinely resting at the broker right
+    now - SUBMITTED (untouched) or "PARTIAL FILLED" (partially executed, the
+    remainder still resting) both count as active. FILLED means it already
+    executed (the position exited through this leg, not a confirmation
+    failure); CANCELLED/FAILED mean it needs to be replaced."""
+    return status in ("SUBMITTED", "PARTIAL FILLED")
 
 
 def _compute_tightened_stop(current_stop: float, current_price: float) -> float:
@@ -2770,6 +3303,695 @@ def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
         return _run_autonomous_trade_scan_locked(user_id)
 
 
+def _submit_and_protect_entry(
+    user_id: str,
+    creds: Dict[str, str],
+    account_id: str,
+    ticker: str,
+    requested_quantity: int,
+    limit_price: float,
+    stop_price: float,
+    target_price: float,
+    trading_day: str,
+    entry: Dict[str, object],
+) -> Dict[str, object]:
+    """Submits the entry order and drives it through the full lifecycle -
+    fill confirmation, then protection sized to the ACTUAL filled quantity,
+    then confirmation that both protective legs are genuinely resting -
+    before returning. Mutates and returns `entry` (the caller's
+    overnight_orders record) with the final lifecycle_state, so a caller
+    checking entry["lifecycle_state"] == ol.PROTECTION_CONFIRMED_ACTIVE knows
+    the position is genuinely covered, not just that a placement call once
+    returned success ("protection attempted" is never reported as
+    "protection confirmed active" - see order_lifecycle.py).
+
+    Bounded polling (ENTRY_FILL_POLL_ATTEMPTS / PROTECTION_CONFIRM_POLL_ATTEMPTS)
+    means this can return with the order still in a transitional state
+    (entry_submitted, protection_pending, protection_failed) instead of
+    blocking indefinitely - _monitor_transitional_orders is what keeps
+    checking after this function returns, so one slow-to-fill ticker can't
+    stall the rest of the candidate batch.
+
+    The initial placement call's exception, if any, is deliberately split
+    two ways rather than treated uniformly as failure - using the explicit
+    webull_api.DefiniteOrderRejection / webull_api.AmbiguousOrderSubmission
+    classification (integrations/webull.py), not exception class alone.
+    Exception TYPE by itself never proved whether a request reached
+    Webull - _place_order_with_retry now parses the actual ServerException
+    fields (error_code, http_status) to decide: only a well-formed, PARSED
+    broker rejection (a real error_code, paired with an HTTP status that
+    isn't auth/rate-limit/server-side) raises DefiniteOrderRejection.
+    Everything else - timeouts, dropped connections, SDK exceptions,
+    unparseable response bodies, 401/403/429/5xx - raises
+    AmbiguousOrderSubmission, the fail-safe default. Only
+    DefiniteOrderRejection is treated as a definite ENTRY_FAILED;
+    AmbiguousOrderSubmission (and, as a final fail-safe, any exception type
+    this classification scheme doesn't recognize) goes to
+    UNKNOWN_SUBMISSION_STATE instead, specifically so the caller reserves
+    capital for it and doesn't silently retry/duplicate an order that might
+    already be resting at the broker - see _reconcile_unknown_submission for
+    how this eventually gets resolved."""
+    entry_client_order_id = ol.deterministic_client_order_id(user_id, ticker, trading_day, "entry", attempt=1)
+    ol.initialize(entry, ol.ENTRY_SUBMITTED, entry_client_order_id=entry_client_order_id)
+
+    try:
+        webull_api.place_stock_order(
+            app_key=creds["app_key"],
+            app_secret=creds["app_secret"],
+            account_id=account_id,
+            symbol=ticker,
+            side="BUY",
+            quantity=requested_quantity,
+            limit_price=limit_price,
+            trading_session=_current_webull_trading_session(),  # candidates are already restricted to CORE hours by _new_entries_allowed
+            client_order_id=entry_client_order_id,
+        )
+    except webull_api.DefiniteOrderRejection as error:
+        # A well-formed, parsed broker rejection (see docstring) - the
+        # order definitely never went through.
+        ol.transition(entry, ol.ENTRY_FAILED, error=str(error))
+        return entry
+    except Exception as error:  # noqa: BLE001 - AmbiguousOrderSubmission, or anything else not explicitly classified - fail-safe default, see docstring
+        ol.transition(entry, ol.UNKNOWN_SUBMISSION_STATE, error=str(error))
+        return entry
+
+    return _poll_fill_and_protect(
+        user_id=user_id,
+        creds=creds,
+        account_id=account_id,
+        ticker=ticker,
+        entry_client_order_id=entry_client_order_id,
+        limit_price=limit_price,
+        stop_price=stop_price,
+        target_price=target_price,
+        trading_day=trading_day,
+        entry=entry,
+    )
+
+
+def _poll_fill_and_protect(
+    user_id: str,
+    creds: Dict[str, str],
+    account_id: str,
+    ticker: str,
+    entry_client_order_id: str,
+    limit_price: float,
+    stop_price: float,
+    target_price: float,
+    trading_day: str,
+    entry: Dict[str, object],
+) -> Dict[str, object]:
+    """The fill-confirmation-through-protection body shared by two callers:
+    _submit_and_protect_entry, right after a fresh placement is accepted,
+    and _reconcile_unknown_submission, resuming an entry that turns out to
+    have actually reached the broker despite an earlier ambiguous response.
+    Both callers are responsible for getting entry into a state where
+    lifecycle_state allows transitioning to ENTRY_PARTIALLY_FILLED/
+    ENTRY_FILLED/ENTRY_FAILED before calling this (see VALID_TRANSITIONS in
+    order_lifecycle.py) - this function itself does not place or validate
+    the entry order, only polls and protects it.
+
+    A CANCELLED or FAILED order is not automatically a zero-position
+    outcome - a real, common brokerage behavior is a day order partially
+    filling (e.g. 4 of 10 shares) before the unfilled remainder is
+    cancelled (session close, a triggered risk control, etc). Treating
+    CANCELLED/FAILED as unconditionally "no position" would silently
+    discard those 4 filled shares as a bookkeeping non-event, leaving a
+    real, held, completely UNPROTECTED position outside this function's
+    knowledge - so filled_quantity is checked BEFORE deciding the outcome:
+    a positive filled_quantity is treated exactly like a full fill for
+    protection purposes (transitions to ENTRY_FILLED and proceeds to place
+    a stop/target sized to that actual quantity), and the cancelled/failed
+    remainder is recorded on the entry purely for the audit trail. Only a
+    confirmed filled_quantity of zero resolves to the true no-position
+    ENTRY_FAILED outcome."""
+    filled_quantity = 0.0
+    for attempt in range(ENTRY_FILL_POLL_ATTEMPTS):
+        if attempt > 0:
+            time.sleep(ENTRY_FILL_POLL_INTERVAL_SECONDS)
+        try:
+            detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, entry_client_order_id)
+        except Exception:  # noqa: BLE001 - transient lookup failure, try again next attempt
+            continue
+        fill = ol.summarize_fill(detail)
+        filled_quantity = fill["filled_quantity"]
+        if fill["status"] == "PARTIAL FILLED":
+            ol.transition(entry, ol.ENTRY_PARTIALLY_FILLED, filled_quantity=filled_quantity)
+        if _entry_fill_is_final(fill["status"]):
+            if fill["status"] == "FILLED":
+                ol.transition(entry, ol.ENTRY_FILLED, filled_quantity=filled_quantity)
+            elif filled_quantity > 0:
+                # CANCELLED/FAILED but shares DID fill first - a real held
+                # position, not a no-op. Protect exactly what filled; the
+                # remainder never arriving is recorded, not treated as a
+                # reason to skip protection.
+                entry["unfilled_remainder_status"] = fill["status"]
+                ol.transition(
+                    entry, ol.ENTRY_FILLED, filled_quantity=filled_quantity, unfilled_remainder_status=fill["status"]
+                )
+            else:
+                ol.transition(
+                    entry, ol.ENTRY_FAILED, error=f"entry order {fill['status'].lower()} at the broker", filled_quantity=filled_quantity
+                )
+                return entry
+            break
+
+    if filled_quantity <= 0:
+        # Never filled within the bounded window - left in entry_submitted;
+        # _monitor_transitional_orders keeps checking on the next pass.
+        return entry
+
+    # Realized risk, recomputed from what actually filled - sizing happened
+    # against the PROPOSED entry and requested quantity before this order
+    # even reached the broker; a partial fill changes the real dollar risk
+    # (fewer shares than planned), and this is the point where that becomes
+    # knowable. For a LIMIT BUY specifically, the fill price can only be <=
+    # the limit price by construction (that's what a limit order guarantees)
+    # - there's no "adverse" fill price scenario to recompute against, only
+    # "at the limit or better". get_order_detail hasn't been verified to
+    # expose an average-fill-price field separately from the order's own
+    # limit_price, so this uses limit_price as a deliberately conservative
+    # (worst-case-for-a-buy-limit) stand-in rather than guessing at an
+    # unverified field name - realized risk here is an upper bound, never an
+    # underestimate. Gaps and slippage on the STOP side aren't modeled at
+    # all - a stop-loss can still realize a larger loss than this number if
+    # the market gaps through it, which is why this is recorded as an
+    # estimate, not a guarantee (see the same caveat in Account Hub's risk
+    # UI copy).
+    realized_risk_dollars = round(filled_quantity * (limit_price - stop_price), 2)
+    entry["realized_risk_dollars"] = realized_risk_dollars
+    planned_risk_dollars = entry.get("planned_risk_dollars")
+    if isinstance(planned_risk_dollars, (int, float)) and realized_risk_dollars > planned_risk_dollars + 0.01:
+        # A flag nobody consumes isn't a control - this fires the same
+        # high-priority alert path as a protection-confirmation failure, and
+        # persisting it on the entry record (already done above) is the
+        # audit trail: it's written to overnight_orders.json, visible in
+        # Trading Portfolio for as long as that record exists.
+        entry["realized_risk_exceeds_planned"] = True
+        try:
+            add_manual_alert(
+                user_id,
+                {
+                    "type": "realized_risk_exceeds_planned",
+                    "ticker": ticker,
+                    "message": (
+                        f"{ticker}: realized risk (${realized_risk_dollars:.2f} on {filled_quantity:g} filled shares) "
+                        f"exceeded the planned risk budget (${planned_risk_dollars:.2f}) for this entry. Review the "
+                        f"position - the sizing that was supposed to bound this trade's loss did not hold as expected."
+                    ),
+                },
+            )
+        except Exception:  # noqa: BLE001 - never let alerting itself break the fill/protection flow
+            pass
+
+    # Whatever filled - even a partial - gets protected now rather than
+    # waiting for the rest: filled shares sitting unprotected is worse than a
+    # protective order sized slightly smaller than the eventual full
+    # position (a later pass can size up if the remainder fills afterward).
+    ol.transition(entry, ol.PROTECTION_PENDING)
+
+    stop_client_order_id = ol.deterministic_client_order_id(user_id, ticker, trading_day, "stop", attempt=1)
+    target_client_order_id = ol.deterministic_client_order_id(user_id, ticker, trading_day, "target", attempt=1)
+    entry["stop_client_order_id"] = stop_client_order_id
+    entry["target_client_order_id"] = target_client_order_id
+
+    stop_placed_ok = False
+    if stop_price > 0:
+        try:
+            time.sleep(1.0)
+            webull_api.place_stop_loss_order(
+                app_key=creds["app_key"],
+                app_secret=creds["app_secret"],
+                account_id=account_id,
+                symbol=ticker,
+                quantity=filled_quantity,
+                stop_price=stop_price,
+                client_order_id=stop_client_order_id,
+            )
+            record_exit_order(user_id, ticker, stop_client_order_id, "stop")
+            stop_placed_ok = True
+            entry["stop_order_error"] = None
+        except Exception as error:  # noqa: BLE001 - the entry already filled, don't fail the whole candidate
+            entry["stop_order_error"] = str(error)
+    else:
+        entry["stop_order_error"] = "no stop price computed for this setup"
+
+    target_placed_ok = False
+    if target_price > 0:
+        try:
+            time.sleep(1.0)
+            webull_api.place_take_profit_order(
+                app_key=creds["app_key"],
+                app_secret=creds["app_secret"],
+                account_id=account_id,
+                symbol=ticker,
+                quantity=filled_quantity,
+                target_price=target_price,
+                trading_session=_current_webull_trading_session(),
+                client_order_id=target_client_order_id,
+            )
+            record_exit_order(user_id, ticker, target_client_order_id, "take_profit")
+            target_placed_ok = True
+            entry["target_order_error"] = None
+        except Exception as error:  # noqa: BLE001 - the entry already filled, don't fail the whole candidate
+            entry["target_order_error"] = str(error)
+    else:
+        entry["target_order_error"] = "no target price computed for this setup"
+
+    # Placement succeeding is not the same as confirmed active - poll each
+    # leg's real status before declaring protection confirmed. A missing or
+    # failed stop is never treated as "fine" (unlike a missing target, which
+    # only forfeits upside capture, not safety) - that gap is exactly what
+    # this whole mechanism exists to close.
+    stop_confirmed = False
+    target_confirmed = target_price <= 0
+    for attempt in range(PROTECTION_CONFIRM_POLL_ATTEMPTS):
+        if attempt > 0:
+            time.sleep(PROTECTION_CONFIRM_POLL_INTERVAL_SECONDS)
+        if stop_placed_ok and not stop_confirmed:
+            try:
+                stop_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, stop_client_order_id)
+                stop_confirmed = _protective_leg_is_active(ol.summarize_fill(stop_detail)["status"])
+            except Exception:  # noqa: BLE001 - transient lookup failure, try again next attempt
+                pass
+        if target_placed_ok and not target_confirmed:
+            try:
+                target_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, target_client_order_id)
+                target_confirmed = _protective_leg_is_active(ol.summarize_fill(target_detail)["status"])
+            except Exception:  # noqa: BLE001 - transient lookup failure, try again next attempt
+                pass
+        if stop_confirmed and target_confirmed:
+            break
+
+    if stop_confirmed and target_confirmed:
+        ol.transition(entry, ol.PROTECTION_CONFIRMED_ACTIVE, protection_confirmed_at=_now_utc().isoformat())
+    else:
+        ol.transition(
+            entry,
+            ol.PROTECTION_FAILED,
+            error=(
+                f"could not confirm protection active within {PROTECTION_CONFIRM_POLL_ATTEMPTS} attempts "
+                f"(stop_confirmed={stop_confirmed}, target_confirmed={target_confirmed})"
+            ),
+        )
+        try:
+            add_manual_alert(
+                user_id,
+                {
+                    "type": "protection_failed",
+                    "ticker": ticker,
+                    "message": (
+                        f"{ticker}: entry filled ({filled_quantity:g} shares) but protection could not be confirmed "
+                        f"active (stop_confirmed={stop_confirmed}, target_confirmed={target_confirmed}). Retrying "
+                        f"automatically - check the position manually if this persists."
+                    ),
+                },
+            )
+        except Exception:  # noqa: BLE001 - never let alerting itself break the scan
+            pass
+
+    return entry
+
+
+def _parse_trusted_past_timestamp(raw: object, *, now: datetime, default: datetime) -> datetime:
+    """Parses a stored ISO timestamp that's meant to anchor a grace period
+    (e.g. first_definite_rejection_at) - and rejects anything that couldn't
+    have been produced by this app's own _now_utc().isoformat() writes:
+      - missing/empty -> default (a fresh anchor, not an error - this is
+        the normal case for a value that's never been set yet);
+      - unparseable -> default (corrupt data, not trusted);
+      - naive (no tzinfo) -> default. _now_utc() always writes a
+        timezone-aware ISO string; a naive one showing up means the value
+        didn't come from this code path and can't be safely compared
+        against an aware `now` anyway (mixing naive/aware datetimes raises
+        TypeError on subtraction) - never silently assumed to be UTC and
+        given a pass, since that would mask real data corruption;
+      - in the FUTURE relative to `now` -> default. A first-rejection
+        timestamp later than the current time is nonsensical (clock skew
+        on whichever process wrote it, or a corrupted/tampered value) and
+        must not be trusted to anchor how much time has "elapsed" since it.
+    Falling back to `default` (normally `now`) restarts the grace period
+    fresh rather than ever letting a bad stored value satisfy it early."""
+    if not raw:
+        return default
+    try:
+        parsed = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return default
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return default
+    if parsed > now:
+        return default
+    return parsed
+
+
+def _reconcile_unknown_submission(
+    user_id: str, creds: Dict[str, str], account_id: str, entry: Dict[str, object]
+) -> Dict[str, object]:
+    """Attempts to resolve one entry stuck in UNKNOWN_SUBMISSION_STATE by
+    looking up its entry_client_order_id directly - the same lookup
+    get_order_detail already does elsewhere, but here the question being
+    asked is existence, not just status: does the broker have ANY record of
+    this order at all?
+
+    This entry's CAPITAL reservation does NOT self-correct on its own while
+    still unresolved - see _reconcile_unknown_submissions, whose return
+    value blocks every NEW entry for this account (not just within the
+    scan tick the ambiguity first occurred in) for as long as ANY entry
+    remains in UNKNOWN_SUBMISSION_STATE. What CAN self-correct here, once
+    resolved, is PROTECTION: if the ambiguous submission actually filled,
+    nothing else will notice and attach a stop-loss/take-profit unless this
+    function resumes that flow - an unprotected filled position, not a
+    bookkeeping discrepancy, is the real risk an unresolved entry
+    represents.
+
+    The lookup's outcome is classified using webull_api.DefiniteOrderRejection
+    vs webull_api.AmbiguousOrderSubmission (see integrations/webull.py's
+    _classify_server_exception) - exception class alone never proved
+    whether the broker actually has no record of this order, so this no
+    longer treats every lookup failure identically:
+      - DefiniteOrderRejection (a well-formed, PARSED "no such order" /
+        rejection-shaped response) is NOT immediately conclusive by itself -
+        see UNKNOWN_SUBMISSION_GRACE_PERIOD_SECONDS / MIN_DEFINITE_REJECTION_CONFIRMATIONS
+        above for why. The first sighting just records itself
+        (first_definite_rejection_at, definite_rejection_count) and stays
+        UNKNOWN_SUBMISSION_STATE; only once the SAME definite absence has
+        been confirmed enough times, spread across enough elapsed time,
+        does this resolve to ENTRY_FAILED.
+      - Any other exception (AmbiguousOrderSubmission, or anything else):
+        still can't tell - stays UNKNOWN_SUBMISSION_STATE, reserved and
+        alerted, for the next scan to try again. Does not reset or advance
+        the definite-rejection counters above - an ambiguous result neither
+        confirms nor contradicts a prior definite "not found" sighting.
+      - A SUCCESSFUL lookup means the broker DOES have a record of this
+        order - resumes fill-polling/protection via _poll_fill_and_protect
+        exactly as if the original placement call had returned normally.
+        _poll_fill_and_protect itself now correctly interprets whatever
+        status comes back, including a CANCELLED/FAILED order that
+        partially filled before being cancelled (see its docstring) - this
+        function no longer duplicates that status interpretation."""
+    entry_client_order_id = entry.get("entry_client_order_id")
+    ticker = str(entry.get("ticker", ""))
+    if not entry_client_order_id or not ticker:
+        return entry
+
+    try:
+        webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, str(entry_client_order_id))
+    except webull_api.DefiniteOrderRejection as error:
+        now = _now_utc()
+        first_seen_at = _parse_trusted_past_timestamp(entry.get("first_definite_rejection_at"), now=now, default=now)
+        confirmations = int(entry.get("definite_rejection_count") or 0) + 1
+        elapsed_seconds = (now - first_seen_at).total_seconds()
+        if confirmations >= MIN_DEFINITE_REJECTION_CONFIRMATIONS and elapsed_seconds >= UNKNOWN_SUBMISSION_GRACE_PERIOD_SECONDS:
+            ol.transition(
+                entry,
+                ol.ENTRY_FAILED,
+                error=f"reconciliation: {error} (confirmed absent {confirmations}x over {elapsed_seconds:.0f}s)",
+            )
+            return entry
+        ol.transition(
+            entry,
+            ol.UNKNOWN_SUBMISSION_STATE,
+            first_definite_rejection_at=first_seen_at.isoformat(),
+            definite_rejection_count=confirmations,
+            last_reconciliation_attempt_at=now.isoformat(),
+            last_reconciliation_error=str(error),
+        )
+        return entry
+    except Exception as error:  # noqa: BLE001 - AmbiguousOrderSubmission, or anything else - still can't tell, see docstring
+        ol.transition(
+            entry,
+            ol.UNKNOWN_SUBMISSION_STATE,
+            last_reconciliation_attempt_at=_now_utc().isoformat(),
+            last_reconciliation_error=str(error),
+        )
+        return entry
+
+    # The lookup succeeded - the broker DOES have a record of this order.
+    # Resume fill-polling/protection exactly as if the original placement
+    # call had returned; _poll_fill_and_protect interprets the status.
+    ol.transition(entry, ol.ENTRY_SUBMITTED, error=None)
+    return _poll_fill_and_protect(
+        user_id=user_id,
+        creds=creds,
+        account_id=account_id,
+        ticker=ticker,
+        entry_client_order_id=str(entry_client_order_id),
+        limit_price=float(entry.get("limit_price") or 0),
+        stop_price=float(entry.get("stop") or 0),
+        target_price=float(entry.get("target") or 0),
+        trading_day=str(entry.get("trading_day") or ""),
+        entry=entry,
+    )
+
+
+def _reconcile_unknown_submissions(user_id: str, creds: Dict[str, str], account_id: str) -> bool:
+    """Runs at the start of every scan, alongside _reconcile_exit_orders and
+    _refresh_stop_confidence, to resolve any entry a prior scan's ambiguous
+    order submission left in UNKNOWN_SUBMISSION_STATE - see
+    _reconcile_unknown_submission for what "resolve" means and why it
+    deliberately can't force a resolution on every attempt. Best-effort: one
+    ticker's lookup failing doesn't stop the others from being tried.
+
+    Returns True if ANY entry is still in UNKNOWN_SUBMISSION_STATE after
+    this pass - the caller (_run_autonomous_trade_scan_locked) MUST NOT
+    place any new entries for this account while this is True, and this is
+    NOT limited to the scan tick the ambiguity first occurred in: it
+    persists across every subsequent scan until conclusively resolved (or
+    manually cleared through an audited procedure - not yet built). The
+    account's true committed capital is not confidently knowable while an
+    ambiguous submission is unresolved - the broker's own snapshot might, on
+    any given scan, show neither the order nor a resulting position yet
+    (broker-side eventual consistency can persist across scans, not just
+    within one), which would silently UNDER-count committed capital and let
+    a new candidate be sized against dollars that may still be spoken for.
+    Refusing every new entry outright while unresolved is strictly more
+    conservative than trying to carry forward a precise reserved-dollar
+    figure across scans, and sidesteps that accounting question entirely.
+    Existing position management (_reconcile_exit_orders,
+    _refresh_stop_confidence, both already run before this) is NOT gated by
+    this - already-open positions stay monitored and protected regardless."""
+    orders = list_overnight_orders(user_id)
+    pending = [order for order in orders if order.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE]
+    if not pending:
+        return False
+    for order in pending:
+        try:
+            _reconcile_unknown_submission(user_id, creds, account_id, order)
+        except Exception:  # noqa: BLE001 - one bad record shouldn't block the others or the scan itself
+            pass
+    replace_overnight_orders(user_id, orders)
+    return any(order.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE for order in pending)
+
+
+def _has_unresolved_ambiguous_submission_locally(user_id: str) -> bool:
+    """Fast, LOCAL-ONLY check (no broker calls) for the persistent dashboard
+    banner - reads whatever the last scan/reconciliation pass already
+    persisted, so it's cheap enough to call on every page load. Mirrors
+    _reconcile_unknown_submissions' own "is anything still unresolved"
+    check, but never attempts to resolve anything itself - purely a read."""
+    return any(order.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE for order in list_overnight_orders(user_id))
+
+
+AMBIGUOUS_RESOLUTION_RELEASE = "release"
+AMBIGUOUS_RESOLUTION_LINK = "link"
+
+
+def _gather_ambiguous_submission_evidence(creds: Dict[str, str], account_id: str, entry: Dict[str, object]) -> Dict[str, object]:
+    """The MANDATORY fresh-check step before any manual resolution of an
+    entry stuck in UNKNOWN_SUBMISSION_STATE - re-queries the broker across
+    FOUR independent sources right now, at resolution time, rather than
+    trusting whatever the automatic reconciliation pass last observed
+    (which could be stale by the time an admin actually acts) or anything
+    an admin might claim to have already checked themselves:
+      - order_detail: the direct client_order_id lookup
+        _reconcile_unknown_submission itself uses;
+      - open_orders: is it currently resting, unfilled, at the broker;
+      - positions: does the ticker show up as a currently-held position
+        (can't distinguish this order's shares from other shares of the
+        same ticker bought some other way - the same known, accepted
+        limitation noted elsewhere in this app - so a match here is still
+        treated as "something found", conservatively);
+      - order_history: did it fill/cancel/reject within the lookback
+        window - catches an order no longer "open" but with a real
+        historical record (get_open_orders alone would miss this).
+
+    Each source is checked independently and its own success/failure is
+    recorded separately - one flaky call must never make the OTHERS'
+    evidence look more conclusive than it actually is. Returns
+    {"found": bool, "checks": {...}, "errors": {...}, "gathered_at": str}.
+    "found" is True only if at least one check POSITIVELY located the
+    order/position. A check that itself failed (network error, broker
+    error, an ambiguous classification) is recorded in "errors" and counts
+    as neither finding nor not-finding anything - it's simply inconclusive,
+    and _resolve_ambiguous_submission treats ANY entry in "errors" as
+    reason enough to refuse a "release" outright."""
+    ticker = str(entry.get("ticker", "")).upper()
+    entry_client_order_id = str(entry.get("entry_client_order_id") or "")
+    checks: Dict[str, object] = {}
+    errors: Dict[str, str] = {}
+    found = False
+
+    try:
+        detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, entry_client_order_id)
+        checks["order_detail"] = ol.summarize_fill(detail)
+        found = True
+    except webull_api.DefiniteOrderRejection:
+        checks["order_detail"] = None
+    except Exception as error:  # noqa: BLE001 - inconclusive, not a "not found" - see docstring
+        errors["order_detail"] = str(error)
+
+    try:
+        open_orders = webull_api.get_open_orders(creds["app_key"], creds["app_secret"], account_id)
+        matches = [order for order in open_orders if order.get("client_order_id") == entry_client_order_id]
+        checks["open_orders"] = matches
+        found = found or bool(matches)
+    except Exception as error:  # noqa: BLE001
+        errors["open_orders"] = str(error)
+
+    try:
+        positions = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
+        matches = [position for position in positions if str(position.get("symbol", "")).upper() == ticker]
+        checks["positions"] = matches
+        found = found or bool(matches)
+    except Exception as error:  # noqa: BLE001
+        errors["positions"] = str(error)
+
+    try:
+        history = webull_api.get_order_history(creds["app_key"], creds["app_secret"], account_id)
+        matches = [order for order in history if order.get("client_order_id") == entry_client_order_id]
+        checks["order_history"] = matches
+        found = found or bool(matches)
+    except Exception as error:  # noqa: BLE001
+        errors["order_history"] = str(error)
+
+    return {"found": found, "checks": checks, "errors": errors, "gathered_at": _now_utc().isoformat()}
+
+
+def _resolve_ambiguous_submission(
+    target_user_id: str, admin_user_id: str, entry_client_order_id: str, action: str, reason: str
+) -> Dict[str, object]:
+    """The ONLY code path allowed to move an entry out of
+    UNKNOWN_SUBMISSION_STATE outside the automatic (grace-period-gated,
+    currently unreachable in production given the empty confirmed-code
+    allowlist - see integrations/webull.py) reconciliation path. This is
+    deliberately narrow and heavily audited: it's the sole way to unfreeze
+    an account's autonomous entries once ambiguity has occurred, and an
+    incorrect "release" here is exactly the failure mode (duplicate/
+    unintended trading, or an unprotected position) the whole
+    UNKNOWN_SUBMISSION_STATE mechanism exists to prevent in the first
+    place - so it never trusts anything it wasn't handed a chance to verify
+    itself.
+
+    Always re-gathers evidence FRESH, right now
+    (_gather_ambiguous_submission_evidence) - never the evidence an admin
+    might be looking at on a page that's since gone stale, and never a
+    client-submitted "I checked, it's fine" claim.
+
+    action="release" (confirm no order or position exists): refuses
+    (raises ValidationError) unless the evidence found NOTHING *and* every
+    one of the four checks actually SUCCEEDED. A check that itself failed
+    is inconclusive, never treated as "checked and clean" - so a single
+    flaky broker call is enough to block a release. Only once all four
+    checks affirmatively ran and found nothing does this transition the
+    entry to ENTRY_FAILED and release the reservation.
+
+    action="link" (resume monitoring): refuses unless the evidence found
+    something concrete to link to. Transitions to ENTRY_SUBMITTED so the
+    normal fill-polling/protection path (_poll_fill_and_protect) picks it
+    up on the very next scan.
+
+    Every call that reaches a decision - release or link, never a refusal -
+    writes an IMMUTABLE audit record (autonomy.ambiguous_resolution_audit)
+    with the administrator, a timestamp, the full evidence gathered, the
+    reason given, and the entry's previous and new lifecycle state, before
+    returning. A refused call raises before any state changes or audit
+    record - there is nothing to audit yet, since nothing happened."""
+    if action not in (AMBIGUOUS_RESOLUTION_RELEASE, AMBIGUOUS_RESOLUTION_LINK):
+        raise ValidationError(f"Unknown resolution action: {action!r}")
+    if not reason or not reason.strip():
+        raise ValidationError("A reason is required to resolve an ambiguous submission.")
+    if not target_user_id:
+        raise ValidationError("A target user_id is required.")
+
+    orders = list_overnight_orders(target_user_id)
+    entry = next((order for order in orders if order.get("entry_client_order_id") == entry_client_order_id), None)
+    if entry is None:
+        raise ValidationError("No matching ambiguous submission found for this user.")
+    if entry.get("lifecycle_state") != ol.UNKNOWN_SUBMISSION_STATE:
+        raise ValidationError(
+            f"This entry is not currently in an unresolved ambiguous state (lifecycle_state={entry.get('lifecycle_state')})."
+        )
+
+    creds = get_webull_credentials(target_user_id)
+    accounts = get_accounts(target_user_id)
+    webull_account = next((account for account in accounts if account.get("platform") == "webull"), None)
+    if not webull_account or webull_account.get("status") != "Connected":
+        raise ValidationError("This user's Webull account is not connected - cannot gather fresh evidence.")
+    sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
+    cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
+    if not cash_account:
+        raise ValidationError("No Webull sandbox account found for this user's credentials.")
+    account_id = cash_account["account_id"]
+
+    evidence = _gather_ambiguous_submission_evidence(creds, account_id, entry)
+    previous_state = entry.get("lifecycle_state")
+
+    if action == AMBIGUOUS_RESOLUTION_RELEASE:
+        if evidence["errors"]:
+            failed_checks = ", ".join(sorted(evidence["errors"].keys()))
+            raise ValidationError(
+                f"Cannot release - {len(evidence['errors'])} of the mandatory fresh checks failed and are "
+                f"inconclusive, not confirmed-clean ({failed_checks}). Resolve the underlying failure and try again."
+            )
+        if evidence["found"]:
+            raise ValidationError(
+                "Cannot release - fresh checks found matching evidence (an order, position, or history record) "
+                "for this entry. Use 'link' instead, or investigate further before taking any action."
+            )
+        ol.transition(entry, ol.ENTRY_FAILED, error=f"manually resolved by admin ({admin_user_id}): {reason.strip()}")
+    else:
+        if not evidence["found"]:
+            raise ValidationError("Cannot link - fresh checks found nothing at the broker to link this entry to.")
+        ol.transition(entry, ol.ENTRY_SUBMITTED, error=None)
+
+    new_state = entry.get("lifecycle_state")
+    replace_overnight_orders(target_user_id, orders)
+
+    audit_record = record_ambiguous_resolution_audit(
+        target_user_id,
+        {
+            "administrator": admin_user_id,
+            "target_user_id": target_user_id,
+            "entry_client_order_id": entry_client_order_id,
+            "ticker": entry.get("ticker"),
+            "timestamp": _now_utc().isoformat(),
+            "action": action,
+            "reason": reason.strip(),
+            "evidence": evidence,
+            "previous_state": previous_state,
+            "new_state": new_state,
+        },
+    )
+
+    try:
+        add_manual_alert(
+            target_user_id,
+            {
+                "type": "ambiguous_submission_resolved",
+                "ticker": entry.get("ticker"),
+                "message": (
+                    f"{entry.get('ticker')}: an ambiguous order submission was manually {action}d by an "
+                    f"administrator. Reason: {reason.strip()}"
+                ),
+            },
+        )
+    except Exception:  # noqa: BLE001 - never let alerting itself break the resolution
+        pass
+
+    return {"entry": entry, "evidence": evidence, "audit_record": audit_record}
+
+
 def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
     """Scans current setups the same way the dashboard does, and for the
     highest-confidence bullish ones places real (sandbox) DAY limit orders on
@@ -2800,6 +4022,13 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
 
     _reconcile_exit_orders(user_id, creds, account_id)
     _refresh_stop_confidence(user_id, creds, account_id)
+    # True if ANY entry - from this scan or an earlier one - is still stuck
+    # in UNKNOWN_SUBMISSION_STATE after this reconciliation attempt. Gates
+    # every NEW entry below (see the comment above entries_allowed) - this
+    # account's true committed capital isn't confidently known while that's
+    # true, so nothing new gets sized against it, no matter how many scans
+    # ago the ambiguity first occurred.
+    has_unresolved_ambiguous_submission = _reconcile_unknown_submissions(user_id, creds, account_id)
 
     risk_settings = get_autonomy_status(user_id)
     if risk_settings.get("emergency_stop_enabled"):
@@ -2813,6 +4042,13 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
     real_net_liquidation_value = float(balance.get("total_net_liquidation_value", 0) or 0)
     virtual_balance = get_virtual_net_account_value(user_id, real_net_liquidation_value)
     current_balance = virtual_balance if virtual_balance is not None else real_net_liquidation_value
+    # Real broker-reported buying power, read from the SAME balance call
+    # above rather than a second broker round-trip - it's a hard ceiling
+    # layered on top of the virtual allocation (see _compute_position_quantity),
+    # not a substitute for it. None here means "couldn't determine it", which
+    # fails every candidate closed for this scan rather than sizing against a
+    # guess.
+    broker_buying_power = _extract_broker_buying_power(balance)
 
     daily_loss_limit_percent = float(risk_settings.get("daily_loss_limit_percent", 0) or 0)
     day_pnl = float(balance.get("total_day_profit_loss", 0) or 0)
@@ -2824,11 +4060,46 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
         )
 
     max_positions = int(risk_settings.get("max_positions", 0) or 0)
-    open_position_count = len(webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id))
+    real_open_positions_snapshot = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
+    open_position_count = len(real_open_positions_snapshot)
     available_position_slots = _available_position_slots(max_positions, open_position_count, OVERNIGHT_MAX_ORDERS_PER_RUN)
 
+    # ONE reconciled broker snapshot for the whole scan, not one per
+    # candidate. Re-reading the broker before every candidate does not solve
+    # broker-side eventual consistency - an order accepted moments ago isn't
+    # guaranteed to already appear in a fresh get_open_orders() read, so
+    # candidate 2 could see the exact same (stale) snapshot candidate 1 did
+    # and oversubscribe the same dollars. See _build_capital_snapshot for the
+    # fail-closed handling of a broker failure or malformed response.
+    tracked_tickers_for_user = {
+        str(order.get("ticker", "")).upper() for order in list_overnight_orders(user_id) if order.get("ticker")
+    }
+    snapshot_available_buying_power = _build_capital_snapshot(
+        fetch_open_orders=lambda: webull_api.get_open_orders(creds["app_key"], creds["app_secret"], account_id),
+        real_open_positions=real_open_positions_snapshot,
+        tracked_tickers=tracked_tickers_for_user,
+        total_equity=current_balance,
+    )
+
+    # In-scan reservations layered over the snapshot above - authoritative
+    # and immediate the moment an order is accepted, regardless of whether
+    # the broker's own read side has caught up yet. Reconciled against
+    # reality again on the NEXT scan run's fresh snapshot; a reservation
+    # here for an order that turns out to have been rejected or cancelled
+    # simply isn't in the next snapshot's committed capital, correcting
+    # itself rather than needing to be explicitly rolled back. A Decimal
+    # from the very first candidate, not a float that only becomes Decimal
+    # once _reservation_notional is added to it - see that function's
+    # docstring for why accumulating in float can reintroduce
+    # binary-imprecision even when each individual term was Decimal-safe.
+    local_reservations = _to_decimal(0.0)
+
     risk_percent_of_balance = float(risk_settings.get("risk_percent_of_balance", 0) or 0)
-    max_trade_size = _compute_max_trade_size(current_balance, risk_percent_of_balance)
+    risk_budget = _compute_risk_budget(current_balance, risk_percent_of_balance)
+    # No settings-UI control exists for this yet (see _compute_position_exposure_cap) -
+    # reads as 0/disabled for every account until one does.
+    max_position_exposure_percent = float(risk_settings.get("max_position_exposure_percent", 0) or 0)
+    position_exposure_cap = _compute_position_exposure_cap(current_balance, max_position_exposure_percent)
 
     context = _build_page_context(include_reversal=True, include_trend=True)
     opportunities = context.get("upcoming_opportunities", [])
@@ -2857,9 +4128,24 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
     qualifying.sort(key=lambda opp: int(opp.get("confidence", 0) or 0), reverse=True)
 
     # Position management for existing positions (_reconcile_exit_orders,
-    # _refresh_stop_confidence above) already ran regardless of session;
-    # only new-entry candidates are gated by _new_entries_allowed.
-    entries_allowed = _new_entries_allowed(_current_webull_trading_session())
+    # _refresh_stop_confidence, _reconcile_unknown_submissions above)
+    # already ran regardless of session or unresolved ambiguity; only
+    # NEW-entry candidates are gated - by CORE hours, AND by whether ANY
+    # entry (this scan's or an earlier one's) is still stuck in
+    # UNKNOWN_SUBMISSION_STATE. See _reconcile_unknown_submissions'
+    # docstring for why an unresolved ambiguous submission blocks every new
+    # entry, not just the ones in the run that created it.
+    if not _new_entries_allowed(_current_webull_trading_session()):
+        new_entries_blocked_reason = "outside CORE trading hours - a new entry can't get a real broker-side stop attached until CORE opens"
+    elif has_unresolved_ambiguous_submission:
+        new_entries_blocked_reason = (
+            "a prior order submission returned an ambiguous broker response and remains unresolved - no new "
+            "autonomous entries will be placed for this account until it is conclusively resolved or manually "
+            "cleared (existing positions are still monitored and protected normally)"
+        )
+    else:
+        new_entries_blocked_reason = ""
+    entries_allowed = not new_entries_blocked_reason
     candidates = qualifying[: min(OVERNIGHT_MAX_ORDERS_PER_RUN, available_position_slots)] if entries_allowed else []
 
     placed: List[Dict[str, object]] = []
@@ -2869,7 +4155,7 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
         if opp in candidates:
             continue
         if not entries_allowed and opp in qualifying:
-            reason = "outside CORE trading hours - a new entry can't get a real broker-side stop attached until CORE opens"
+            reason = new_entries_blocked_reason
         elif opp in qualifying:
             reason = f"max_positions limit reached ({open_position_count}/{max_positions} open)" if max_positions > 0 else "no position slots available"
         elif str(opp.get("recommendation", "")).upper() == "CALL":
@@ -2890,19 +4176,53 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
             time.sleep(1.0)  # spread order placements out to avoid tripping Webull's rate limiter
         ticker = str(opp.get("ticker", ""))
         limit_price = float(opp.get("ideal_entry") or 0)
+        stop_price_for_sizing = float(opp.get("stop") or 0)
 
-        if max_trade_size > 0 and limit_price > max_trade_size:
+        # The snapshot taken once above, minus every reservation added for a
+        # candidate earlier in THIS run - not a fresh broker read per
+        # candidate. See the comment above the snapshot for why re-reading
+        # the broker here would not actually be safe. The same in-scan
+        # reservations are subtracted from the REAL broker buying power too
+        # (not just the virtual allocation) - dollars an earlier candidate in
+        # this same run already committed will draw down the real account
+        # once the broker's own bookkeeping catches up, even though it
+        # hasn't yet, so a later candidate must not be sized as if that
+        # money were still free.
+        available_buying_power = _compute_available_buying_power_with_reservations(
+            snapshot_available_buying_power, local_reservations
+        )
+        available_broker_buying_power = _compute_available_buying_power_with_reservations(
+            broker_buying_power, local_reservations
+        )
+
+        # Sized by risk-at-stop (how much you'd lose if the stop is hit), not
+        # by raw share price - see _compute_position_quantity for the bug
+        # this replaced. A stock priced above the risk budget is no longer
+        # skipped outright; it's sized down to however many shares that
+        # budget actually covers at this stop distance, then skipped only if
+        # that comes out to zero whole shares.
+        sizing = _compute_position_quantity(
+            risk_budget=risk_budget,
+            entry_price=limit_price,
+            stop_price=stop_price_for_sizing,
+            available_buying_power=available_buying_power,
+            broker_buying_power=available_broker_buying_power,
+            position_exposure_cap=position_exposure_cap,
+        )
+        quantity = int(sizing["quantity"])
+        if quantity < 1:
             skipped.append(
                 {
                     "ticker": ticker,
                     "recommendation": opp.get("recommendation"),
                     "confidence": opp.get("confidence"),
-                    "reason_skipped": f"share price ${limit_price:.2f} exceeds max_trade_size ${max_trade_size:.2f} risk limit",
+                    "reason_skipped": sizing["reason"],
+                    "sizing_constraints": sizing["constraints"],
+                    "binding_constraints": sizing["binding_constraints"],
                 }
             )
             continue
-
-        quantity = _compute_position_quantity(max_trade_size, limit_price, OVERNIGHT_ORDER_QUANTITY)
+        planned_risk_dollars = round(quantity * (limit_price - stop_price_for_sizing), 2)
         entry = {
             "ticker": ticker,
             "side": "BUY",
@@ -2918,6 +4238,16 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
             "stop": opp.get("stop"),
             "account_id": account_id,
             "status": "pending",
+            # Auditable even on success, not just on skip - see
+            # _compute_position_quantity's structured return.
+            "sizing_constraints": sizing["constraints"],
+            "binding_constraints": sizing["binding_constraints"],
+            "planned_risk_dollars": planned_risk_dollars,
+            # Stored explicitly (not re-derived from logged_at later) so
+            # _reconcile_unknown_submission can regenerate the exact same
+            # stop/target client_order_ids this entry would have used - see
+            # order_lifecycle.deterministic_client_order_id.
+            "trading_day": today_key,
         }
 
         # Optional second-opinion pass - only runs if the user configured
@@ -2953,73 +4283,89 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
         try:
             if limit_price <= 0:
                 raise ValueError("No valid entry price computed for this ticker.")
-            result = webull_api.place_stock_order(
-                app_key=creds["app_key"],
-                app_secret=creds["app_secret"],
-                account_id=account_id,
-                symbol=ticker,
-                side="BUY",
-                quantity=quantity,
-                limit_price=limit_price,
-                trading_session=_current_webull_trading_session(),
-            )
-            entry["status"] = "placed"
-            entry["webull_response"] = result
-            placed.append(entry)
-
-            # The entry is filled - place real protective exit orders at the
-            # broker immediately (a STOP_LOSS and a take-profit LIMIT), rather
-            # than relying on this app noticing later. Failure here doesn't
-            # roll back the entry (it already filled); it's logged clearly
-            # instead so an unprotected position is visible, not silently
-            # assumed safe. These are two independent orders, not a linked
-            # bracket - _reconcile_exit_orders cancels whichever leg is left
-            # stale once the other one fills.
             stop_price = float(entry.get("stop") or 0)
-            if stop_price > 0:
-                try:
-                    time.sleep(1.0)
-                    stop_result = webull_api.place_stop_loss_order(
-                        app_key=creds["app_key"],
-                        app_secret=creds["app_secret"],
-                        account_id=account_id,
-                        symbol=ticker,
-                        quantity=quantity,
-                        stop_price=stop_price,
-                    )
-                    record_exit_order(user_id, ticker, stop_result["client_order_id"], "stop")
-                    entry["stop_order_placed"] = True
-                except Exception as stop_error:  # noqa: BLE001 - the entry already succeeded, don't fail the whole candidate
-                    entry["stop_order_placed"] = False
-                    entry["stop_order_error"] = str(stop_error)
-            else:
-                entry["stop_order_placed"] = False
-
             target_price = float(entry.get("target") or 0)
-            if target_price > 0:
+            _submit_and_protect_entry(
+                user_id=user_id,
+                creds=creds,
+                account_id=account_id,
+                ticker=ticker,
+                requested_quantity=quantity,
+                limit_price=limit_price,
+                stop_price=stop_price,
+                target_price=target_price,
+                trading_day=today_key,
+                entry=entry,
+            )
+            # "placed" here means an entry order was successfully submitted,
+            # not necessarily that protection is confirmed active yet - check
+            # entry["lifecycle_state"] for that (see order_lifecycle.py).
+            # entry_failed is the only DEFINITE lifecycle outcome that means
+            # the submission itself never went through - UNKNOWN_SUBMISSION_STATE
+            # is a third, deliberately distinct outcome: the broker's true
+            # response is unknown (e.g. a timeout), so it must be treated as
+            # neither "placed" nor "failed" outright.
+            lifecycle_state = entry.get("lifecycle_state")
+            if lifecycle_state == ol.UNKNOWN_SUBMISSION_STATE:
+                entry["status"] = "unknown_submission_state"
+                entry["error"] = entry.get(
+                    "error", "order submission result could not be confirmed (ambiguous broker response)"
+                )
+                # Conservative: reserve the full attempted notional exactly
+                # like a confirmed placement - the broker may well have
+                # accepted this order even though the response was lost, and
+                # a later candidate in this same run must not be sized as if
+                # those dollars were still free. See _reconcile_unknown_submission
+                # for how this gets resolved on a later scan.
+                local_reservations += _reservation_notional(quantity, limit_price)
+                skipped.append(entry)
                 try:
-                    time.sleep(1.0)
-                    take_profit_result = webull_api.place_take_profit_order(
-                        app_key=creds["app_key"],
-                        app_secret=creds["app_secret"],
-                        account_id=account_id,
-                        symbol=ticker,
-                        quantity=quantity,
-                        target_price=target_price,
-                        trading_session=_current_webull_trading_session(),
+                    add_manual_alert(
+                        user_id,
+                        {
+                            "type": "unknown_submission_state",
+                            "ticker": ticker,
+                            "message": (
+                                f"{ticker}: entry order submission returned an ambiguous result - the broker's "
+                                f"true response is unknown (e.g. a timeout), so it may or may not have been "
+                                f"accepted. ${_reservation_notional(quantity, limit_price):,.2f} has been "
+                                f"conservatively reserved and no further autonomous entries will be placed for "
+                                f"this account this run. This will be reconciled automatically on the next scan - "
+                                f"review the position manually if it persists."
+                            ),
+                        },
                     )
-                    record_exit_order(user_id, ticker, take_profit_result["client_order_id"], "take_profit")
-                    entry["take_profit_order_placed"] = True
-                except Exception as take_profit_error:  # noqa: BLE001 - the entry already succeeded, don't fail the whole candidate
-                    entry["take_profit_order_placed"] = False
-                    entry["take_profit_order_error"] = str(take_profit_error)
+                except Exception:  # noqa: BLE001 - never let alerting itself break the scan
+                    pass
             else:
-                entry["take_profit_order_placed"] = False
+                entry["status"] = "failed" if lifecycle_state == ol.ENTRY_FAILED else "placed"
+                if entry["status"] == "failed":
+                    entry["error"] = entry.get("error", "entry order failed")
+                    skipped.append(entry)
+                else:
+                    placed.append(entry)
+                    # Reserved the instant the order is accepted, not after
+                    # this function returns - this is what candidate 2's
+                    # sizing above sees even if the broker's own open-orders
+                    # read hasn't caught up to candidate 1 yet (see
+                    # test_reservation_survives_broker_eventual_consistency).
+                    local_reservations += _reservation_notional(quantity, limit_price)
         except Exception as error:  # noqa: BLE001 - one bad ticker shouldn't kill the whole batch
             entry["status"] = "failed"
             entry["error"] = str(error)
             skipped.append(entry)
         record_overnight_order(user_id, entry)
+        if entry.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE:
+            # Circuit breaker: an ambiguous submission means this account's
+            # true committed capital is no longer confidently known for the
+            # rest of this run (the reservation above is a conservative
+            # estimate, not a confirmation) - stop placing further entries
+            # for this user this tick rather than keep sizing against an
+            # uncertain base. Existing position management
+            # (_reconcile_exit_orders/_refresh_stop_confidence) already ran
+            # unconditionally before this loop, so already-open positions
+            # remain protected either way.
+            break
 
     return {
         "ok": True,

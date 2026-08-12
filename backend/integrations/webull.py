@@ -124,9 +124,87 @@ def get_account_positions(app_key: str, app_secret: str, account_id: str) -> Lis
 # this session. The place_*_order functions used to check
 # `response.status_code == 429` after the call to decide whether to retry;
 # that branch was unreachable dead code, since a 429 raises before a
-# response object is ever returned. _place_order_with_retry replaces that
-# pattern with a real try/except around the actual exception type.
+# response object is ever returned. _place_order_with_retry (and
+# _fetch_order_detail below) replace that pattern with a real try/except
+# around the actual exception type.
 REPEAT_ORDER_ERROR_CODE = "OAUTH_OPENAPI_TRADE_PLACE_ORDER_REPEAT"
+
+
+class DefiniteOrderRejection(Exception):
+    """Raised when the broker returned a well-formed, PARSED response that
+    explicitly rejected the request - e.g. a 400 with a real error_code
+    describing what was wrong with the order. Safe to treat as final and
+    conclusive: the order definitely never went through (or, from a lookup
+    context, the broker definitively has no record of it). Exception class
+    alone never proves this - see _classify_server_exception for what
+    actually earns this classification vs AmbiguousOrderSubmission."""
+
+
+class AmbiguousOrderSubmission(Exception):
+    """Raised when the broker's true response could not be conclusively
+    determined - a network-level failure (timeout, dropped connection), an
+    SDK-level exception, a response whose body couldn't be parsed into a
+    real error code, or an HTTP status (401/403/429/5xx) that reflects an
+    infrastructure/auth/rate-limit failure rather than the broker's trading
+    engine having evaluated and rejected THIS specific request. A 5xx in
+    particular can occur AFTER a request was already accepted internally,
+    before a response made it back - none of these prove rejection. This is
+    the fail-safe DEFAULT: anything not explicitly classified as a
+    DefiniteOrderRejection raises this instead."""
+
+
+# HTTP statuses that reflect an infrastructure/auth/rate-limit failure, not
+# the broker's trading engine evaluating and rejecting THIS SPECIFIC
+# request - see AmbiguousOrderSubmission's docstring for why none of these
+# can be treated as proof of rejection.
+_AMBIGUOUS_HTTP_STATUSES = {401, 403, 429, 500, 502, 503, 504}
+
+# Error codes EMPIRICALLY CONFIRMED (via live testing against the Webull
+# sandbox) to mean the broker parsed the request and explicitly rejected it
+# BEFORE any acceptance/execution could occur - genuine, provable evidence
+# the order never went through. This starts EMPTY on purpose: no
+# rejection-specific error code has actually been observed and confirmed
+# live this session. The one code confirmed live so far -
+# REPEAT_ORDER_ERROR_CODE (HTTP 417) - means the OPPOSITE (the order
+# already exists) and is handled separately above, not here. Do not add a
+# code here on assumption, plausibility, or vendor documentation alone -
+# only once its exact rejection semantics have been verified against the
+# real API, with a comment recording how it was confirmed. An allowlist,
+# not a denylist: unknown codes stay ambiguous by default, which is the
+# safe direction to be wrong in - the reverse (assuming an unrecognized
+# code is a safe rejection) is not.
+_CONFIRMED_DEFINITE_REJECTION_ERROR_CODES: frozenset = frozenset()
+
+
+def _classify_server_exception(error: "ServerException", action_label: str) -> Exception:  # noqa: F821 - ServerException imported by callers
+    """Turns a raised ServerException into either DefiniteOrderRejection or
+    AmbiguousOrderSubmission - never lets a bare ServerException/ValueError
+    reach a caller, since exception class alone (the old behavior) proves
+    nothing about whether the request actually reached Webull's trading
+    engine.
+
+    Classification is allowlist-first, not denylist-first: a code counts as
+    a definite, authoritative rejection ONLY if it appears in
+    _CONFIRMED_DEFINITE_REJECTION_ERROR_CODES (see that constant for why it
+    starts empty) AND its HTTP status isn't itself one of the
+    infrastructure/auth/rate-limit statuses in _AMBIGUOUS_HTTP_STATUSES (a
+    belt-and-suspenders check - a confirmed rejection code should never
+    legitimately arrive with one of those statuses, so seeing both together
+    is itself a signal something is off, not a stronger rejection).
+    error_code.SDK_UNKNOWN_SERVER_ERROR - the SDK's OWN sentinel for "the
+    response body could not be parsed as JSON, or had no error_code field"
+    (see webull.core.client.ApiClient._get_server_exception in the vendored
+    SDK) - is checked first and is always ambiguous, since there is no
+    genuine parsed code to even check against the allowlist. Every other,
+    unrecognized code is ambiguous by default."""
+    from webull.core.exception import error_code
+
+    code = error.get_error_code()
+    if code == error_code.SDK_UNKNOWN_SERVER_ERROR:
+        return AmbiguousOrderSubmission(f"Webull API error ({action_label}): {error}")
+    if code in _CONFIRMED_DEFINITE_REJECTION_ERROR_CODES and error.get_http_status() not in _AMBIGUOUS_HTTP_STATUSES:
+        return DefiniteOrderRejection(f"Webull API error ({action_label}): {error}")
+    return AmbiguousOrderSubmission(f"Webull API error ({action_label}): {error}")
 
 
 def _place_order_with_retry(trade_client, account_id: str, order: Dict[str, Any], action_label: str) -> Dict[str, Any]:
@@ -137,8 +215,15 @@ def _place_order_with_retry(trade_client, account_id: str, order: Dict[str, Any]
     creating a duplicate order. That rejection means "this exact order was
     already placed", which is exactly the outcome a caller retrying after a
     crash wants - so it's resolved by looking up and returning the order
-    that already exists, not raised as a new failure."""
-    from webull.core.exception.exceptions import ServerException
+    that already exists, not raised as a new failure.
+
+    Every OTHER failure path raises either DefiniteOrderRejection or
+    AmbiguousOrderSubmission, never a bare exception - see
+    _classify_server_exception. ClientException (a network/SDK-level
+    failure - timeout, dropped connection, malformed local request) is
+    always ambiguous: it never proves the broker even received the
+    request."""
+    from webull.core.exception.exceptions import ClientException, ServerException
 
     client_order_id = order["client_order_id"]
     last_error: Optional[ServerException] = None
@@ -160,13 +245,37 @@ def _place_order_with_retry(trade_client, account_id: str, order: Dict[str, Any]
                 time.sleep(1.5 * (attempt + 1))
                 continue
             break
-    raise ValueError(f"Webull API error ({action_label}): {last_error}")
+        except ClientException as error:
+            raise AmbiguousOrderSubmission(f"Webull API error ({action_label}): {error}") from error
+        except Exception as error:  # noqa: BLE001 - anything else (raw network exception, unexpected type) is ambiguous by default, never silently definite
+            raise AmbiguousOrderSubmission(f"Webull API error ({action_label}): {error}") from error
+    if last_error is None:
+        raise AmbiguousOrderSubmission(f"Webull API error ({action_label}): exhausted retries with no response received")
+    raise _classify_server_exception(last_error, action_label)
 
 
 def _fetch_order_detail(trade_client, account_id: str, client_order_id: str) -> Dict[str, Any]:
-    response = trade_client.order_v2.get_order_detail(account_id, client_order_id)
+    """Same classification as _place_order_with_retry - a lookup that
+    returns a well-formed, parsed "no such order" style rejection raises
+    DefiniteOrderRejection; anything else (network failure, auth/rate-limit/
+    server error, unparseable response) raises AmbiguousOrderSubmission.
+    Callers reconciling an ambiguous entry (see _reconcile_unknown_submission
+    in app.py) rely on this distinction to know whether a failed lookup
+    conclusively proves the order was never created, or merely means the
+    lookup itself failed for an unrelated reason."""
+    from webull.core.exception.exceptions import ClientException, ServerException
+
+    try:
+        response = trade_client.order_v2.get_order_detail(account_id, client_order_id)
+    except ServerException as error:
+        raise _classify_server_exception(error, "order detail") from error
+    except ClientException as error:
+        raise AmbiguousOrderSubmission(f"Webull API error (order detail): {error}") from error
     if response.status_code != 200:
-        raise ValueError(f"Webull API error (order detail): HTTP {response.status_code}")
+        # Reachable only for a 2xx status that isn't literally 200 - a real
+        # ServerException (see above) already covers every non-2xx case per
+        # the SDK's own get_response() behavior.
+        raise AmbiguousOrderSubmission(f"Webull API error (order detail): HTTP {response.status_code}")
     return response.json()
 
 
@@ -180,18 +289,173 @@ def get_order_detail(app_key: str, app_secret: str, account_id: str, client_orde
     return _fetch_order_detail(trade_client, account_id, client_order_id)
 
 
+# get_order_open's own docstring in the SDK says paging is "currently
+# supported only for Webull HK" - other regions may just ignore page_size/
+# last_order_id/last_client_order_id and always return everything in one
+# response. OPEN_ORDERS_PAGE_SIZE and _OPEN_ORDERS_MAX_PAGES exist so this
+# still behaves correctly in BOTH cases: if pagination is honored, it walks
+# every page; if it's ignored, the very first page already contains
+# everything and the "no new order ids seen" check below stops the loop
+# after one iteration instead of re-fetching the same full page forever.
+OPEN_ORDERS_PAGE_SIZE = 100
+_OPEN_ORDERS_MAX_PAGES = 50  # hard ceiling - even a well-behaved paginated account has no business exceeding 5,000 open orders
+
+
 def get_open_orders(app_key: str, app_secret: str, account_id: str) -> List[Dict[str, Any]]:
-    """Every order currently resting at the broker for this account -
-    used to confirm a protective leg is genuinely still active, not just
-    that the placement call once returned success."""
+    """Every order currently resting at the broker for this account - used
+    both to confirm a protective leg is genuinely still active, and to build
+    the capital snapshot every autonomous scan sizes candidates against (see
+    _build_capital_snapshot in app.py). Paginates until a short page (fewer
+    than OPEN_ORDERS_PAGE_SIZE items) signals the end, bounded by
+    _OPEN_ORDERS_MAX_PAGES and by cursor-not-advancing detection so an
+    account/region that doesn't honor pagination (see the module-level note
+    above) can't turn this into an infinite loop re-fetching the same page.
+
+    Every response shape is validated STRICTLY, on purpose - this function's
+    caller feeds a capital calculation that decides how much money is safe
+    to commit, and _build_capital_snapshot already relies on ANY exception
+    here failing the whole snapshot closed (returns None, blocking every
+    candidate that scan tick - see its docstring). A malformed response
+    silently normalized to "zero open orders" (or a silently TRUNCATED
+    result) would instead UNDER-count committed capital and OVERSTATE
+    available buying power - the dangerous direction - so this raises
+    rather than guesses, in every one of these cases:
+      - the payload itself must be a JSON object (not a bare list, string,
+        number, or null);
+      - it must contain an "orders" key - a MISSING key is not treated as
+        "zero orders" (the one real confirmed empty-account shape is
+        {"orders": []}, an explicit empty list, not an absent key);
+      - "orders" must be a list, and every row in it must be a JSON object;
+      - every row must carry a stable, truthy order_id - without this, a
+        row with a missing/falsy id would collide with every OTHER such
+        row when deduplicating by id (None == None), and be silently
+        dropped as a "duplicate" rather than counted;
+      - a repeated page (the cursor didn't advance - unsupported pagination
+        for this region, or a broker bug) raises instead of silently
+        stopping with whatever was accumulated so far;
+      - exhausting _OPEN_ORDERS_MAX_PAGES without ever reaching a
+        legitimate end (a short or empty page) raises instead of silently
+        returning a result that may be missing everything past that point."""
     trade_client = _get_trade_client(app_key, app_secret)
-    response = trade_client.order_v2.get_order_open(account_id)
+    all_orders: List[Dict[str, Any]] = []
+    seen_order_ids: set = set()
+    last_order_id: Optional[str] = None
+    last_client_order_id: Optional[str] = None
+
+    for _ in range(_OPEN_ORDERS_MAX_PAGES):
+        response = trade_client.order_v2.get_order_open(
+            account_id,
+            page_size=OPEN_ORDERS_PAGE_SIZE,
+            last_order_id=last_order_id,
+            last_client_order_id=last_client_order_id,
+        )
+        if response.status_code != 200:
+            raise ValueError(f"Webull API error (open orders): HTTP {response.status_code}")
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError(f"Webull API error (open orders): expected a JSON object response, got {type(payload).__name__}")
+        if "orders" not in payload:
+            raise ValueError("Webull API error (open orders): response is missing the 'orders' field")
+        raw_orders = payload["orders"]
+        if not isinstance(raw_orders, list):
+            raise ValueError(f"Webull API error (open orders): 'orders' field is not a list ({type(raw_orders).__name__})")
+        if not all(isinstance(order, dict) for order in raw_orders):
+            raise ValueError("Webull API error (open orders): one or more order rows is not a JSON object")
+        if not all(order.get("order_id") for order in raw_orders):
+            raise ValueError("Webull API error (open orders): one or more order rows is missing a stable order_id")
+        page_orders = raw_orders
+        if not page_orders:
+            break
+
+        new_orders = [order for order in page_orders if order["order_id"] not in seen_order_ids]
+        if not new_orders:
+            # The cursor didn't advance - the same page came back again
+            # (unsupported pagination for this region, or a broker bug).
+            # Raising here (not silently stopping) matters: a caller must
+            # never trust the partial result as complete.
+            raise ValueError(
+                "Webull API error (open orders): the same page was returned again (cursor did not advance) - "
+                "cannot safely continue without risking a truncated (incomplete) order list"
+            )
+        all_orders.extend(new_orders)
+        seen_order_ids.update(order["order_id"] for order in new_orders)
+
+        if len(page_orders) < OPEN_ORDERS_PAGE_SIZE:
+            break  # short page - this was the last one
+
+        last_order_id = page_orders[-1]["order_id"]
+        last_client_order_id = page_orders[-1].get("client_order_id") or last_client_order_id
+    else:
+        # The loop ran _OPEN_ORDERS_MAX_PAGES times without ever hitting a
+        # legitimate "done" break (a short or empty page) - there may be
+        # MORE data past this point. Returning what was accumulated so far
+        # would be exactly the silent-truncation risk this function exists
+        # to avoid.
+        raise ValueError(
+            f"Webull API error (open orders): exhausted the {_OPEN_ORDERS_MAX_PAGES}-page limit without reaching "
+            "the end of the account's open orders - the result would be incomplete"
+        )
+
+    return all_orders
+
+
+ORDER_HISTORY_LOOKBACK_DAYS = 7
+ORDER_HISTORY_PAGE_SIZE = 100
+
+
+def get_order_history(app_key: str, app_secret: str, account_id: str, days_back: int = ORDER_HISTORY_LOOKBACK_DAYS) -> List[Dict[str, Any]]:
+    """Historical (filled/cancelled/rejected) orders over the last
+    `days_back` days - the SDK's own docstring confirms this is supported
+    for Webull US (unlike get_order_open's pagination, which is HK-only),
+    so it's usable for this sandbox's region.
+
+    Exists specifically as ONE of several independent evidence sources
+    when manually resolving an entry stuck in UNKNOWN_SUBMISSION_STATE
+    (see _gather_ambiguous_submission_evidence in app.py): get_open_orders
+    only shows currently-RESTING orders, so an order that already filled,
+    was cancelled, or was rejected days ago has already fallen out of that
+    view - this is what still has a record of it. NOT used for capital
+    tracking (unlike get_open_orders), so it does not need that function's
+    same fail-closed-on-any-ambiguity pagination hardening - a malformed
+    response still raises (the evidence-gathering step treats a raised
+    exception as "this particular check is inconclusive", the same
+    fail-safe outcome as any other check failing), but this reads a single
+    page only; the 7-day/100-row default window is generous for what this
+    is used for (confirming or ruling out ONE specific client_order_id) and
+    getting a partial account-wide history here is not the same risk as
+    get_open_orders silently under-counting live committed capital."""
+    trade_client = _get_trade_client(app_key, app_secret)
+    end_date = _today_utc_isoformat()
+    start_date = _days_before_utc_isoformat(days_back)
+    response = trade_client.order_v2.get_order_history(
+        account_id,
+        page_size=ORDER_HISTORY_PAGE_SIZE,
+        start_date=start_date,
+        end_date=end_date,
+    )
     if response.status_code != 200:
-        raise ValueError(f"Webull API error (open orders): HTTP {response.status_code}")
+        raise ValueError(f"Webull API error (order history): HTTP {response.status_code}")
     payload = response.json()
-    if isinstance(payload, dict):
-        return payload.get("orders", []) or []
-    return payload if isinstance(payload, list) else []
+    if not isinstance(payload, dict):
+        raise ValueError(f"Webull API error (order history): expected a JSON object response, got {type(payload).__name__}")
+    if "orders" not in payload:
+        raise ValueError("Webull API error (order history): response is missing the 'orders' field")
+    orders = payload["orders"]
+    if not isinstance(orders, list) or not all(isinstance(order, dict) for order in orders):
+        raise ValueError("Webull API error (order history): 'orders' field is malformed")
+    return orders
+
+
+def _today_utc_isoformat() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def _days_before_utc_isoformat(days: int) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
 
 
 def preview_stock_order(

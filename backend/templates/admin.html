@@ -26,6 +26,40 @@
     </table>
 </section>
 
+<section class="panel panel-table" id="ambiguousSubmissionsPanel">
+    <div class="panel-head">
+        <h3>Ambiguous Order Submissions</h3>
+        <span>{{ pending_ambiguous_submissions|length }} frozen</span>
+    </div>
+    <p class="muted">
+        An entry lands here when the broker's response to an order submission could not be conclusively determined
+        (a timeout, dropped connection, or similar) - the affected account's autonomous entries are frozen until this
+        is resolved. Resolving ALWAYS re-checks order detail, open orders, positions, and order history fresh, right
+        now, regardless of what's shown below - never trust a stale view. "Release" only succeeds if all four checks
+        come back clean; "Link" only succeeds if at least one of them found something. Every resolution is
+        permanently recorded in that user's audit trail.
+    </p>
+    <table id="ambiguousSubmissionsTable">
+        <thead><tr><th>User</th><th>Ticker</th><th>Ambiguous Since</th><th>Confirmations</th><th>Actions</th></tr></thead>
+        <tbody>
+        {% for entry in pending_ambiguous_submissions %}
+        <tr data-user-id="{{ entry.user_id }}" data-entry-client-order-id="{{ entry.entry_client_order_id }}">
+            <td>{{ entry.username or entry.user_id }}</td>
+            <td>{{ entry.ticker }}</td>
+            <td class="alert-time" data-timestamp="{{ entry.first_definite_rejection_at or entry.logged_at or '' }}">--</td>
+            <td>{{ entry.definite_rejection_count or 0 }}</td>
+            <td class="action-row">
+                <button class="release-ambiguous-submission" type="button">Release (confirm nothing exists)</button>
+                <button class="ghost-button link-ambiguous-submission" type="button">Link (found it, resume)</button>
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="muted">No ambiguous submissions - nothing is frozen.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
 <section class="panel panel-table">
     <div class="panel-head">
         <h3>All Users</h3>
@@ -163,6 +197,53 @@
                 await callAdminApi(isApprove ? "/api/admin/approve-user" : "/api/admin/reject-user", {user_id: userId});
                 row.remove();
                 showToast(isApprove ? "User approved." : "User rejected.", "success");
+            } catch (error) {
+                showToast(error.message, "error");
+                target.disabled = false;
+            }
+        });
+    }
+
+    const ambiguousTable = document.getElementById("ambiguousSubmissionsTable");
+    if (ambiguousTable) {
+        ambiguousTable.addEventListener("click", async (event) => {
+            const target = event.target;
+            if (!(target instanceof HTMLElement) || target.tagName !== "BUTTON") return;
+            const row = target.closest("tr[data-user-id]");
+            if (!(row instanceof HTMLElement)) return;
+            const userId = row.dataset.userId;
+            const entryClientOrderId = row.dataset.entryClientOrderId;
+            const ticker = row.children[1].textContent.trim();
+            const isRelease = target.classList.contains("release-ambiguous-submission");
+            const isLink = target.classList.contains("link-ambiguous-submission");
+            if (!isRelease && !isLink) return;
+
+            const action = isRelease ? "release" : "link";
+            const confirmMessage = isRelease
+                ? `Release ${ticker} for this user? This re-checks order detail, open orders, positions, and order history FRESH right now, and only succeeds if ALL FOUR come back clean. Proceeding will permanently unfreeze new autonomous entries for this account.`
+                : `Link ${ticker} for this user? This re-checks the broker fresh and only succeeds if something is actually found to link to.`;
+            if (!window.confirm(confirmMessage)) return;
+            const reason = window.prompt(
+                `Reason for this ${action} (required, recorded permanently in this user's audit trail):`
+            );
+            if (!reason || !reason.trim()) {
+                showToast("A reason is required - resolution cancelled.", "error");
+                return;
+            }
+
+            target.disabled = true;
+            try {
+                await callAdminApi("/api/admin/ambiguous-submissions/resolve", {
+                    user_id: userId,
+                    entry_client_order_id: entryClientOrderId,
+                    action,
+                    reason,
+                });
+                row.remove();
+                showToast(`${ticker} ${action}d.`, "success");
+                if (!ambiguousTable.querySelector("tbody tr[data-user-id]")) {
+                    window.location.reload();
+                }
             } catch (error) {
                 showToast(error.message, "error");
                 target.disabled = false;

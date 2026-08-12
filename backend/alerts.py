@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Sequence
@@ -41,6 +44,33 @@ def _build_alert_id(alert_type: str, ticker: str, message: str) -> str:
     return f"{alert_type}-{ticker or 'global'}-{digest}"
 
 
+@contextlib.contextmanager
+def _locked(path: Path):
+    """Exclusive lock scoped to an entire read-modify-write cycle, not just
+    the final write - gunicorn runs multiple WORKER PROCESSES (not threads
+    within one process), so a plain threading.Lock would not help: two
+    workers can each read the same starting alerts.json, append their own
+    new alert in memory, and write, with the second write silently
+    discarding the first worker's addition. fcntl.flock() is a real
+    process-wide advisory lock that blocks a second caller until the first
+    releases it, turning read + mutate + write back into one atomic unit.
+
+    Locks a dedicated sidecar file (path + ".lock"), not the JSON data file
+    itself, so the lock's underlying file descriptor is never invalidated by
+    the atomic temp-file-then-rename _save_json performs on the data file
+    while the lock is held - flock() locks are tied to the open file
+    description, and os.replace()'ing a DIFFERENT (temp) file into the data
+    file's path never touches the lock file's inode at all."""
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path.touch(exist_ok=True)
+    with open(lock_path, "r+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def _load_json(path: Path) -> List[Dict[str, str]]:
     if not path.exists():
         path.write_text("[]", encoding="utf-8")
@@ -54,7 +84,17 @@ def _load_json(path: Path) -> List[Dict[str, str]]:
 
 
 def _save_json(path: Path, payload: List[Dict[str, str]]) -> None:
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    """Atomic: writes to a temp file in the same directory, then
+    os.replace()s it into place, so a concurrent reader - or a process that
+    dies mid-write - never observes a partially-written or truncated file.
+    A plain write_text() writes in place and can leave exactly that kind of
+    corrupt file behind if it's interrupted partway through. The temp
+    filename includes the pid and a random suffix so two callers racing
+    without holding _locked (a caller bug, not something this function can
+    prevent) at least don't collide on the SAME temp filename."""
+    tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}")
+    tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    os.replace(tmp_path, path)
 
 
 def load_manual_alerts(user_id: str) -> List[Dict[str, str]]:
@@ -77,10 +117,12 @@ def add_manual_alert(user_id: str, payload: Dict[str, str]) -> Dict[str, str]:
         "created_at": _now_iso(),
     }
 
-    alerts = load_manual_alerts(user_id)
-    if not any(existing["id"] == alert["id"] for existing in alerts):
-        alerts.insert(0, alert)
-        _save_json(_alerts_file(user_id), alerts)
+    alerts_file = _alerts_file(user_id)
+    with _locked(alerts_file):
+        alerts = load_manual_alerts(user_id)
+        if not any(existing["id"] == alert["id"] for existing in alerts):
+            alerts.insert(0, alert)
+            _save_json(alerts_file, alerts)
     return alert
 
 
@@ -88,10 +130,11 @@ def dismiss_alert(user_id: str, alert_id: str) -> None:
     if not alert_id:
         raise ValueError("Alert ID is required.")
     dismissed_file = _dismissed_file(user_id)
-    dismissed = _load_json(dismissed_file)
-    if not any(item.get("id") == alert_id for item in dismissed):
-        dismissed.append({"id": alert_id, "dismissed_at": _now_iso()})
-        _save_json(dismissed_file, dismissed)
+    with _locked(dismissed_file):
+        dismissed = _load_json(dismissed_file)
+        if not any(item.get("id") == alert_id for item in dismissed):
+            dismissed.append({"id": alert_id, "dismissed_at": _now_iso()})
+            _save_json(dismissed_file, dismissed)
 
 
 def dismiss_alerts(user_id: str, alert_ids: Sequence[str]) -> int:
@@ -100,17 +143,18 @@ def dismiss_alerts(user_id: str, alert_ids: Sequence[str]) -> int:
         raise ValueError("At least one alert ID is required.")
 
     dismissed_file = _dismissed_file(user_id)
-    dismissed = _load_json(dismissed_file)
-    existing_ids = {item.get("id", "") for item in dismissed}
-    newly_added = 0
-    for alert_id in valid_ids:
-        if alert_id in existing_ids:
-            continue
-        dismissed.append({"id": alert_id, "dismissed_at": _now_iso()})
-        existing_ids.add(alert_id)
-        newly_added += 1
-    if newly_added:
-        _save_json(dismissed_file, dismissed)
+    with _locked(dismissed_file):
+        dismissed = _load_json(dismissed_file)
+        existing_ids = {item.get("id", "") for item in dismissed}
+        newly_added = 0
+        for alert_id in valid_ids:
+            if alert_id in existing_ids:
+                continue
+            dismissed.append({"id": alert_id, "dismissed_at": _now_iso()})
+            existing_ids.add(alert_id)
+            newly_added += 1
+        if newly_added:
+            _save_json(dismissed_file, dismissed)
     return newly_added
 
 
@@ -413,23 +457,25 @@ def mark_alert_read(user_id: str, alert_id: str) -> None:
     if not alert_id:
         raise ValueError("Alert ID is required.")
     read_file = _read_file(user_id)
-    read_items = _load_json(read_file)
-    if any(item.get("id") == alert_id for item in read_items):
-        return
-    read_items.append({"id": alert_id, "read_at": _now_iso()})
-    _save_json(read_file, read_items)
+    with _locked(read_file):
+        read_items = _load_json(read_file)
+        if any(item.get("id") == alert_id for item in read_items):
+            return
+        read_items.append({"id": alert_id, "read_at": _now_iso()})
+        _save_json(read_file, read_items)
 
 
 def mark_all_read(user_id: str, alerts: Sequence[Dict[str, str]]) -> None:
-    existing = _read_ids(user_id)
     read_file = _read_file(user_id)
-    rows = _load_json(read_file)
-    for alert in alerts:
-        alert_id = alert.get("id", "")
-        if not alert_id or alert_id in existing:
-            continue
-        rows.append({"id": alert_id, "read_at": _now_iso()})
-    _save_json(read_file, rows)
+    with _locked(read_file):
+        existing = _read_ids(user_id)
+        rows = _load_json(read_file)
+        for alert in alerts:
+            alert_id = alert.get("id", "")
+            if not alert_id or alert_id in existing:
+                continue
+            rows.append({"id": alert_id, "read_at": _now_iso()})
+        _save_json(read_file, rows)
 
 
 def unread_count(alerts: Sequence[Dict[str, str]]) -> int:

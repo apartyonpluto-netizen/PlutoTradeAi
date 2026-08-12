@@ -108,12 +108,56 @@ def test_confirmed_active_can_return_to_pending_if_a_leg_goes_missing():
         (ol.ENTRY_FAILED, ol.ENTRY_SUBMITTED),
         (ol.CLOSED, ol.PROTECTION_PENDING),
         (ol.ENTRY_FILLED, ol.ENTRY_SUBMITTED),
+        (ol.UNKNOWN_SUBMISSION_STATE, ol.PROTECTION_CONFIRMED_ACTIVE),
+        (ol.UNKNOWN_SUBMISSION_STATE, ol.ENTRY_FILLED),
+        (ol.UNKNOWN_SUBMISSION_STATE, ol.CLOSED),
+        (ol.ENTRY_FAILED, ol.UNKNOWN_SUBMISSION_STATE),
+        (ol.PROTECTION_CONFIRMED_ACTIVE, ol.UNKNOWN_SUBMISSION_STATE),
     ],
 )
 def test_illegal_transitions_are_rejected(from_state, to_state):
     entry = {"lifecycle_state": from_state}
     with pytest.raises(ValueError, match="Invalid order lifecycle transition"):
         ol.transition(entry, to_state)
+
+
+# --- UNKNOWN_SUBMISSION_STATE: ambiguous entry submission -------------------
+
+
+def test_entry_submitted_can_go_ambiguous_on_a_lost_response():
+    entry = {}
+    ol.initialize(entry)
+    ol.transition(entry, ol.UNKNOWN_SUBMISSION_STATE, error="connection timed out")
+    assert entry["lifecycle_state"] == ol.UNKNOWN_SUBMISSION_STATE
+    assert entry["error"] == "connection timed out"
+
+
+def test_unknown_submission_state_is_not_terminal():
+    # The whole point of this state is that it still needs monitoring/
+    # reconciliation - it must never be silently treated as done.
+    assert ol.UNKNOWN_SUBMISSION_STATE not in ol.TERMINAL_STATES
+    assert ol.is_transitional({"lifecycle_state": ol.UNKNOWN_SUBMISSION_STATE}) is True
+
+
+def test_unknown_submission_state_can_self_loop_on_repeated_inconclusive_reconciliation():
+    entry = {}
+    ol.initialize(entry)
+    ol.transition(entry, ol.UNKNOWN_SUBMISSION_STATE, error="timeout")
+    ol.transition(entry, ol.UNKNOWN_SUBMISSION_STATE, last_reconciliation_error="still unreachable")
+    assert entry["lifecycle_state"] == ol.UNKNOWN_SUBMISSION_STATE
+    assert entry["last_reconciliation_error"] == "still unreachable"
+    assert len(entry["lifecycle_history"]) == 3
+
+
+def test_unknown_submission_state_resolves_to_entry_submitted_once_confirmed():
+    entry = {}
+    ol.initialize(entry)
+    ol.transition(entry, ol.UNKNOWN_SUBMISSION_STATE, error="timeout")
+    ol.transition(entry, ol.ENTRY_SUBMITTED, error=None)
+    assert entry["lifecycle_state"] == ol.ENTRY_SUBMITTED
+    # From there, normal fill tracking is valid again.
+    ol.transition(entry, ol.ENTRY_FILLED, filled_quantity=10)
+    assert entry["lifecycle_state"] == ol.ENTRY_FILLED
 
 
 def test_terminal_states_are_never_transitional():
