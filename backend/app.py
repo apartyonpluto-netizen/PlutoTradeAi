@@ -128,6 +128,7 @@ if __package__:
     from . import order_lifecycle as ol
     from .anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from .autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
+    from .autonomy.research_log import record_research_decision
     from .autonomy.ambiguous_resolution_audit import (
         find_incomplete_resolutions,
         list_ambiguous_resolution_audit,
@@ -276,6 +277,7 @@ else:
     import order_lifecycle as ol
     from anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
+    from autonomy.research_log import record_research_decision
     from autonomy.ambiguous_resolution_audit import (
         find_incomplete_resolutions,
         list_ambiguous_resolution_audit,
@@ -6735,6 +6737,121 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
     placed: List[Dict[str, object]] = []
     skipped: List[Dict[str, object]] = []
 
+    # Leading market-regime SHADOW signal (VIX) - fetched/computed ONCE per
+    # scan tick, before ANY candidate is evaluated, so every research-log
+    # record written below (including opportunities that never even
+    # became a qualifying candidate) carries the same tick's VIX context.
+    # SHADOW MODE ONLY - see regime.py's module docstring. Nothing derived
+    # from this is read by entries_allowed, sizing, the LLM step, or order
+    # submission anywhere in this function - see _shadow_snapshot_for and
+    # its call sites below for the structural guarantee.
+    try:
+        vix_snapshot = get_vix_snapshot()
+        shadow_mapping = compute_shadow_adjustment(vix_snapshot)
+    except Exception:  # noqa: BLE001 - shadow/research code must never affect the real scan
+        vix_snapshot = {
+            "vix_level": None, "source_time": None, "fetch_time": None,
+            "age_seconds": None, "status": "unavailable", "used_stale_cache": False,
+        }
+        shadow_mapping = {"mapping_version": None, "proposed_adjustment": 0, "reasoning": "shadow computation failed"}
+
+    # The EFFECTIVE confidence threshold actually governing whether a
+    # candidate for THIS user ever reaches order submission - not just
+    # OVERNIGHT_MIN_CONFIDENCE (a global floor also enforced in
+    # `qualifying` above), but whichever is stricter between that floor
+    # and the user's own Account Hub "AI confidence threshold" setting
+    # (settings_store.py's ai_confidence_threshold, default 68 - see
+    # _build_page_context, which already filters `opportunities` by this
+    # SAME per-user setting before this function ever sees them). Using
+    # only the global constant here would make the shadow comparison
+    # wrong for any user who raised their own threshold above 55 - this
+    # is what production actually uses, computed the same way, not a
+    # separate hardcoded shadow number.
+    try:
+        effective_confidence_threshold = max(
+            int(get_settings(user_id).get("ai_confidence_threshold", OVERNIGHT_MIN_CONFIDENCE) or OVERNIGHT_MIN_CONFIDENCE),
+            OVERNIGHT_MIN_CONFIDENCE,
+        )
+    except Exception:  # noqa: BLE001 - shadow/research code must never affect the real scan
+        effective_confidence_threshold = OVERNIGHT_MIN_CONFIDENCE
+
+    def _shadow_snapshot_for(ticker: str, strategy: object, raw_confidence: int) -> Dict[str, object]:
+        """Builds one candidate's shadow comparison record - SHADOW MODE
+        ONLY, never read by the real decision path (see the module-level
+        comment above). Wrapped in its own try/except so a bug here can
+        never block, alter, or crash the real scan; every call site below
+        relies on that rather than repeating the guard itself."""
+        try:
+            proposed_adjustment = int(shadow_mapping.get("proposed_adjustment", 0) or 0)
+            shadow_adjusted_confidence = raw_confidence + proposed_adjustment
+            raw_crosses_threshold = raw_confidence >= effective_confidence_threshold
+            shadow_crosses_threshold = shadow_adjusted_confidence >= effective_confidence_threshold
+            source_time = vix_snapshot.get("source_time")
+            fetch_time = vix_snapshot.get("fetch_time")
+            return {
+                "regime_mode": "shadow",
+                "mapping_version": shadow_mapping.get("mapping_version"),
+                "strategy": strategy,
+                "vix_level": vix_snapshot.get("vix_level"),
+                "vix_source_time": source_time.isoformat() if source_time else None,
+                "vix_fetch_time": fetch_time.isoformat() if fetch_time else None,
+                "vix_age_seconds": vix_snapshot.get("age_seconds"),
+                "vix_status": vix_snapshot.get("status"),
+                "vix_used_stale_cache": vix_snapshot.get("used_stale_cache"),
+                "raw_confidence": raw_confidence,
+                "proposed_adjustment": proposed_adjustment,
+                "shadow_adjusted_confidence": shadow_adjusted_confidence,
+                # The SAME effective threshold production actually uses for
+                # THIS user (see above) - not a separate hardcoded shadow
+                # threshold - so this is a genuine apples-to-apples
+                # comparison against production's own bar.
+                "actual_decision_threshold": effective_confidence_threshold,
+                "raw_crosses_threshold": raw_crosses_threshold,
+                "shadow_crosses_threshold": shadow_crosses_threshold,
+                "would_change_decision": shadow_crosses_threshold != raw_crosses_threshold,
+                "reasoning": shadow_mapping.get("reasoning"),
+                # Joins this record back to autonomy/closed_trades.py's own
+                # trade_id once a trade (if any) is later closed.
+                "ticker": ticker,
+                "trading_day": today_key,
+                "entry_client_order_id": None,
+            }
+        except Exception as shadow_error:  # noqa: BLE001 - shadow/research code must never affect the real scan
+            return {"regime_mode": "shadow", "error": str(shadow_error)}
+
+    def _log_research_decision(
+        *, ticker, recommendation, strategy, raw_confidence, decision, reason_skipped,
+        quantity, entry_client_order_id, regime_shadow=None,
+    ) -> None:
+        """Durably records ONE evaluated candidate to the append-only
+        research log (autonomy/research_log.py) - called for EVERY
+        opportunity this scan touches, whether it was ultimately placed,
+        skipped below the confidence floor, skipped for max-positions/
+        risk/buying-power reasons, or vetoed by the LLM step, so later
+        analysis of the VIX shadow signal (or any other future research
+        signal) isn't built only from the subset that reached submission -
+        see research_log.py's own module docstring on survivorship bias.
+        Never lets a logging failure affect the real scan."""
+        try:
+            record_research_decision(
+                user_id,
+                {
+                    "trading_day": today_key,
+                    "account_id": account_id,
+                    "ticker": ticker,
+                    "recommendation": recommendation,
+                    "strategy": strategy,
+                    "raw_confidence": raw_confidence,
+                    "decision": decision,
+                    "reason_skipped": reason_skipped,
+                    "quantity": quantity,
+                    "entry_client_order_id": entry_client_order_id,
+                    "regime_shadow": regime_shadow if regime_shadow is not None else _shadow_snapshot_for(ticker, strategy, raw_confidence),
+                },
+            )
+        except Exception:  # noqa: BLE001 - research logging must never affect the real scan
+            pass
+
     for opp in opportunities:
         if opp in candidates:
             continue
@@ -6754,27 +6871,11 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
                 "reason_skipped": reason,
             }
         )
-
-    # Leading market-regime SHADOW signal (VIX) - fetched/computed ONCE per
-    # scan tick, not once per candidate: the level doesn't meaningfully
-    # change within a single scan, and there can be several candidates.
-    # SHADOW MODE ONLY - see regime.py's module docstring. This snapshot
-    # and mapping are recorded on every candidate below (entry["regime_shadow"])
-    # purely for later backtesting; nothing derived from them is read by
-    # entries_allowed, sizing, the LLM step, or order submission anywhere
-    # in this function. Deliberately computed even when `candidates` is
-    # empty - cheap, cached, and keeps the shadow record warm for
-    # whenever entries next become allowed rather than only on ticks that
-    # happen to have qualifying candidates.
-    try:
-        vix_snapshot = get_vix_snapshot()
-        shadow_mapping = compute_shadow_adjustment(vix_snapshot)
-    except Exception:  # noqa: BLE001 - shadow/research code must never affect the real scan
-        vix_snapshot = {
-            "vix_level": None, "source_time": None, "fetch_time": None,
-            "age_seconds": None, "status": "unavailable", "used_stale_cache": False,
-        }
-        shadow_mapping = {"mapping_version": None, "proposed_adjustment": 0, "reasoning": "shadow computation failed"}
+        _log_research_decision(
+            ticker=opp.get("ticker"), recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
+            raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=reason,
+            quantity=None, entry_client_order_id=None,
+        )
 
     for candidate_index, opp in enumerate(candidates):
         if candidate_index > 0:
@@ -6826,6 +6927,11 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
                     "binding_constraints": sizing["binding_constraints"],
                 }
             )
+            _log_research_decision(
+                ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
+                raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=sizing["reason"],
+                quantity=0, entry_client_order_id=None,
+            )
             continue
         planned_risk_dollars = round(quantity * (limit_price - stop_price_for_sizing), 2)
         entry = {
@@ -6855,59 +6961,14 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
             "trading_day": today_key,
         }
 
-        # Leading market-regime SHADOW observation (VIX, see regime.py) -
-        # RECORD ONLY. Deliberately computed and stored entirely OUTSIDE
-        # the real decision path below: it never sets entry["status"],
-        # never skips/resizes/vetoes, and is not read by the LLM step,
-        # sizing, or submission. Wrapped in its own try/except so that
-        # even an unanticipated bug in this shadow/research code can
-        # never block, alter, or crash the real scan - see
-        # REGIME_MAPPING_VERSION in regime.py for why this stays
-        # observation-only until backtested.
-        try:
-            raw_confidence = int(opp.get("confidence", 0) or 0)
-            shadow_proposed_adjustment = int(shadow_mapping.get("proposed_adjustment", 0) or 0)
-            shadow_adjusted_confidence = raw_confidence + shadow_proposed_adjustment
-            # The SAME threshold the real candidate list was already
-            # filtered by above (OVERNIGHT_MIN_CONFIDENCE) - not a
-            # separate hardcoded shadow threshold - so this is a genuine
-            # apples-to-apples comparison against production's own bar.
-            # raw_crosses_threshold is always True here (qualifying{}
-            # already filtered on it) but is recorded explicitly rather
-            # than assumed, so this stays correct if that upstream filter
-            # ever changes.
-            raw_crosses_threshold = raw_confidence >= OVERNIGHT_MIN_CONFIDENCE
-            shadow_crosses_threshold = shadow_adjusted_confidence >= OVERNIGHT_MIN_CONFIDENCE
-            source_time = vix_snapshot.get("source_time")
-            fetch_time = vix_snapshot.get("fetch_time")
-            entry["regime_shadow"] = {
-                "regime_mode": "shadow",
-                "mapping_version": shadow_mapping.get("mapping_version"),
-                "strategy": opp.get("strategy"),
-                "vix_level": vix_snapshot.get("vix_level"),
-                "vix_source_time": source_time.isoformat() if source_time else None,
-                "vix_fetch_time": fetch_time.isoformat() if fetch_time else None,
-                "vix_age_seconds": vix_snapshot.get("age_seconds"),
-                "vix_status": vix_snapshot.get("status"),
-                "vix_used_stale_cache": vix_snapshot.get("used_stale_cache"),
-                "raw_confidence": raw_confidence,
-                "proposed_adjustment": shadow_proposed_adjustment,
-                "shadow_adjusted_confidence": shadow_adjusted_confidence,
-                "actual_decision_threshold": OVERNIGHT_MIN_CONFIDENCE,
-                "raw_crosses_threshold": raw_crosses_threshold,
-                "shadow_crosses_threshold": shadow_crosses_threshold,
-                "would_change_decision": shadow_crosses_threshold != raw_crosses_threshold,
-                "reasoning": shadow_mapping.get("reasoning"),
-                # Joins this shadow record back to autonomy/closed_trades.py's
-                # own trade_id once the trade (if any) is later closed -
-                # backfilled just before record_overnight_order below, once
-                # entry_client_order_id is known.
-                "ticker": ticker,
-                "trading_day": today_key,
-                "entry_client_order_id": None,
-            }
-        except Exception as shadow_error:  # noqa: BLE001 - shadow/research code must never affect the real scan
-            entry["regime_shadow"] = {"regime_mode": "shadow", "error": str(shadow_error)}
+        # Leading market-regime SHADOW observation (VIX, see regime.py and
+        # _shadow_snapshot_for above) - RECORD ONLY. Never sets
+        # entry["status"], never skips/resizes/vetoes, and is not read by
+        # the LLM step, sizing, or submission - see REGIME_MAPPING_VERSION
+        # in regime.py for why this stays observation-only until
+        # backtested. _shadow_snapshot_for already isolates failures, so
+        # nothing here can affect the real scan.
+        entry["regime_shadow"] = _shadow_snapshot_for(ticker, opp.get("strategy"), int(opp.get("confidence", 0) or 0))
 
         # Optional second-opinion pass - only runs if the user configured
         # their own Anthropic key. Reviews the setup after it already passed
@@ -6937,6 +6998,12 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
                 entry["reason_skipped"] = veto_reason
                 skipped.append(entry)
                 record_overnight_order(user_id, entry)
+                _log_research_decision(
+                    ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
+                    raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=veto_reason,
+                    quantity=quantity, entry_client_order_id=entry.get("entry_client_order_id"),
+                    regime_shadow=entry.get("regime_shadow"),
+                )
                 continue
 
         try:
@@ -7021,6 +7088,14 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
             # stay joinable in the one persisted overnight_order record.
             entry["regime_shadow"]["entry_client_order_id"] = entry.get("entry_client_order_id")
         record_overnight_order(user_id, entry)
+        _log_research_decision(
+            ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
+            raw_confidence=int(opp.get("confidence", 0) or 0),
+            decision="placed" if entry.get("status") == "placed" else "skipped",
+            reason_skipped=entry.get("error") if entry.get("status") != "placed" else None,
+            quantity=quantity, entry_client_order_id=entry.get("entry_client_order_id"),
+            regime_shadow=entry.get("regime_shadow"),
+        )
         if entry.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE:
             # Circuit breaker: an ambiguous submission means this account's
             # true committed capital is no longer confidently known for the

@@ -54,9 +54,14 @@ def _snapshot(vix_level, status="fresh", used_stale_cache=False, age_seconds=30.
     }
 
 
-def _run_scan(user_id, opportunities, vix_snapshot, record_overnight_order_mock=None, get_llm_verdict_return=None):
+def _run_scan(
+    user_id, opportunities, vix_snapshot, record_overnight_order_mock=None, get_llm_verdict_return=None,
+    ai_confidence_threshold=55, get_settings_side_effect=None, record_research_decision_mock=None,
+):
     if record_overnight_order_mock is None:
         record_overnight_order_mock = lambda user_id, entry: entry
+    if record_research_decision_mock is None:
+        record_research_decision_mock = lambda user_id, record: record
     with ExitStack() as stack:
         stack.enter_context(patch.object(pluto_app, "get_webull_credentials", return_value=CREDS))
         stack.enter_context(patch.object(pluto_app, "is_webull_configured", return_value=True))
@@ -83,8 +88,13 @@ def _run_scan(user_id, opportunities, vix_snapshot, record_overnight_order_mock=
         )
         stack.enter_context(patch.object(pluto_app, "_build_page_context", return_value={"upcoming_opportunities": opportunities}))
         stack.enter_context(patch.object(pluto_app, "get_vix_snapshot", return_value=vix_snapshot))
+        if get_settings_side_effect is not None:
+            stack.enter_context(patch.object(pluto_app, "get_settings", side_effect=get_settings_side_effect))
+        else:
+            stack.enter_context(patch.object(pluto_app, "get_settings", return_value={"ai_confidence_threshold": ai_confidence_threshold}))
         stack.enter_context(patch.object(pluto_app, "_submit_and_protect_entry", side_effect=_fake_submit_and_protect_entry))
         stack.enter_context(patch.object(pluto_app, "record_overnight_order", side_effect=record_overnight_order_mock))
+        stack.enter_context(patch.object(pluto_app, "record_research_decision", side_effect=record_research_decision_mock))
         stack.enter_context(patch.object(pluto_app, "time"))
         if get_llm_verdict_return is not None:
             stack.enter_context(patch.object(pluto_app, "get_llm_verdict", return_value=get_llm_verdict_return))
@@ -237,17 +247,56 @@ def test_stale_fallback_is_labeled_stale_not_fresh_and_flagged(user_id):
     assert shadow["vix_used_stale_cache"] is True
 
 
-def test_the_configured_user_threshold_is_used_for_the_hypothetical_decision(user_id):
-    """The shadow comparison must use OVERNIGHT_MIN_CONFIDENCE - the SAME
-    constant the real candidate filter already used - not a separate
-    hardcoded shadow threshold."""
-    result = _run_scan(user_id, [_candidate(confidence=60)], _snapshot(vix_level=30.0))  # 60 - 15 = 45
+def test_the_global_floor_is_used_when_the_user_has_not_raised_their_own_threshold(user_id):
+    """With ai_confidence_threshold == OVERNIGHT_MIN_CONFIDENCE (55), the
+    effective threshold is just that global floor - the baseline case."""
+    result = _run_scan(user_id, [_candidate(confidence=60)], _snapshot(vix_level=30.0), ai_confidence_threshold=55)  # 60 - 15 = 45
     shadow = result["placed"][0]["regime_shadow"]
-    assert shadow["actual_decision_threshold"] == pluto_app.OVERNIGHT_MIN_CONFIDENCE
+    assert shadow["actual_decision_threshold"] == pluto_app.OVERNIGHT_MIN_CONFIDENCE == 55
     assert shadow["shadow_adjusted_confidence"] == 45
     assert shadow["shadow_crosses_threshold"] is False
     assert shadow["raw_crosses_threshold"] is True
     assert shadow["would_change_decision"] is True
+
+
+def test_a_users_own_raised_confidence_threshold_is_used_not_the_global_constant(user_id):
+    """A user who raised their Account Hub 'AI confidence threshold' above
+    OVERNIGHT_MIN_CONFIDENCE (e.g. to 80, the platform's own default) must
+    have THAT value drive the shadow comparison - using only the 55
+    constant here would make would_change_decision wrong for exactly this
+    user, since production itself (via _build_page_context's own
+    ai_confidence_threshold filter) never even shows this scan a candidate
+    below 80 in the first place."""
+    result = _run_scan(user_id, [_candidate(confidence=80)], _snapshot(vix_level=10.0), ai_confidence_threshold=80)
+    shadow = result["placed"][0]["regime_shadow"]
+    assert shadow["actual_decision_threshold"] == 80
+    assert shadow["raw_crosses_threshold"] is True  # 80 >= 80
+    assert shadow["shadow_adjusted_confidence"] == 80  # VIX=10 -> zero proposed adjustment
+    assert shadow["shadow_crosses_threshold"] is True
+
+
+def test_a_users_lowered_threshold_never_drops_below_the_global_floor(user_id):
+    """A user who lowered their own setting below OVERNIGHT_MIN_CONFIDENCE
+    must not make the shadow comparison MORE lenient than production
+    actually is - the scan's own `qualifying` filter still enforces the
+    55 floor regardless of a lower per-user setting, so the shadow's
+    effective threshold must stay floored at 55 too."""
+    result = _run_scan(user_id, [_candidate(confidence=60)], _snapshot(vix_level=10.0), ai_confidence_threshold=30)
+    shadow = result["placed"][0]["regime_shadow"]
+    assert shadow["actual_decision_threshold"] == pluto_app.OVERNIGHT_MIN_CONFIDENCE == 55
+
+
+def test_get_settings_failure_falls_back_to_the_global_floor_without_crashing(user_id):
+    """Even if reading the user's settings for the threshold blows up
+    outright, the scan must still complete and default to the safe global
+    floor - not crash, and not silently use an unbounded/wrong value."""
+    result = _run_scan(
+        user_id, [_candidate(confidence=60)], _snapshot(vix_level=10.0),
+        get_settings_side_effect=RuntimeError("disk error"),
+    )
+    assert result["placed_count"] == 1
+    shadow = result["placed"][0]["regime_shadow"]
+    assert shadow["actual_decision_threshold"] == pluto_app.OVERNIGHT_MIN_CONFIDENCE
 
 
 def test_would_change_decision_is_false_when_shadow_agrees_with_production(user_id):
