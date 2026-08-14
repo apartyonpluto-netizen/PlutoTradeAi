@@ -129,6 +129,7 @@ if __package__:
     from .anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from .autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
     from .autonomy.research_log import record_research_decision
+    from .autonomy.scan_run_log import list_scan_runs, record_scan_run
     from .autonomy.ambiguous_resolution_audit import (
         find_incomplete_resolutions,
         list_ambiguous_resolution_audit,
@@ -278,6 +279,7 @@ else:
     from anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
     from autonomy.research_log import record_research_decision
+    from autonomy.scan_run_log import list_scan_runs, record_scan_run
     from autonomy.ambiguous_resolution_audit import (
         find_incomplete_resolutions,
         list_ambiguous_resolution_audit,
@@ -1850,6 +1852,11 @@ def account_hub_page() -> str:
     context["webull_configured"] = is_webull_configured(user_id)
     context["anthropic_configured"] = is_anthropic_configured(user_id)
     context["webull_balance"] = _get_live_webull_balance(user_id)
+    # Durable per-tick record of whether THIS account was actually
+    # scanned/reconciled by the cron-trigger scheduler - see
+    # autonomy/scan_run_log.py's module docstring for why "the cron job
+    # returned HTTP 200" doesn't by itself answer that question.
+    context["scan_runs"] = list_scan_runs(user_id, limit=50)
     return render_template("account_hub.html", **context)
 
 
@@ -5490,7 +5497,10 @@ def _alert_admins_fast_monitor_unhealthy_if_needed() -> None:
     heartbeat state, so it reappears (same id, effectively unchanged) if
     the condition is still true next tick, mirroring the freeze banner's
     own "dismissing doesn't clear it, only actual recovery does" behavior."""
-    health = _fast_monitor_health_status()
+    try:
+        health = _fast_monitor_health_status()
+    except Exception:  # noqa: BLE001 - an alerting/observability check must never crash the caller's real work (the cron tick that has actual reconciliation left to do)
+        return
     if health.get("healthy"):
         return
     for user_id in list_all_user_ids():
@@ -5578,7 +5588,10 @@ def _alert_admins_full_scan_unhealthy_if_needed() -> None:
     third-party uptime service to poll independently of both. Same
     fixed-message, content-hash-deduped one-shot pattern as its
     counterpart."""
-    health = _full_scan_health_status()
+    try:
+        health = _full_scan_health_status()
+    except Exception:  # noqa: BLE001 - an alerting/observability check must never crash the caller's real work
+        return
     if health.get("healthy"):
         return
     for user_id in list_all_user_ids():
@@ -5686,7 +5699,10 @@ def _alert_admins_continuous_monitor_unhealthy_if_needed() -> None:
     faster mechanism is configured, making it the natural place to detect
     and surface either of them going silent. Same fixed-message,
     content-hash-deduped one-shot pattern as its siblings."""
-    health = _continuous_monitor_health_status()
+    try:
+        health = _continuous_monitor_health_status()
+    except Exception:  # noqa: BLE001 - an alerting/observability check must never crash the caller's real work
+        return
     if health.get("healthy"):
         return
     for user_id in list_all_user_ids():
@@ -7114,6 +7130,15 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
         "skipped_count": len(skipped),
         "placed": placed,
         "skipped": skipped,
+        # For autonomy/scan_run_log.py's durable per-tick record - how
+        # many opportunities this tick looked at in total, how many
+        # cleared the confidence/recommendation/dedup filter, and whether
+        # new entries were allowed at all this tick (independent of
+        # whether any candidate actually existed to place).
+        "candidates_found": len(opportunities),
+        "candidates_qualifying": len(qualifying),
+        "entries_allowed": entries_allowed,
+        "new_entries_blocked_reason": new_entries_blocked_reason,
         "guardrail": "DAY limit orders in the Webull sandbox only. Session auto-selected by time of day.",
     }
 
@@ -7147,12 +7172,144 @@ def api_autonomy_deactivate():
     return _api_success(payload, **payload)
 
 
+@app.route("/api/autonomy/scan-runs", methods=["GET"])
+@api_guard
+def api_autonomy_scan_runs():
+    """Authenticated, per-session (NOT the cron secret) - the durable,
+    newest-first record of every cron-trigger tick this account was
+    included in, per autonomy/scan_run_log.py. Exists so a user can
+    answer "was my account actually scanned" directly, instead of relying
+    on the external scheduler's own HTTP 200 (which proves the cron
+    fired, not that any given account was processed - see that module's
+    docstring). Also rendered server-side on the Account Hub page; this
+    endpoint is the same data for programmatic/refresh use."""
+    user_id = _current_user_id()
+    limit = request.args.get("limit", default=50, type=int)
+    limit = max(1, min(limit, 200))
+    runs = list_scan_runs(user_id, limit=limit)
+    return _api_success({"scan_runs": runs}, ok=True, scan_runs=runs)
+
+
+def _webull_secret_values_for_redaction(user_id: str) -> List[str]:
+    """Best-effort fetch of THIS user's own Webull app_key/app_secret, so
+    autonomy/scan_run_log.py's redaction can scrub them out of an error
+    string too (the module's own built-in list only covers this
+    PROCESS's global env-var secrets - a per-user credential is a
+    different value it has no way to know about on its own). Never raises -
+    a failure to fetch credentials for redaction purposes must not itself
+    block recording the (still-useful) error."""
+    try:
+        creds = get_webull_credentials(user_id)
+        return [creds.get("app_key", ""), creds.get("app_secret", "")]
+    except Exception:  # noqa: BLE001 - redaction-support code must never block recording the error
+        return []
+
+
+_CRON_TRIGGER_SCHEDULE_INTERVAL_MINUTES = 5
+
+
+def _nearest_scheduled_slot(now: datetime, interval_minutes: int = _CRON_TRIGGER_SCHEDULE_INTERVAL_MINUTES) -> datetime:
+    """Rounds `now` DOWN to the nearest interval-minute UTC boundary - an
+    HONEST APPROXIMATION of "when this tick was supposed to fire" per the
+    configured cron cadence, not a value received from the caller (the
+    endpoint has no way to know the caller's true intended schedule; a
+    GitHub Actions workflow doesn't pass one). Labeled clearly as
+    "scheduled_start_time" alongside the REAL "actual_start_time" in every
+    scan-run record specifically so a large, growing gap between the two
+    across records is visible - which is exactly how GitHub Actions'
+    documented scheduling imprecision (observed this session: a `*/5`
+    cron firing roughly hourly instead) shows up in the data."""
+    floored_minute = (now.minute // interval_minutes) * interval_minutes
+    return now.replace(minute=floored_minute, second=0, microsecond=0)
+
+
+def _monitor_heartbeat_snapshot_for_scan_run() -> Dict[str, object]:
+    """A compact snapshot of all three schedulers' health, taken once per
+    cron tick (not once per user - this is GLOBAL state, identical for
+    every user's record from the same tick) and attached to every
+    scan-run record so the dashboard can show "was the monitor considered
+    healthy when this ran" without a separate lookup. Never lets a
+    health-check failure block writing the scan-run record itself."""
+    try:
+        fast = _fast_monitor_health_status()
+        full = _full_scan_health_status()
+        continuous = _continuous_monitor_health_status()
+        return {
+            "fast_monitor_healthy": fast.get("healthy"),
+            "fast_monitor_age_seconds": fast.get("age_seconds"),
+            "full_scan_healthy": full.get("healthy"),
+            "full_scan_age_seconds": full.get("age_seconds"),
+            "continuous_monitor_healthy": continuous.get("healthy"),
+            "continuous_monitor_age_seconds": continuous.get("age_seconds"),
+        }
+    except Exception as error:  # noqa: BLE001 - observability code must never block the real cron tick
+        return {"error": f"heartbeat snapshot failed: {error}"}
+
+
+def _summarize_scan_result_for_run_log(scan_result: Dict[str, object]) -> Dict[str, object]:
+    """Extracts the fields autonomy/scan_run_log.py's schema wants out of
+    _run_autonomous_trade_scan's return value - see that function's own
+    return statement for where placed/skipped entries get their `status`
+    field, which is what distinguishes "reached order submission" (placed/
+    failed/unknown_submission_state) from every OTHER skip reason
+    (confidence floor, sizing, LLM veto - none of those ever call
+    _submit_and_protect_entry at all, so they must not count as
+    "attempted")."""
+    placed = scan_result.get("placed") or []
+    skipped = scan_result.get("skipped") or []
+    submission_attempted = [e for e in (placed + skipped) if isinstance(e, dict) and e.get("status") in ("placed", "failed", "unknown_submission_state")]
+    outcomes = {"placed": 0, "failed": 0, "unknown_submission_state": 0}
+    for entry in submission_attempted:
+        outcomes[entry["status"]] = outcomes.get(entry["status"], 0) + 1
+
+    candidates_found = scan_result.get("candidates_found")
+    candidates_qualifying = scan_result.get("candidates_qualifying")
+    reason_parts = [f"{candidates_found if candidates_found is not None else '?'} opportunities scanned, "
+                     f"{candidates_qualifying if candidates_qualifying is not None else '?'} qualifying, "
+                     f"{outcomes['placed']} placed, {outcomes['failed']} failed, {outcomes['unknown_submission_state']} ambiguous"]
+    if not scan_result.get("entries_allowed", True) and scan_result.get("new_entries_blocked_reason"):
+        reason_parts.append(f"new entries blocked this tick: {scan_result['new_entries_blocked_reason']}")
+
+    return {
+        "candidates_found": candidates_found,
+        "candidates_qualifying": candidates_qualifying,
+        "orders_attempted": len(submission_attempted),
+        "orders_outcomes": outcomes,
+        "reason": " | ".join(reason_parts),
+    }
+
+
 @app.route("/api/autonomy/cron-trigger", methods=["POST"])
 def api_autonomy_cron_trigger():
-    """Called on a timer by a Render Cron Job, not by a logged-in browser -
-    authenticated by a shared secret instead of a session cookie. Runs the
-    scan for every registered user currently in AUTONOMOUS mode; does nothing
-    for everyone else.
+    """Called on a timer by a Render Cron Job (or, currently, a GitHub
+    Actions schedule - see .github/workflows/autonomous-scan-scheduler.yml),
+    not by a logged-in browser - authenticated by a shared secret instead
+    of a session cookie.
+
+    Processes EVERY registered user on EVERY tick, regardless of mode -
+    this is the fix for a real gap: previously, any user NOT in
+    AUTONOMOUS mode was skipped entirely, which meant their EXISTING
+    positions/pending orders were never reconciled by this scheduler
+    either (only new-entry scanning is supposed to be mode-gated -
+    position management must stay independent of mode, so switching
+    autonomy OFF stops new entries but must not stop protecting whatever
+    is already open). Now:
+      - AUTONOMOUS-mode users get the full scan (position management +
+        new-candidate evaluation + entries), exactly as before;
+      - every OTHER Webull-configured user gets ONLY the lightweight
+        reconciliation pass (_run_fast_order_monitor - no opportunity
+        scan, no LLM calls, no new entries), so pending orders and open
+        positions stay managed either way;
+      - a user with no Webull configured has nothing to reconcile and is
+        recorded as such.
+
+    Every user gets a DURABLE, per-tick record via
+    autonomy/scan_run_log.py (record_scan_run) - "the cron job returned
+    HTTP 200" does not prove any given account was actually scanned, since
+    this endpoint can (and does) skip or fail individual users while
+    still returning 200 overall. See that module's docstring and
+    /api/autonomy/scan-runs (the authenticated endpoint that surfaces
+    these in the dashboard) for why this exists.
 
     Also does one LOCAL-ONLY (no broker calls) check per tick - not per
     user - of the fast monitor's own heartbeat, alerting every admin
@@ -7173,25 +7330,109 @@ def api_autonomy_cron_trigger():
     _alert_admins_fast_monitor_unhealthy_if_needed()
     _alert_admins_continuous_monitor_unhealthy_if_needed()
     run_id = record_full_scan_run_started()
+    tick_started_at = _now_utc()
+    scheduled_start_time = _nearest_scheduled_slot(tick_started_at)
+    heartbeat_snapshot = _monitor_heartbeat_snapshot_for_scan_run()
 
     results = []
     for user_id in list_all_user_ids():
         status = get_autonomy_status(user_id)
-        if str(status.get("current_mode", status.get("mode", "OFF"))).upper() != "AUTONOMOUS":
+        current_mode = str(status.get("current_mode", status.get("mode", "OFF"))).upper()
+        user_actual_start = _now_utc()
+        base_record = {
+            "trigger_source": "cron-trigger",
+            "run_id": run_id,
+            "scheduled_start_time": scheduled_start_time.isoformat(),
+            "actual_start_time": user_actual_start.isoformat(),
+            "account_mode": current_mode,
+            "monitor_heartbeat": heartbeat_snapshot,
+        }
+
+        if current_mode != "AUTONOMOUS":
+            # Existing-position monitoring stays independent of mode - see
+            # the docstring above. Only a lightweight reconciliation pass
+            # here, never the opportunity-scanning/new-entry work, which
+            # is AUTONOMOUS-only.
+            if not is_webull_configured(user_id):
+                record_scan_run(user_id, {
+                    **base_record, "status": "skipped",
+                    "reason": f"autonomy mode is {current_mode}, not AUTONOMOUS, and Webull is not configured for this account - nothing to reconcile",
+                    "candidates_found": None, "candidates_qualifying": None,
+                    "orders_attempted": None, "orders_outcomes": None, "error": None,
+                    "completion_time": _now_utc().isoformat(),
+                })
+                results.append({"user_id": user_id, "ok": True, "skipped": "not_autonomous_mode_no_webull"})
+                continue
+            with app.test_request_context():
+                session["user_id"] = user_id
+                try:
+                    monitor_result = _run_fast_order_monitor(user_id)
+                    record_scan_run(user_id, {
+                        **base_record, "status": "skipped",
+                        "reason": (
+                            f"autonomy mode is {current_mode}, not AUTONOMOUS - no new-entry scan this tick; "
+                            f"existing positions/orders were still reconciled "
+                            f"({monitor_result.get('entries_checked', 0)} transitional entries checked, "
+                            f"{monitor_result.get('still_transitional_count', 0)} still open afterward)"
+                        ),
+                        "candidates_found": None, "candidates_qualifying": None,
+                        "orders_attempted": None, "orders_outcomes": None, "error": None,
+                        "completion_time": _now_utc().isoformat(),
+                    })
+                    results.append({"user_id": user_id, "ok": True, "reconciled_only": True, **monitor_result})
+                except ScanAlreadyRunningError:
+                    record_scan_run(user_id, {
+                        **base_record, "status": "skipped",
+                        "reason": "a concurrent scan/monitor tick was already running for this account - skipped; existing positions remain protected by that concurrent pass",
+                        "candidates_found": None, "candidates_qualifying": None,
+                        "orders_attempted": None, "orders_outcomes": None, "error": None,
+                        "completion_time": _now_utc().isoformat(),
+                    })
+                    results.append({"user_id": user_id, "ok": True, "skipped": "scan_already_running"})
+                except Exception as error:  # noqa: BLE001 - one user's failure shouldn't block others
+                    record_scan_run(user_id, {
+                        **base_record, "status": "failed",
+                        "reason": f"reconciliation of existing positions failed while in {current_mode} mode",
+                        "candidates_found": None, "candidates_qualifying": None,
+                        "orders_attempted": None, "orders_outcomes": None, "error": str(error),
+                        "completion_time": _now_utc().isoformat(),
+                    }, extra_redact_secrets=_webull_secret_values_for_redaction(user_id))
+                    results.append({"user_id": user_id, "ok": False, "error": str(error)})
             continue
+
         with app.test_request_context():
             session["user_id"] = user_id
             try:
                 scan_result = _run_autonomous_trade_scan(user_id)
                 results.append({"user_id": user_id, "ok": True, **scan_result})
+                summary = _summarize_scan_result_for_run_log(scan_result)
+                record_scan_run(user_id, {
+                    **base_record, "status": "processed", "error": None,
+                    "completion_time": _now_utc().isoformat(),
+                    **summary,
+                })
             except ScanAlreadyRunningError:
                 # Benign, expected overlap (a retry, a double-fire, a manual
                 # click mid-tick) - the lock did its job by refusing this
                 # call outright, so this is not a real failure worth
                 # surfacing the same way as an actual error.
                 results.append({"user_id": user_id, "ok": True, "skipped": "scan_already_running"})
+                record_scan_run(user_id, {
+                    **base_record, "status": "skipped",
+                    "reason": "a concurrent scan was already running for this account - skipped",
+                    "candidates_found": None, "candidates_qualifying": None,
+                    "orders_attempted": None, "orders_outcomes": None, "error": None,
+                    "completion_time": _now_utc().isoformat(),
+                })
             except Exception as error:  # noqa: BLE001 - one user's failure shouldn't block others
                 results.append({"user_id": user_id, "ok": False, "error": str(error)})
+                record_scan_run(user_id, {
+                    **base_record, "status": "failed",
+                    "reason": "the autonomous scan raised an unhandled error",
+                    "candidates_found": None, "candidates_qualifying": None,
+                    "orders_attempted": None, "orders_outcomes": None, "error": str(error),
+                    "completion_time": _now_utc().isoformat(),
+                }, extra_redact_secrets=_webull_secret_values_for_redaction(user_id))
 
     record_full_scan_run_completed(
         run_id,

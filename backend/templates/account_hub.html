@@ -189,7 +189,79 @@
         <button type="button" class="ghost-button" id="autonomyEmergencyStopButton">Emergency Stop</button>
         <button type="button" class="ghost-button" id="autonomyResetStopButton">Reset Stop</button>
     </div>
+    <ul class="mode-explainer">
+        <li><b>OFF</b> &mdash; no automated activity of any kind. Existing positions/pending orders are still monitored and protected.</li>
+        <li><b>SCOUT</b> / <b>ANALYST</b> &mdash; reserved for future review-only workflows. Today these behave identically to OFF: nothing is submitted automatically.</li>
+        <li><b>PAPER</b> &mdash; manual sandbox trading. You review opportunities and place orders yourself from the dashboard; nothing is submitted automatically in this mode.</li>
+        <li><b>APPROVAL</b> &mdash; reserved for a future per-trade approval queue. Today this also behaves like OFF: no automatic submission, and there is no approval queue built yet.</li>
+        <li><b>AUTONOMOUS</b> &mdash; the only mode that submits sandbox orders automatically and unattended, on the external scheduler's own cadence. See Scan Run History below to confirm it is actually running for this account before relying on it.</li>
+    </ul>
+    <p class="muted tone-caution">
+        Do not switch to AUTONOMOUS yet: the scheduler currently driving this (a GitHub Actions cron job, not a
+        dedicated Render worker) has an observed real-world cadence of roughly once per hour rather than every 5
+        minutes, and the continuous 5&ndash;10 second order-safety monitor this app was built to require before
+        unattended trading is not yet deployed. Existing-position monitoring (protecting anything already open) is
+        independent of mode and unaffected by this.
+    </p>
     <p class="muted">Sandbox only &mdash; live real-money execution stays locked regardless of mode.</p>
+</section>
+
+<section class="panel panel-table" data-scan-run-log>
+    <div class="panel-head">
+        <h3>Scan Run History</h3>
+        <span>{{ scan_runs|length }} recorded &middot; newest first</span>
+    </div>
+    <p class="muted">
+        Every time the external scheduler fires, this account gets exactly one row here &mdash; whether it was fully
+        processed, skipped (wrong mode, Webull not configured, a concurrent run already in flight), or failed
+        outright. An HTTP 200 from the scheduler only proves it reached the server, not that <em>your</em> account
+        was scanned &mdash; this is the durable record that actually proves it. "Reconciled only" rows mean new
+        entries were not attempted (mode isn't AUTONOMOUS) but existing positions/orders were still checked.
+    </p>
+    <table id="scanRunLogTable">
+        <thead>
+            <tr>
+                <th>Actual Start</th>
+                <th>Scheduled Slot</th>
+                <th>Mode</th>
+                <th>Status</th>
+                <th>Reason</th>
+                <th>Candidates (found/qualifying)</th>
+                <th>Orders (placed/failed/ambiguous)</th>
+                <th>Monitor Healthy</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for run in scan_runs %}
+        <tr>
+            <td class="alert-time" data-timestamp="{{ run.actual_start_time or '' }}">--</td>
+            <td class="alert-time" data-timestamp="{{ run.scheduled_start_time or '' }}">--</td>
+            <td>{{ run.account_mode or '—' }}</td>
+            <td>{{ run.status or '—' }}</td>
+            <td>{{ run.reason or (run.error and ('error: ' ~ run.error)) or '—' }}</td>
+            <td>{{ run.candidates_found if run.candidates_found is not none else '—' }} / {{ run.candidates_qualifying if run.candidates_qualifying is not none else '—' }}</td>
+            <td>
+                {% if run.orders_outcomes %}
+                {{ run.orders_outcomes.placed or 0 }} / {{ run.orders_outcomes.failed or 0 }} / {{ run.orders_outcomes.unknown_submission_state or 0 }}
+                {% else %}
+                &mdash;
+                {% endif %}
+            </td>
+            <td>
+                {% if run.monitor_heartbeat %}
+                fast: {{ 'yes' if run.monitor_heartbeat.fast_monitor_healthy else 'no' }} &middot;
+                full: {{ 'yes' if run.monitor_heartbeat.full_scan_healthy else 'no' }} &middot;
+                continuous: {{ 'yes' if run.monitor_heartbeat.continuous_monitor_healthy else 'no' }}
+                {% else %}
+                &mdash;
+                {% endif %}
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8" class="muted">No scan runs recorded yet &mdash; the external scheduler has not reached this account.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
 </section>
 
 <section class="panel" data-risk-control>

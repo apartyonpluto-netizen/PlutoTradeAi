@@ -64,3 +64,20 @@ def test_cron_trigger_endpoint_checks_fast_monitor_health_once_per_tick(user_id)
 
     assert response.status_code == 200
     mock_alert_check.assert_called_once()
+
+
+def test_a_broken_health_status_check_does_not_raise():
+    """Found via a scan-run-log test that crashed the whole cron-trigger
+    endpoint with a 500 when the underlying health-status read failed -
+    an alerting/observability helper must degrade to "skip this check",
+    never propagate and take down the caller's actual reconciliation
+    work. Covers all three siblings (fast monitor, full scan, continuous
+    monitor) since they share the exact same unguarded-call shape."""
+    with patch.object(pluto_app, "_fast_monitor_health_status", side_effect=RuntimeError("boom")):
+        pluto_app._alert_admins_fast_monitor_unhealthy_if_needed()  # must not raise
+
+    with patch.object(pluto_app, "_full_scan_health_status", side_effect=RuntimeError("boom")):
+        pluto_app._alert_admins_full_scan_unhealthy_if_needed()  # must not raise
+
+    with patch.object(pluto_app, "_continuous_monitor_health_status", side_effect=RuntimeError("boom")):
+        pluto_app._alert_admins_continuous_monitor_unhealthy_if_needed()  # must not raise

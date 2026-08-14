@@ -23,7 +23,38 @@ services:
         sync: false
       - key: ALPACA_API_SECRET_KEY
         sync: false
+      # Shared with the plutotradeai-continuous-monitor worker below - both
+      # sides must have the IDENTICAL value. sync: false (not generateValue)
+      # because Render's Blueprint spec has no way to generate a secret once
+      # and share it across two services - it must be set by hand, once, on
+      # each service, in the Render dashboard. See that worker's own
+      # envVars block for the matching entry.
+      - key: MONITOR_WORKER_SECRET
+        sync: false
     disk:
       name: plutotradeai-data
       mountPath: /var/data
       sizeGB: 1
+
+  # Option A from the architecture review (see conversation history): a
+  # separate, independently-deployed background worker with NO disk access
+  # and NO Webull credentials, calling the web service's own authenticated
+  # /api/autonomy/continuous-monitor-tick endpoint on a tight sequential
+  # loop every ~10 seconds so reconciliation runs on the web service, which
+  # already owns the disk/credentials. See backend/continuous_monitor_worker.py's
+  # own module docstring for the full reasoning (a background thread inside
+  # gunicorn was explicitly rejected: it can die silently while the site
+  # stays healthy).
+  - type: worker
+    name: plutotradeai-continuous-monitor
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python backend/continuous_monitor_worker.py
+    envVars:
+      - key: MONITOR_ENDPOINT_URL
+        value: https://plutotradeai-tqsl.onrender.com/api/autonomy/continuous-monitor-tick
+      - key: MONITOR_WORKER_SECRET
+        sync: false
+      - key: MONITOR_INTERVAL_SECONDS
+        value: "10"
