@@ -940,6 +940,23 @@ def test_new_entries_blocked_outside_core_session():
     assert pluto_app._new_entries_allowed("NIGHT") is False
 
 
+def test_deployment_kill_switch_off_by_default(monkeypatch):
+    monkeypatch.delenv("PLUTO_DISABLE_NEW_ENTRIES", raising=False)
+    assert pluto_app._new_entries_disabled_by_deployment_kill_switch() is False
+
+
+def test_deployment_kill_switch_recognizes_truthy_values(monkeypatch):
+    for truthy in ("1", "true", "True", "TRUE", "yes", "on"):
+        monkeypatch.setenv("PLUTO_DISABLE_NEW_ENTRIES", truthy)
+        assert pluto_app._new_entries_disabled_by_deployment_kill_switch() is True, truthy
+
+
+def test_deployment_kill_switch_ignores_falsy_or_garbage_values(monkeypatch):
+    for value in ("0", "false", "", "no", "off", "banana"):
+        monkeypatch.setenv("PLUTO_DISABLE_NEW_ENTRIES", value)
+        assert pluto_app._new_entries_disabled_by_deployment_kill_switch() is False, value
+
+
 # --- order fill / protection status interpretation -------------------------
 
 

@@ -85,6 +85,7 @@ if __package__:
     from .brains.extended_hours_brain import build_extended_hours_intelligence
     from .brains.strategy_brain import build_strategy_intelligence
     from .brains.llm_reasoning import get_llm_verdict
+    from .regime import compute_shadow_adjustment, get_vix_snapshot
     from .integrations.tradingview import get_tradingview_status, save_alert
     from .integrations import webull as webull_api
     from .webull_credentials import (
@@ -94,8 +95,36 @@ if __package__:
         get_virtual_net_account_value,
         get_virtual_starting_balance,
     )
-    from .webull_stop_orders import pop_exit_orders, pop_exit_orders_by_type, record_exit_order, tracked_tickers as webull_tracked_tickers
-    from .scan_lock import ScanAlreadyRunningError, user_scan_lock
+    from .webull_stop_orders import (
+        get_exit_orders,
+        pop_exit_order_by_id,
+        pop_exit_orders,
+        pop_exit_orders_by_type,
+        record_exit_order,
+        tracked_tickers as webull_tracked_tickers,
+    )
+    from .autonomy.closed_trades import get_closed_trade, list_closed_trades, record_closed_trade
+    from .fast_monitor_heartbeat import (
+        get_heartbeat_status as get_fast_monitor_heartbeat_status,
+        record_run_completed as record_fast_monitor_run_completed,
+        record_run_started as record_fast_monitor_run_started,
+    )
+    from .full_scan_heartbeat import (
+        get_heartbeat_status as get_full_scan_heartbeat_status,
+        record_run_completed as record_full_scan_run_completed,
+        record_run_started as record_full_scan_run_started,
+    )
+    from .continuous_monitor_heartbeat import (
+        get_heartbeat_status as get_continuous_monitor_heartbeat_status,
+        record_reconciliation_completed as record_continuous_monitor_reconciliation_completed,
+        record_request_received as record_continuous_monitor_request_received,
+    )
+    from .scan_lock import (
+        ContinuousMonitorTickAlreadyRunningError,
+        ScanAlreadyRunningError,
+        continuous_monitor_tick_lock,
+        user_scan_lock,
+    )
     from . import order_lifecycle as ol
     from .anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from .autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
@@ -204,6 +233,7 @@ else:
     from brains.extended_hours_brain import build_extended_hours_intelligence
     from brains.strategy_brain import build_strategy_intelligence
     from brains.llm_reasoning import get_llm_verdict
+    from regime import compute_shadow_adjustment, get_vix_snapshot
     from integrations.tradingview import get_tradingview_status, save_alert
     from integrations import webull as webull_api
     from webull_credentials import (
@@ -213,8 +243,36 @@ else:
         get_virtual_net_account_value,
         get_virtual_starting_balance,
     )
-    from webull_stop_orders import pop_exit_orders, pop_exit_orders_by_type, record_exit_order, tracked_tickers as webull_tracked_tickers
-    from scan_lock import ScanAlreadyRunningError, user_scan_lock
+    from webull_stop_orders import (
+        get_exit_orders,
+        pop_exit_order_by_id,
+        pop_exit_orders,
+        pop_exit_orders_by_type,
+        record_exit_order,
+        tracked_tickers as webull_tracked_tickers,
+    )
+    from autonomy.closed_trades import get_closed_trade, list_closed_trades, record_closed_trade
+    from fast_monitor_heartbeat import (
+        get_heartbeat_status as get_fast_monitor_heartbeat_status,
+        record_run_completed as record_fast_monitor_run_completed,
+        record_run_started as record_fast_monitor_run_started,
+    )
+    from full_scan_heartbeat import (
+        get_heartbeat_status as get_full_scan_heartbeat_status,
+        record_run_completed as record_full_scan_run_completed,
+        record_run_started as record_full_scan_run_started,
+    )
+    from continuous_monitor_heartbeat import (
+        get_heartbeat_status as get_continuous_monitor_heartbeat_status,
+        record_reconciliation_completed as record_continuous_monitor_reconciliation_completed,
+        record_request_received as record_continuous_monitor_request_received,
+    )
+    from scan_lock import (
+        ContinuousMonitorTickAlreadyRunningError,
+        ScanAlreadyRunningError,
+        continuous_monitor_tick_lock,
+        user_scan_lock,
+    )
     import order_lifecycle as ol
     from anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
@@ -414,9 +472,14 @@ def service_worker():
     return send_from_directory(app.static_folder, "service-worker.js", mimetype="application/javascript")
 
 
-_PUBLIC_PATHS = {"/login", "/register", "/logout", "/forgot-password", "/service-worker.js", "/healthz"}
+_PUBLIC_PATHS = {"/login", "/register", "/logout", "/forgot-password", "/service-worker.js", "/healthz", "/api/autonomy/monitor-health"}
 _PUBLIC_PATH_PREFIXES = ("/static/",)
-_TOKEN_AUTH_PATHS = {"/api/tradingview/webhook", "/api/autonomy/cron-trigger"}
+_TOKEN_AUTH_PATHS = {
+    "/api/tradingview/webhook",
+    "/api/autonomy/cron-trigger",
+    "/api/autonomy/fast-monitor-trigger",
+    "/api/autonomy/continuous-monitor-tick",
+}
 
 
 @app.before_request
@@ -1572,6 +1635,13 @@ def _build_page_context(
         "admin_frozen_account_count": (
             _count_users_with_unresolved_ambiguous_submissions() if is_admin(user_id) else 0
         ),
+        # Admin-only - both heartbeats are single GLOBAL, system-wide
+        # resources (see fast_monitor_heartbeat.py / full_scan_heartbeat.py),
+        # not per-user ones, so there's nothing meaningful to show a
+        # non-admin viewer here. Local-only reads (no broker calls) of the
+        # last recorded run for each scheduler.
+        "fast_monitor_health": _fast_monitor_health_status() if is_admin(user_id) else None,
+        "full_scan_health": _full_scan_health_status() if is_admin(user_id) else None,
     }
     if include_trusted_accounts:
         context["trusted_accounts"] = get_trusted_accounts(user_id)
@@ -1794,6 +1864,10 @@ def trade_journal_page() -> str:
     context["paper_trade_summary"] = get_paper_trade_summary(user_id)
     overnight_orders = list_overnight_orders(user_id)
     context["overnight_orders"] = overnight_orders
+    # Durably closed autonomous trades - realized P&L and exit details as
+    # recorded by _reconcile_position_exit once CLOSED, not derived from
+    # overnight_orders/webull_positions here. See autonomy/closed_trades.py.
+    context["closed_trades"] = list_closed_trades(user_id)
     webull_positions = _get_live_webull_positions(user_id)
     if webull_positions.get("connected") and not webull_positions.get("error"):
         webull_positions = {
@@ -2612,11 +2686,161 @@ def api_autonomy_overnight_orders():
     return _api_success({"orders": orders}, orders=orders, ok=True)
 
 
+def _reconcile_closed_ticker_exit_orders(user_id: str, creds: Dict[str, str], account_id: str, ticker: str) -> None:
+    """For a ticker whose POSITION is absent from the broker's current
+    positions list - this ALONE is never sufficient evidence of what
+    happened (a position row can be absent for reasons other than "one of
+    MY tracked exit legs closed it": broker-side lag, a position closed by
+    some other route entirely, etc). "Determine closure using position
+    data plus stop/target order status - not position absence alone":
+    this corroborates with each TRACKED exit order's own broker status
+    before touching anything.
+
+    Only cancels (and only ever REMOVES tracking of) an order once
+    ANOTHER tracked order for this ticker is confirmed FILLED - that's
+    what actually explains why the position is gone - AND, for the leg
+    being cancelled, the cancellation itself is DURABLY CONFIRMED
+    afterward, never merely attempted. A failed cancel, or a cancel whose
+    result can't be confirmed, alerts and leaves tracking exactly as it
+    was - "never remove protective-order tracking after a cancellation
+    failure; retain each unresolved leg until its terminal broker status
+    is confirmed."
+
+    If NO tracked leg for this ticker shows a confirmed FILLED status,
+    this is exactly the "position absence without conclusive order
+    evidence" case - alerts, and deliberately does NOT cancel anything,
+    rather than infer an exit merely because the position disappeared.
+
+    This is a secondary, ticker-centric safety net - the PRIMARY,
+    entry-centric exit-detection mechanism is _reconcile_position_exit
+    (called by _monitor_transitional_orders for every
+    PROTECTION_CONFIRMED_ACTIVE entry), which reaches the same
+    leg-status-first conclusion earlier and also records the closed
+    trade / realized P&L. This function mainly still matters for
+    coverage no lifecycle-tracked entry explains (legacy tracking, a
+    ticker traded outside the lifecycle-state path, etc)."""
+    tracked = get_exit_orders(user_id, ticker)
+    if not tracked:
+        return
+
+    statuses: Dict[str, Optional[str]] = {}
+    for order in tracked:
+        order_id = order.get("id")
+        if not order_id:
+            continue
+        try:
+            detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, order_id)
+            statuses[order_id] = ol.summarize_fill(detail)["status"]
+        except Exception:  # noqa: BLE001 - inconclusive for THIS leg, never treated as evidence either way
+            statuses[order_id] = None
+
+    if not any(status == "FILLED" for status in statuses.values()):
+        try:
+            add_manual_alert(
+                user_id,
+                {
+                    "type": "unexplained_position_absence",
+                    "ticker": ticker,
+                    "message": (
+                        f"{ticker}: this app is tracking {len(tracked)} resting exit order(s) for a position "
+                        "that no longer appears in the broker's open positions, but none of the tracked orders "
+                        "show a confirmed FILLED status that would explain it. Leaving tracking untouched - "
+                        "review manually."
+                    ),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return
+
+    for order in tracked:
+        order_id = order.get("id")
+        status = statuses.get(order_id)
+
+        if status is None:
+            try:
+                add_manual_alert(
+                    user_id,
+                    {
+                        "type": "exit_order_status_unconfirmed",
+                        "ticker": ticker,
+                        "message": f"{ticker}: could not confirm the status of tracked order {order_id} - retaining tracking, will retry.",
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            continue  # retain - never drop tracking on an inconclusive check
+
+        if status == "FILLED":
+            # This is the leg that actually executed - nothing to cancel;
+            # safe to stop tracking it (it's done, not "unresolved").
+            pop_exit_order_by_id(user_id, ticker, order_id)
+            continue
+
+        if not _protective_leg_is_active(status):
+            # Already CANCELLED/FAILED at the broker on its own - safe to
+            # drop tracking; nothing was cancelled BY this pass.
+            pop_exit_order_by_id(user_id, ticker, order_id)
+            continue
+
+        try:
+            webull_api.cancel_order(creds["app_key"], creds["app_secret"], account_id, order_id)
+        except Exception as error:  # noqa: BLE001
+            try:
+                add_manual_alert(
+                    user_id,
+                    {
+                        "type": "exit_order_cancel_failed",
+                        "ticker": ticker,
+                        "message": f"{ticker}: failed to cancel stale exit order {order_id} after the position closed ({error}). Retaining tracking, will retry.",
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            continue  # NEVER pop tracking on a failed cancel attempt
+
+        try:
+            recheck_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, order_id)
+            recheck_status = ol.summarize_fill(recheck_detail)["status"]
+        except Exception:  # noqa: BLE001
+            try:
+                add_manual_alert(
+                    user_id,
+                    {
+                        "type": "exit_order_cancel_unconfirmed",
+                        "ticker": ticker,
+                        "message": f"{ticker}: cancelled exit order {order_id} but could not confirm the cancellation - retaining tracking, will retry.",
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            continue  # NEVER pop tracking until the cancellation is confirmed
+
+        if _protective_leg_is_active(recheck_status):
+            try:
+                add_manual_alert(
+                    user_id,
+                    {
+                        "type": "exit_order_cancel_unconfirmed",
+                        "ticker": ticker,
+                        "message": f"{ticker}: exit order {order_id} still shows active ({recheck_status}) after a cancel attempt - retaining tracking, will retry.",
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            continue  # NEVER pop tracking until confirmed terminal
+
+        # Confirmed CANCELLED/FAILED/FILLED (a race, but still terminal
+        # either way) - durably gone, safe to drop tracking now.
+        pop_exit_order_by_id(user_id, ticker, order_id)
+
+
 def _reconcile_exit_orders(user_id: str, creds: Dict[str, str], account_id: str) -> None:
-    """Runs at the start of every scan to keep resting broker-side exit
-    orders in sync with reality. The stop-loss and take-profit legs are two
-    independent orders (not a true OTOCO bracket - see the note on
-    place_take_profit_order), which creates two gaps this closes:
+    """Runs at the start of every scan/monitor tick to keep resting
+    broker-side exit orders in sync with reality. The stop-loss and
+    take-profit legs are two independent orders (not a true OTOCO bracket
+    - see the note on place_take_profit_order), which creates two gaps
+    this closes:
 
     1. An entry bought outside CORE hours couldn't get its STOP_LOSS order
        attached yet (STOP_LOSS only accepts the CORE session, confirmed live
@@ -2625,9 +2849,10 @@ def _reconcile_exit_orders(user_id: str, creds: Dict[str, str], account_id: str)
     2. One leg already filled at the broker on its own (e.g. price hit the
        take-profit limit, or the stop triggered) and closed the position -
        the other leg is now stale, resting against shares that no longer
-       exist. If left alone it could later fire and open an accidental short,
-       so cancel every tracked leg for any ticker that's no longer an open
-       position."""
+       exist. See _reconcile_closed_ticker_exit_orders for exactly how this
+       is confirmed (position absence alone is NOT sufficient - it's
+       corroborated against each tracked leg's own broker status) and how
+       tracking is retained, not dropped, on any unconfirmed step."""
     try:
         open_tickers = {
             str(position.get("symbol", "")).upper()
@@ -2639,11 +2864,10 @@ def _reconcile_exit_orders(user_id: str, creds: Dict[str, str], account_id: str)
     for ticker in webull_tracked_tickers(user_id):
         if ticker in open_tickers:
             continue
-        for exit_order in pop_exit_orders(user_id, ticker):
-            try:
-                webull_api.cancel_order(creds["app_key"], creds["app_secret"], account_id, exit_order["id"])
-            except Exception:  # noqa: BLE001 - likely already filled/expired, that's fine
-                pass
+        try:
+            _reconcile_closed_ticker_exit_orders(user_id, creds, account_id, ticker)
+        except Exception:  # noqa: BLE001 - one ticker's reconciliation failing must not block the others
+            continue
 
     if not open_tickers:
         return
@@ -3176,6 +3400,32 @@ def _new_entries_allowed(trading_session: str) -> bool:
     return trading_session == "CORE"
 
 
+def _new_entries_disabled_by_deployment_kill_switch() -> bool:
+    """A DEPLOYMENT-level (not per-user) kill switch, checked via the
+    PLUTO_DISABLE_NEW_ENTRIES environment variable - flippable by an
+    operator (a Render dashboard env var change + redeploy, or a manual
+    restart with the var set) WITHOUT touching any individual user's own
+    settings. Distinct from the existing PER-USER "emergency stop" toggle
+    in Account Hub (risk_settings["emergency_stop_enabled"], checked
+    separately in _run_autonomous_trade_scan_locked) - this is the
+    platform-wide equivalent, for an operator who needs to halt ALL new
+    autonomous entries at once (e.g. while investigating an incident)
+    without needing to touch every account individually.
+
+    Deliberately does NOT affect reconciliation/exit-monitoring/protection
+    work anywhere in this app - _reconcile_exit_orders, _refresh_stop_confidence,
+    _discover_orphaned_broker_entries, _reconcile_unknown_submissions,
+    _monitor_transitional_orders (and everything the continuous monitor
+    endpoint calls) all run UNCONDITIONALLY, before this check is even
+    reached in _run_autonomous_trade_scan_locked - "leave safety
+    monitoring active" is true by construction, not because this function
+    special-cases it. This only ever blocks the NEW-entry candidate-
+    sizing/placement path in the full 5-minute scan; the continuous
+    monitor and fast monitor never place new entries at all regardless
+    (see test_fast_monitor_never_scans_scores_or_places_a_new_entry)."""
+    return os.environ.get("PLUTO_DISABLE_NEW_ENTRIES", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _entry_fill_is_final(status: str) -> bool:
     """True once an entry order's fill status won't change further without a
     brand new placement - FILLED (done) or CANCELLED/FAILED (never will).
@@ -3326,6 +3576,133 @@ def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
         return _run_autonomous_trade_scan_locked(user_id)
 
 
+def _user_needs_fast_monitor_pass(user_id: str) -> bool:
+    """Cheap, LOCAL-ONLY (no broker calls) check deciding whether the fast
+    monitor should spend a broker round-trip on this user AT ALL. "Safety
+    monitoring must continue when autonomy is switched OFF - OFF prevents
+    new entries only" means this can NOT simply filter by autonomy mode
+    the way the full 5-minute scan's own cron-trigger endpoint still does
+    for ITS new-candidate work - a user who has since turned autonomy OFF
+    (possibly BECAUSE something looked wrong) still needs their existing
+    orders and positions managed, not abandoned.
+
+    True if the user has ANY of:
+      - an overnight_orders entry in a non-terminal lifecycle_state
+        (order_lifecycle.is_transitional) - covers ordinary transitional
+        entries, UNKNOWN_SUBMISSION_STATE, MANUAL_LINK_IN_PROGRESS, AND a
+        fully-protected position that might still exit
+        (PROTECTION_CONFIRMED_ACTIVE is deliberately non-terminal);
+      - a tracked resting exit order (webull_stop_orders.tracked_tickers) -
+        covers a position whose overnight_orders record might be stale or
+        missing but still has a real order resting at the broker;
+      - an incomplete manual resolution (find_incomplete_resolutions) - a
+        resolution transaction whose closing audit write never durably
+        landed.
+    Deliberately does NOT check autonomy mode at all - _run_autonomous_trade_scan_locked's
+    OWN new-entry gate is completely unaffected by this function; this only
+    decides whether the FAST MONITOR (reconciliation/resumption only,
+    never a new entry) has anything to do for this user this tick."""
+    if any(ol.is_transitional(order) for order in list_overnight_orders(user_id)):
+        return True
+    if webull_tracked_tickers(user_id):
+        return True
+    if find_incomplete_resolutions(user_id):
+        return True
+    return False
+
+
+def _run_fast_order_monitor(user_id: str) -> Dict[str, object]:
+    """The FAST per-order monitor tick - task list: "Build fast per-order
+    monitor decoupled from the 5-minute scan". Meant to be called on a
+    MUCH shorter cadence than the full autonomous scan (e.g. every 30-60
+    seconds, via a separate, more-frequent Render Cron Job hitting
+    /api/autonomy/fast-monitor-trigger - see that route) so an ordinary
+    transitional entry (order_lifecycle.MONITOR_RESUMABLE_STATES) doesn't
+    sit unresumed or unprotected for up to 5 minutes after a crash or a
+    slow fill.
+
+    Deliberately does NOT run _refresh_stop_confidence or any
+    new-candidate market-scanning/sizing work - only the reconciliation/
+    resumption passes every entry (ambiguous, manually-resolved, or
+    ordinary) might need:
+      - _discover_orphaned_broker_entries: a broker-accepted entry with
+        ZERO local trace at all (see that function). Deliberately called
+        here TOO, not only from the full 5-minute scan - local state
+        alone cannot identify a missing local write (there is nothing
+        local to key off of), so relying solely on
+        _user_needs_fast_monitor_pass's local-only gate (see the
+        endpoint below, which now runs this function for every
+        Webull-configured user regardless of that gate) would mean an
+        orphan is invisible to the FAST monitor entirely, only ever
+        caught by the slower 5-minute scan - or never, if that
+        scheduler's own cron job is misconfigured or autonomy is OFF and
+        nothing else calls it. Runs regardless of autonomy mode, exactly
+        like every other call in this function;
+      - _reconcile_exit_orders: sibling-leg cancellation (a position that
+        closed because one exit leg filled must not leave the other
+        resting against shares that no longer exist) and stop-refresh
+        retry;
+      - _reconcile_unknown_submissions: UNKNOWN_SUBMISSION_STATE;
+      - _recover_incomplete_manual_resolutions: MANUAL_LINK_IN_PROGRESS /
+        incomplete manual resolutions;
+      - _monitor_transitional_orders: every ordinary entry from
+        ENTRY_SUBMITTED through PROTECTION_FAILED - the fast monitor's
+        own core purpose.
+    That narrow scope is what makes this cheap enough to run this often -
+    no market data pull, no candidate sizing, no new broker orders except
+    the protective legs these reconciliation passes themselves place (and
+    orphan discovery's own get_order_history call, which is read-only).
+
+    Holds the SAME per-user lock (scan_lock.user_scan_lock) the full scan
+    uses - both mutate the same overnight_orders.json, so a fast tick must
+    never race a concurrent full scan (or another fast tick) for the same
+    user. Raises ScanAlreadyRunningError if one is already in flight (the
+    caller treats this as a benign skip, same as the full scan's own
+    cron-trigger endpoint already does) rather than queueing - a missed
+    tick is fine given how frequently this is meant to run again.
+
+    Raises ValidationError if Webull isn't configured/connected or no
+    sandbox account can be found - same reasoning as
+    _run_autonomous_trade_scan_locked's own setup: a caller (the
+    fast-monitor-trigger endpoint) decides how to surface that per user."""
+    creds = get_webull_credentials(user_id)
+    if not is_webull_configured(user_id):
+        raise ValidationError("Webull is not configured for this user.")
+    accounts = get_accounts(user_id)
+    webull_account = next((a for a in accounts if a.get("platform") == "webull"), None)
+    if not webull_account or webull_account.get("status") != "Connected":
+        raise ValidationError("Webull is not connected for this user.")
+    sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
+    cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
+    if not cash_account:
+        raise ValidationError("No Webull sandbox account found for this user's credentials.")
+    account_id = cash_account["account_id"]
+
+    entries_checked_before = sum(1 for order in list_overnight_orders(user_id) if ol.is_transitional(order))
+
+    with user_scan_lock(user_id):
+        _discover_orphaned_broker_entries(user_id, creds, account_id)
+        _reconcile_exit_orders(user_id, creds, account_id)
+        has_unresolved_ambiguous_submission = _reconcile_unknown_submissions(user_id, creds, account_id)
+        has_incomplete_manual_resolution = _recover_incomplete_manual_resolutions(user_id, creds, account_id)
+        still_transitional = _monitor_transitional_orders(user_id, creds, account_id)
+
+    entries_checked_after = sum(1 for order in list_overnight_orders(user_id) if ol.is_transitional(order))
+
+    return {
+        "has_unresolved_ambiguous_submission": has_unresolved_ambiguous_submission,
+        "has_incomplete_manual_resolution": has_incomplete_manual_resolution,
+        "still_transitional": still_transitional,
+        # entries_checked is the count BEFORE this pass (how many this
+        # invocation actually attempted to do something with) -
+        # entries_checked_after is included too since a resolved-and-closed
+        # entry disappears from the transitional count without having been
+        # "not checked".
+        "entries_checked": entries_checked_before,
+        "still_transitional_count": entries_checked_after,
+    }
+
+
 def _submit_and_protect_entry(
     user_id: str,
     creds: Dict[str, str],
@@ -3412,192 +3789,269 @@ def _submit_and_protect_entry(
     )
 
 
-def _poll_fill_and_protect(
+def _reconcile_protective_leg_quantity(
     user_id: str,
     creds: Dict[str, str],
     account_id: str,
     ticker: str,
-    entry_client_order_id: str,
-    limit_price: float,
-    stop_price: float,
-    target_price: float,
     trading_day: str,
     entry: Dict[str, object],
-) -> Dict[str, object]:
-    """The fill-confirmation-through-protection body shared by two callers:
-    _submit_and_protect_entry, right after a fresh placement is accepted,
-    and _reconcile_unknown_submission, resuming an entry that turns out to
-    have actually reached the broker despite an earlier ambiguous response.
-    Both callers are responsible for getting entry into a state where
-    lifecycle_state allows transitioning to ENTRY_PARTIALLY_FILLED/
-    ENTRY_FILLED/ENTRY_FAILED before calling this (see VALID_TRANSITIONS in
-    order_lifecycle.py) - this function itself does not place or validate
-    the entry order, only polls and protects it.
+    leg: str,
+    target_quantity: float,
+    leg_price: float,
+) -> None:
+    """Resizes ONE protective leg ("stop" or "target") to target_quantity -
+    growing it (more of the entry order filled since protection was last
+    sized) or shrinking it (the position partially exited through the
+    OTHER leg - see _reconcile_position_exit).
 
-    A CANCELLED or FAILED order is not automatically a zero-position
-    outcome - a real, common brokerage behavior is a day order partially
-    filling (e.g. 4 of 10 shares) before the unfilled remainder is
-    cancelled (session close, a triggered risk control, etc). Treating
-    CANCELLED/FAILED as unconditionally "no position" would silently
-    discard those 4 filled shares as a bookkeeping non-event, leaving a
-    real, held, completely UNPROTECTED position outside this function's
-    knowledge - so filled_quantity is checked BEFORE deciding the outcome:
-    a positive filled_quantity is treated exactly like a full fill for
-    protection purposes (transitions to ENTRY_FILLED and proceeds to place
-    a stop/target sized to that actual quantity), and the cancelled/failed
-    remainder is recorded on the entry purely for the audit trail. Only a
-    confirmed filled_quantity of zero resolves to the true no-position
-    ENTRY_FAILED outcome."""
-    filled_quantity = 0.0
-    for attempt in range(ENTRY_FILL_POLL_ATTEMPTS):
-        if attempt > 0:
-            time.sleep(ENTRY_FILL_POLL_INTERVAL_SECONDS)
+    Deliberately does NOT assume replaying the same deterministic
+    client_order_id resizes a resting order - Webull's own duplicate-order
+    guard (_place_order_with_retry's 417/OAUTH_OPENAPI_TRADE_PLACE_ORDER_REPEAT
+    handling) just returns the EXISTING, UNCHANGED order on a repeat
+    client_order_id; it does not modify its quantity. A genuine
+    replace/modify endpoint does exist in the vendored SDK
+    (webull.trade.trade.v2.order_operation_v2.OrderOperationV2.replace_order,
+    POST /openapi/trade/stock/order/replace) but that entire v2 class is
+    marked "Deprecated - use OrderOperationV3" in the SDK's own source,
+    and neither v2 nor v3's replace behavior for a quantity-only resize
+    has ever been empirically confirmed against the live sandbox the way
+    place/cancel/get_order_detail already have elsewhere in this app (see
+    the allowlist-not-assumption discipline in integrations/webull.py's
+    _CONFIRMED_DEFINITE_REJECTION_ERROR_CODES for why this app does not
+    build on unverified broker behavior). This uses an explicit
+    cancel-confirm-replace sequence instead, under a NEW, VERSIONED
+    deterministic client_order_id each time
+    (order_lifecycle.deterministic_client_order_id's own `attempt`
+    parameter) - a genuinely different order, never a same-id resubmission.
+
+    NEVER drops tracking (webull_stop_orders.record_exit_order /
+    pop_exit_order_by_id) of the OLD leg until its cancellation is
+    DURABLY CONFIRMED - re-checked via a fresh get_order_detail call after
+    the cancel, not assumed from the cancel call merely not raising. If
+    the old leg turns out to have already FILLED (it executed before the
+    cancel could land, or during the gap between cancelling and
+    re-checking), this aborts the resize for this leg entirely and alerts
+    - a filled leg means shares already left through it, so blindly
+    placing a new leg for the full target_quantity would over-protect a
+    position that's already partially exited; that scenario is instead
+    left for _reconcile_position_exit to pick up as a genuine exit on its
+    own next pass.
+
+    Raises on any unresolved step (broker unreachable, cancel fails,
+    cancellation unconfirmed, new placement fails) rather than swallowing
+    - the caller is responsible for recording that as a failed monitor
+    attempt (see monitor_last_error/monitor_attempt_count in
+    _monitor_transitional_orders) and retrying on a later pass. This
+    function is itself safe to simply call again after any such failure -
+    every step re-checks current broker state rather than trusting
+    anything left over from a prior, incomplete attempt."""
+    if leg_price <= 0:
+        # A genuinely absent leg - e.g. no take-profit configured for this
+        # setup - is a normal, expected condition, not a failure to raise
+        # and retry. Matches _reconcile_entry_fill_and_protection's own
+        # asymmetric treatment: a missing STOP still blocks
+        # PROTECTION_CONFIRMED_ACTIVE (safety), a missing TARGET does not
+        # (only forfeits upside capture) - decided there via
+        # target_confirmed = target_price <= 0, not here.
+        entry[f"{leg}_order_error"] = f"no {leg} price computed for this setup"
+        return
+    current_leg_quantity = entry.get(f"{leg}_leg_quantity")
+    if current_leg_quantity == target_quantity:
+        return  # already correctly sized - nothing to do
+
+    old_client_order_id = entry.get(f"{leg}_client_order_id")
+    if old_client_order_id:
         try:
-            detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, entry_client_order_id)
-        except Exception:  # noqa: BLE001 - transient lookup failure, try again next attempt
-            continue
-        fill = ol.summarize_fill(detail)
-        filled_quantity = fill["filled_quantity"]
-        if fill["status"] == "PARTIAL FILLED":
-            ol.transition(entry, ol.ENTRY_PARTIALLY_FILLED, filled_quantity=filled_quantity)
-        if _entry_fill_is_final(fill["status"]):
-            if fill["status"] == "FILLED":
-                ol.transition(entry, ol.ENTRY_FILLED, filled_quantity=filled_quantity)
-            elif filled_quantity > 0:
-                # CANCELLED/FAILED but shares DID fill first - a real held
-                # position, not a no-op. Protect exactly what filled; the
-                # remainder never arriving is recorded, not treated as a
-                # reason to skip protection.
-                entry["unfilled_remainder_status"] = fill["status"]
-                ol.transition(
-                    entry, ol.ENTRY_FILLED, filled_quantity=filled_quantity, unfilled_remainder_status=fill["status"]
-                )
-            else:
-                ol.transition(
-                    entry, ol.ENTRY_FAILED, error=f"entry order {fill['status'].lower()} at the broker", filled_quantity=filled_quantity
-                )
-                return entry
-            break
+            old_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, old_client_order_id)
+            old_status = ol.summarize_fill(old_detail)["status"]
+        except Exception as error:  # noqa: BLE001
+            raise RuntimeError(f"could not confirm the existing {leg} leg's status before resizing: {error}") from error
 
-    if filled_quantity <= 0:
-        # Never filled within the bounded window - left in entry_submitted;
-        # _monitor_transitional_orders keeps checking on the next pass.
-        return entry
-
-    # Realized risk, recomputed from what actually filled - sizing happened
-    # against the PROPOSED entry and requested quantity before this order
-    # even reached the broker; a partial fill changes the real dollar risk
-    # (fewer shares than planned), and this is the point where that becomes
-    # knowable. For a LIMIT BUY specifically, the fill price can only be <=
-    # the limit price by construction (that's what a limit order guarantees)
-    # - there's no "adverse" fill price scenario to recompute against, only
-    # "at the limit or better". get_order_detail hasn't been verified to
-    # expose an average-fill-price field separately from the order's own
-    # limit_price, so this uses limit_price as a deliberately conservative
-    # (worst-case-for-a-buy-limit) stand-in rather than guessing at an
-    # unverified field name - realized risk here is an upper bound, never an
-    # underestimate. Gaps and slippage on the STOP side aren't modeled at
-    # all - a stop-loss can still realize a larger loss than this number if
-    # the market gaps through it, which is why this is recorded as an
-    # estimate, not a guarantee (see the same caveat in Account Hub's risk
-    # UI copy).
-    realized_risk_dollars = round(filled_quantity * (limit_price - stop_price), 2)
-    entry["realized_risk_dollars"] = realized_risk_dollars
-    planned_risk_dollars = entry.get("planned_risk_dollars")
-    if isinstance(planned_risk_dollars, (int, float)) and realized_risk_dollars > planned_risk_dollars + 0.01:
-        # A flag nobody consumes isn't a control - this fires the same
-        # high-priority alert path as a protection-confirmation failure, and
-        # persisting it on the entry record (already done above) is the
-        # audit trail: it's written to overnight_orders.json, visible in
-        # Trading Portfolio for as long as that record exists.
-        entry["realized_risk_exceeds_planned"] = True
-        try:
-            add_manual_alert(
-                user_id,
-                {
-                    "type": "realized_risk_exceeds_planned",
-                    "ticker": ticker,
-                    "message": (
-                        f"{ticker}: realized risk (${realized_risk_dollars:.2f} on {filled_quantity:g} filled shares) "
-                        f"exceeded the planned risk budget (${planned_risk_dollars:.2f}) for this entry. Review the "
-                        f"position - the sizing that was supposed to bound this trade's loss did not hold as expected."
-                    ),
-                },
+        if old_status == "FILLED":
+            entry[f"{leg}_order_error"] = (
+                f"the previous {leg} leg filled before it could be resized - the position may have partially "
+                "exited through it; not placing a new leg automatically"
             )
-        except Exception:  # noqa: BLE001 - never let alerting itself break the fill/protection flow
-            pass
+            try:
+                add_manual_alert(
+                    user_id,
+                    {
+                        "type": "protective_leg_filled_during_resize",
+                        "ticker": ticker,
+                        "message": (
+                            f"{ticker}: the {leg} leg (client_order_id {old_client_order_id}) filled before this "
+                            "app could resize it for a larger position. Review this position manually - it may "
+                            "have partially exited through this leg."
+                        ),
+                    },
+                )
+            except Exception:  # noqa: BLE001 - never let alerting itself break reconciliation
+                pass
+            raise RuntimeError(f"{leg} leg already filled during resize attempt - see _reconcile_position_exit")
 
-    # Whatever filled - even a partial - gets protected now rather than
-    # waiting for the rest: filled shares sitting unprotected is worse than a
-    # protective order sized slightly smaller than the eventual full
-    # position (a later pass can size up if the remainder fills afterward).
-    ol.transition(entry, ol.PROTECTION_PENDING)
+        if _protective_leg_is_active(old_status):
+            try:
+                webull_api.cancel_order(creds["app_key"], creds["app_secret"], account_id, old_client_order_id)
+            except Exception as error:  # noqa: BLE001
+                raise RuntimeError(f"could not cancel the existing {leg} leg for resizing: {error}") from error
+            try:
+                recheck_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, old_client_order_id)
+                recheck_status = ol.summarize_fill(recheck_detail)["status"]
+            except Exception as error:  # noqa: BLE001
+                raise RuntimeError(f"could not confirm the {leg} leg's cancellation before resizing: {error}") from error
+            if recheck_status == "FILLED":
+                entry[f"{leg}_order_error"] = f"the {leg} leg filled during cancellation - not replacing automatically"
+                raise RuntimeError(f"{leg} leg filled during cancel-confirm - see _reconcile_position_exit")
+            if _protective_leg_is_active(recheck_status):
+                raise RuntimeError(f"the {leg} leg's cancellation has not been confirmed yet - will retry next pass")
+            old_status = recheck_status
+        # old_status is now CANCELLED or FAILED - confirmed gone, safe to replace.
 
-    stop_client_order_id = ol.deterministic_client_order_id(user_id, ticker, trading_day, "stop", attempt=1)
-    target_client_order_id = ol.deterministic_client_order_id(user_id, ticker, trading_day, "target", attempt=1)
-    entry["stop_client_order_id"] = stop_client_order_id
-    entry["target_client_order_id"] = target_client_order_id
+    next_attempt = int(entry.get(f"{leg}_leg_attempt") or 0) + 1
+    new_client_order_id = ol.deterministic_client_order_id(user_id, ticker, trading_day, leg, attempt=next_attempt)
 
-    stop_placed_ok = False
-    if stop_price > 0:
-        try:
-            time.sleep(1.0)
+    def _place_new_leg() -> None:
+        if leg == "stop":
             webull_api.place_stop_loss_order(
                 app_key=creds["app_key"],
                 app_secret=creds["app_secret"],
                 account_id=account_id,
                 symbol=ticker,
-                quantity=filled_quantity,
-                stop_price=stop_price,
-                client_order_id=stop_client_order_id,
+                quantity=target_quantity,
+                stop_price=leg_price,
+                client_order_id=new_client_order_id,
             )
-            record_exit_order(user_id, ticker, stop_client_order_id, "stop")
-            stop_placed_ok = True
-            entry["stop_order_error"] = None
-        except Exception as error:  # noqa: BLE001 - the entry already filled, don't fail the whole candidate
-            entry["stop_order_error"] = str(error)
-    else:
-        entry["stop_order_error"] = "no stop price computed for this setup"
-
-    target_placed_ok = False
-    if target_price > 0:
-        try:
-            time.sleep(1.0)
+        else:
             webull_api.place_take_profit_order(
                 app_key=creds["app_key"],
                 app_secret=creds["app_secret"],
                 account_id=account_id,
                 symbol=ticker,
-                quantity=filled_quantity,
-                target_price=target_price,
+                quantity=target_quantity,
+                target_price=leg_price,
                 trading_session=_current_webull_trading_session(),
-                client_order_id=target_client_order_id,
+                client_order_id=new_client_order_id,
             )
-            record_exit_order(user_id, ticker, target_client_order_id, "take_profit")
-            target_placed_ok = True
-            entry["target_order_error"] = None
-        except Exception as error:  # noqa: BLE001 - the entry already filled, don't fail the whole candidate
-            entry["target_order_error"] = str(error)
-    else:
-        entry["target_order_error"] = "no target price computed for this setup"
 
-    # Placement succeeding is not the same as confirmed active - poll each
-    # leg's real status before declaring protection confirmed. A missing or
-    # failed stop is never treated as "fine" (unlike a missing target, which
-    # only forfeits upside capture, not safety) - that gap is exactly what
-    # this whole mechanism exists to close.
+    placement_error: Optional[BaseException] = None
+    # ONE immediate in-function retry before giving up - the old leg is
+    # already confirmed gone at this point (cancel-confirm already
+    # happened above), so the position is genuinely unprotected on THIS
+    # leg for as long as this takes; a single immediate retry (not a
+    # bounded sleep-loop - the caller's own next monitor tick already
+    # provides that) meaningfully shrinks that window for a transient
+    # placement failure without materially delaying the failure-tracking
+    # below for a persistent one.
+    for placement_attempt in range(2):
+        try:
+            _place_new_leg()
+            placement_error = None
+            break
+        except Exception as error:  # noqa: BLE001
+            placement_error = error
+
+    if placement_error is not None:
+        entry[f"{leg}_order_error"] = str(placement_error)
+        if old_client_order_id:
+            # The OLD leg was already cancelled-and-confirmed above (that's
+            # a precondition for reaching this placement call at all) - so
+            # this specific failure mode means the position is ACTUALLY,
+            # CURRENTLY missing protection on this leg, not merely
+            # retrying a resize that hasn't started yet. Persisted, not
+            # just alerted: entry[f"{leg}_protection_gap"] = True is an
+            # IMMEDIATE, tick-granular freeze signal (see
+            # _has_active_protection_gap_locally) - the account stays
+            # frozen for every subsequent monitor pass (the ~60s fast
+            # monitor keeps retrying this same placement via its own
+            # normal resumable-state handling - see
+            # order_lifecycle.MONITOR_RESUMABLE_STATES) until this exact
+            # flag is cleared, which only happens in
+            # _confirm_and_finalize_protection once this leg is genuinely
+            # RE-confirmed active - never merely because a retry was
+            # attempted, and never on a timer.
+            entry[f"{leg}_protection_gap"] = True
+            try:
+                add_manual_alert(
+                    user_id,
+                    {
+                        "type": "resize_replacement_failed_after_cancel",
+                        "ticker": ticker,
+                        "priority": "critical",
+                        "message": (
+                            f"{ticker}: the {leg} leg was cancelled to resize it to {target_quantity:g} shares, but "
+                            f"placing its replacement failed even after an immediate retry ({placement_error}). "
+                            f"This leg is genuinely UNPROTECTED right now. The old tracked order (client_order_id "
+                            f"{old_client_order_id}) is retained - not dropped. New autonomous entries are frozen "
+                            "for this account until this leg is confirmed protected again. This will keep "
+                            "retrying every monitor pass; investigate immediately if it does not recover."
+                        ),
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        raise placement_error
+
+    record_exit_order(user_id, ticker, new_client_order_id, "stop" if leg == "stop" else "take_profit")
+    if old_client_order_id:
+        # Only NOW, after the new leg is durably placed AND tracked, drop
+        # tracking of the old one - it's confirmed gone (checked above),
+        # and the new one is already tracked, so there is never a moment
+        # with zero tracked orders for this leg type.
+        pop_exit_order_by_id(user_id, ticker, old_client_order_id)
+
+    entry[f"{leg}_client_order_id"] = new_client_order_id
+    entry[f"{leg}_leg_attempt"] = next_attempt
+    entry[f"{leg}_leg_quantity"] = target_quantity
+    entry[f"{leg}_order_error"] = None
+    # Deliberately NOT cleared here - placement succeeding is not the same
+    # as confirmed active (this whole app's founding distinction). See
+    # _confirm_and_finalize_protection for where entry[f"{leg}_protection_gap"]
+    # actually gets cleared, once this leg is genuinely re-confirmed.
+
+
+def _confirm_and_finalize_protection(
+    user_id: str,
+    creds: Dict[str, str],
+    account_id: str,
+    ticker: str,
+    entry: Dict[str, object],
+    filled_quantity: float,
+    stop_price: float,
+    target_price: float,
+) -> None:
+    """Shared by _reconcile_entry_fill_and_protection (after an initial
+    placement or a growth-resize) and _reconcile_position_exit (after
+    resizing the sibling leg down following a partial exit) - polls each
+    leg's REAL broker status before declaring protection confirmed
+    (placement succeeding is not the same as confirmed active), then
+    transitions to PROTECTION_CONFIRMED_ACTIVE or PROTECTION_FAILED and
+    alerts on failure. A missing or failed stop is never treated as
+    "fine" (unlike a missing target, which only forfeits upside capture,
+    not safety) - that asymmetry is exactly what this whole mechanism
+    exists to enforce. A leg whose resize did NOT complete this pass
+    (`{leg}_leg_quantity` still doesn't match filled_quantity) is never
+    checked for confirmation either - there is nothing at the right size
+    to confirm yet, so it counts as unconfirmed by construction, not by
+    an extra check.
+
+    Requires entry.lifecycle_state to already be PROTECTION_PENDING - both
+    callers ensure this before calling."""
+    stop_client_order_id = entry.get("stop_client_order_id")
+    target_client_order_id = entry.get("target_client_order_id")
+
     stop_confirmed = False
     target_confirmed = target_price <= 0
     for attempt in range(PROTECTION_CONFIRM_POLL_ATTEMPTS):
         if attempt > 0:
             time.sleep(PROTECTION_CONFIRM_POLL_INTERVAL_SECONDS)
-        if stop_placed_ok and not stop_confirmed:
+        if stop_client_order_id and not stop_confirmed and entry.get("stop_leg_quantity") == filled_quantity:
             try:
                 stop_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, stop_client_order_id)
                 stop_confirmed = _protective_leg_is_active(ol.summarize_fill(stop_detail)["status"])
             except Exception:  # noqa: BLE001 - transient lookup failure, try again next attempt
                 pass
-        if target_placed_ok and not target_confirmed:
+        if target_client_order_id and not target_confirmed and entry.get("target_leg_quantity") == filled_quantity:
             try:
                 target_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, target_client_order_id)
                 target_confirmed = _protective_leg_is_active(ol.summarize_fill(target_detail)["status"])
@@ -3605,6 +4059,16 @@ def _poll_fill_and_protect(
                 pass
         if stop_confirmed and target_confirmed:
             break
+
+    # Clears entry[f"{leg}_protection_gap"] (see _reconcile_protective_leg_quantity)
+    # exactly when - and only when - that leg is genuinely RE-confirmed
+    # here, never merely because a placement attempt was made. Whichever
+    # leg stays unconfirmed keeps its gap flag set (if it had one),
+    # keeping the account frozen via _has_active_protection_gap_locally.
+    if stop_confirmed:
+        entry["stop_protection_gap"] = None
+    if target_confirmed:
+        entry["target_protection_gap"] = None
 
     if stop_confirmed and target_confirmed:
         ol.transition(entry, ol.PROTECTION_CONFIRMED_ACTIVE, protection_confirmed_at=_now_utc().isoformat())
@@ -3633,6 +4097,631 @@ def _poll_fill_and_protect(
         except Exception:  # noqa: BLE001 - never let alerting itself break the scan
             pass
 
+
+def _flag_ambiguous_exit_unresolved(
+    user_id: str,
+    creds: Dict[str, str],
+    account_id: str,
+    ticker: str,
+    entry: Dict[str, object],
+    evidence_summary: str,
+) -> None:
+    """Shared by _reconcile_both_legs_filled_emergency and the
+    sibling-also-filled-during-cancel-confirm case in
+    _reconcile_position_exit - both are the SAME underlying race (two
+    protective legs executing against one position), just detected at a
+    different moment (up front vs. mid-cancel). Persists durable evidence
+    (including a best-effort broker position snapshot) directly on the
+    entry record, sets the immediate freeze flag
+    (entry["ambiguous_exit_unresolved"] - see
+    _has_active_protection_gap_locally), and fires a critical alert.
+    Does NOT place any corrective order - see
+    _reconcile_both_legs_filled_emergency's docstring for why automatic
+    covering is disabled. Does NOT raise - each caller raises its own,
+    more specifically-worded RuntimeError afterward."""
+    position_snapshot: Optional[Dict[str, object]] = None
+    position_lookup_error: Optional[str] = None
+    try:
+        positions = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
+        position = next((p for p in positions if str(p.get("symbol", "")).upper() == ticker.upper()), None)
+        position_snapshot = position or {"symbol": ticker, "quantity": 0, "note": "no matching position row returned by the broker"}
+    except Exception as error:  # noqa: BLE001
+        position_lookup_error = str(error)
+
+    entry["ambiguous_exit_unresolved"] = True
+    entry["ambiguous_exit_evidence"] = {
+        "evidence_summary": evidence_summary,
+        "broker_position_snapshot": position_snapshot,
+        "position_lookup_error": position_lookup_error,
+        "recorded_at": _now_utc().isoformat(),
+    }
+
+    try:
+        add_manual_alert(
+            user_id,
+            {
+                "type": "ambiguous_exit_both_legs_filled",
+                "ticker": ticker,
+                "priority": "critical",
+                "message": (
+                    f"{ticker}: {evidence_summary} - this app's independent (non-OCO) leg design cannot prevent "
+                    "this race. "
+                    + (
+                        f"Actual broker position is {position_snapshot.get('quantity')} shares."
+                        if position_snapshot is not None
+                        else f"Broker position lookup also failed: {position_lookup_error}."
+                    )
+                    + " AUTOMATIC CORRECTIVE TRADING IS DISABLED until Webull's short-position response schema is "
+                    "empirically confirmed - no order has been placed. New autonomous entries are frozen for this "
+                    "account immediately. Review the actual broker position and act manually if needed; this "
+                    "reconciles again with fresh evidence every monitor pass."
+                ),
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _reconcile_both_legs_filled_emergency(
+    user_id: str,
+    creds: Dict[str, str],
+    account_id: str,
+    ticker: str,
+    trading_day: str,
+    entry: Dict[str, object],
+    stop_filled_quantity: float,
+    target_filled_quantity: float,
+) -> None:
+    """Called when BOTH the stop and target legs report a fill - a race
+    this app's own protection design cannot structurally prevent, since
+    the stop-loss and take-profit are placed as two INDEPENDENT orders,
+    not a broker-native OCO/OTOCO bracket. (The vendored Webull SDK does
+    expose OCO/OTOCO combo-order wire format - webull.trade.common.combo_type.ComboType.OCO/OTOCO,
+    plumbed through PlaceOrderRequest.client_combo_order_id - and its
+    docstring lists Webull US as supported. This app deliberately does
+    NOT use it: that combo wire format has never been empirically
+    verified against this app's actual sandbox account/API version,
+    matching the same allowlist-not-assumption discipline applied to
+    every other unverified broker behavior in this codebase - see
+    _CONFIRMED_DEFINITE_REJECTION_ERROR_CODES in integrations/webull.py
+    for the same principle applied elsewhere. Building on an unverified
+    combo format could silently fail to link the legs at all while
+    LOOKING like it worked, which is worse than today's known, tested gap.
+    This function exists precisely to make that known gap safe rather
+    than merely detected - see its behavior below - until OCO/OTOCO is
+    controlled-sandbox-verified and can be adopted with confidence.)
+
+    AUTOMATIC CORRECTIVE TRADING IS DELIBERATELY DISABLED (explicit
+    reviewer instruction) - an earlier version of this function placed a
+    marketable BUY to cover an apparent short automatically. That was
+    reverted: Webull's short-position representation in
+    get_account_positions (sign convention, or a separate side field) has
+    never been empirically observed live, so a stale or misread position
+    response could make this app BUY shares it doesn't actually need to,
+    creating a brand-new unwanted long position - a worse outcome than
+    the ambiguity itself. Before any automatic covering is reintroduced,
+    the corrective order needs everything a normal entry already has
+    (deterministic client_order_id, ambiguous-submission-style
+    classification of its own placement result, durable audit trail,
+    restart recovery, and a post-order re-check that the account is
+    ACTUALLY flat - not just "an order was placed") AND Webull's short
+    schema needs to be confirmed via a controlled, human-approved sandbox
+    observation first.
+
+    Instead, this function now only:
+      - best-effort queries the broker's actual position for the ticker,
+        purely as EVIDENCE (a failed lookup doesn't block anything below -
+        it's recorded as evidence too);
+      - persists that evidence DURABLY on the entry record itself
+        (overnight_orders.json's existing atomic+locked storage) under
+        entry["ambiguous_exit_evidence"], refreshed on every attempt -
+        not a one-shot snapshot, since this function is called again
+        every monitor tick as long as the entry stays non-terminal;
+      - sets entry["ambiguous_exit_unresolved"] = True - an EXPLICIT,
+        IMMEDIATE local freeze signal (see _has_active_protection_gap_locally)
+        that blocks new entries for this account starting THIS tick, not
+        after MONITOR_STUCK_FREEZE_SECONDS like an ordinary stall would.
+        Only cleared if a LATER tick's fresh evidence turns out
+        conclusive after all (_reconcile_position_exit's normal
+        single-leg path runs instead, and this function is never
+        reached) - there is no dedicated admin action to manually clear
+        it yet; reviewing the alert/evidence and managing the position
+        directly at the broker is the current expectation.
+      - fires a CRITICAL alert with the evidence, explicitly stating no
+        corrective order was placed;
+      - always still raises, so the caller's own failure-tracking
+        (monitor_first_failure_at/monitor_attempt_count) also applies on
+        top of the immediate flag-based freeze, and this entry keeps
+        being re-examined with fresh evidence every subsequent tick
+        rather than being a one-shot dead end."""
+    evidence_summary = f"both legs show a fill - stop leg filled {stop_filled_quantity:g}, target leg filled {target_filled_quantity:g}"
+    _flag_ambiguous_exit_unresolved(user_id, creds, account_id, ticker, entry, evidence_summary)
+    raise RuntimeError(f"{ticker}: {evidence_summary} - frozen pending manual review, no automatic corrective action taken")
+
+
+def _reconcile_position_exit(
+    user_id: str,
+    creds: Dict[str, str],
+    account_id: str,
+    ticker: str,
+    trading_day: str,
+    entry: Dict[str, object],
+) -> bool:
+    """Detects whether a fully-protected position (PROTECTION_CONFIRMED_ACTIVE)
+    has EXITED - a stop or target leg filled - and if so, reconciles the
+    rest of the lifecycle: cancels the sibling leg (retaining its
+    tracking until the cancellation is DURABLY CONFIRMED, never merely
+    attempted - see webull_stop_orders.pop_exit_order_by_id), records a
+    durable closed-trade entry with realized P&L for a FULL exit, or
+    resizes the sibling down to the remaining quantity for a PARTIAL
+    exit.
+
+    NEVER infers which exit executed merely because the position
+    disappeared from the broker's positions list - see
+    _reconcile_exit_orders for that broader, ticker-centric,
+    position-absence-triggered sweep, which exists as an ADDITIONAL
+    safety net, not the primary signal. This function instead checks
+    BOTH the stop and target legs' OWN broker status directly, every
+    time it runs, and only acts on what THEY show:
+      - neither leg shows any fill -> returns False, nothing to do -
+        protection is still genuinely active and untouched;
+      - exactly one leg shows a fill (fully or partially) -> conclusive:
+        cancel-confirm-remove the sibling, then either close the trade
+        out (full exit) or resize the sibling down to the remaining
+        quantity (partial exit) - the exited leg's OWN remaining resting
+        quantity, if any, needs no action; the broker already handles
+        that correctly as part of the SAME order;
+      - BOTH legs show a fill -> genuinely ambiguous (a race, or evidence
+        this app cannot currently explain) - raises rather than guessing,
+        which the caller treats as a failed monitor attempt (the stuck
+        timer advances, eventually freezing new entries - "safe recovery
+        cannot be proven" is exactly this situation).
+
+    Returns True if an exit was found and handled (fully or partially),
+    False if the position is still fully open and protected. Raises on
+    any unresolved step (broker lookup failure, sibling cancellation not
+    yet confirmed, ambiguous evidence) rather than silently continuing -
+    the caller records that as a failed monitor attempt and retries."""
+    stop_client_order_id = entry.get("stop_client_order_id")
+    target_client_order_id = entry.get("target_client_order_id")
+
+    stop_status: Optional[str] = None
+    stop_filled_quantity = 0.0
+    stop_average_price: Optional[float] = None
+    if stop_client_order_id:
+        stop_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, stop_client_order_id)
+        stop_fill = ol.summarize_fill(stop_detail)
+        stop_status = stop_fill["status"]
+        stop_filled_quantity = stop_fill["filled_quantity"]
+        stop_average_price = stop_fill.get("average_price")
+
+    target_status: Optional[str] = None
+    target_filled_quantity = 0.0
+    target_average_price: Optional[float] = None
+    if target_client_order_id:
+        target_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, target_client_order_id)
+        target_fill = ol.summarize_fill(target_detail)
+        target_status = target_fill["status"]
+        target_filled_quantity = target_fill["filled_quantity"]
+        target_average_price = target_fill.get("average_price")
+
+    stop_has_exited = stop_status is not None and stop_filled_quantity > 0
+    target_has_exited = target_status is not None and target_filled_quantity > 0
+
+    if not stop_has_exited and not target_has_exited:
+        return False  # still fully open and protected - nothing to do
+
+    if stop_has_exited and target_has_exited:
+        _reconcile_both_legs_filled_emergency(
+            user_id, creds, account_id, ticker, trading_day, entry, stop_filled_quantity, target_filled_quantity,
+        )
+        # _reconcile_both_legs_filled_emergency always raises - see its own
+        # docstring for why (makes the immediate short-covering risk safe,
+        # then still surfaces this as an unresolved failed monitor attempt
+        # rather than ever silently resolving it here).
+
+    # Reaching here means EXACTLY one leg shows exited this tick (the
+    # both-legs-exited branch above always raises) - a conclusive,
+    # single-leg read. Clears a PRIOR tick's ambiguous_exit_unresolved
+    # flag, if one was set (a transient double-read that turned out not
+    # to be a genuine race after all) - a stale flag here would freeze
+    # the account forever over a resolved condition.
+    entry["ambiguous_exit_unresolved"] = None
+
+    exited_leg = "stop" if stop_has_exited else "target"
+    sibling_leg = "target" if exited_leg == "stop" else "stop"
+    exited_quantity = stop_filled_quantity if exited_leg == "stop" else target_filled_quantity
+    exited_status = stop_status if exited_leg == "stop" else target_status
+    # Broker-reported actual average fill price for the leg that exited -
+    # NEVER the planned/proposed stop or target price (entry.get("stop")/
+    # entry.get("target")) standing in as if it were real. None if the
+    # broker response didn't include a recognized price field this poll -
+    # the full-exit branch below must then mark P&L incomplete rather than
+    # silently computing it from a proposed price. See
+    # order_lifecycle.summarize_fill/_FILL_PRICE_FIELD_CANDIDATES.
+    exited_average_price = stop_average_price if exited_leg == "stop" else target_average_price
+
+    protected_quantity = float(entry.get(f"{exited_leg}_leg_quantity") or entry.get("filled_quantity") or 0)
+    remaining_quantity = max(0.0, protected_quantity - exited_quantity)
+
+    sibling_client_order_id = target_client_order_id if exited_leg == "stop" else stop_client_order_id
+    sibling_current_status = target_status if exited_leg == "stop" else stop_status
+
+    if sibling_client_order_id:
+        if _protective_leg_is_active(sibling_current_status):
+            try:
+                webull_api.cancel_order(creds["app_key"], creds["app_secret"], account_id, sibling_client_order_id)
+            except Exception as error:  # noqa: BLE001
+                raise RuntimeError(f"could not cancel the sibling {sibling_leg} leg after a {exited_leg} exit: {error}") from error
+            try:
+                recheck_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, sibling_client_order_id)
+                recheck_status = ol.summarize_fill(recheck_detail)["status"]
+            except Exception as error:  # noqa: BLE001
+                raise RuntimeError(f"could not confirm the sibling {sibling_leg} leg's cancellation: {error}") from error
+            if recheck_status == "FILLED":
+                # Same underlying race as _reconcile_both_legs_filled_emergency,
+                # just discovered mid-cancel instead of up front - same
+                # treatment: freeze, persist evidence, alert critical, no
+                # automatic corrective order.
+                evidence_summary = f"the sibling {sibling_leg} leg also filled during cancellation after the {exited_leg} leg exited - both legs executed"
+                _flag_ambiguous_exit_unresolved(user_id, creds, account_id, ticker, entry, evidence_summary)
+                raise RuntimeError(f"{ticker}: {evidence_summary} - ambiguous double exit, frozen pending manual review")
+            if _protective_leg_is_active(recheck_status):
+                raise RuntimeError(
+                    f"could not confirm the sibling {sibling_leg} leg's cancellation yet - retaining tracking, will retry"
+                )
+            # confirmed CANCELLED/FAILED - durably gone, safe to drop tracking now.
+        pop_exit_order_by_id(user_id, ticker, sibling_client_order_id)
+
+    if remaining_quantity <= 0.0001:
+        # FULL exit - record the closed trade and mark the lifecycle CLOSED.
+        # P&L is computed ONLY from broker-reported actual average fill
+        # prices (entry.get("average_entry_fill_price"), stamped by
+        # _reconcile_entry_fill_and_protection on every entry-order poll;
+        # exited_average_price, from THIS function's own fresh
+        # get_order_detail call on the leg that exited above) - NEVER from
+        # the proposed limit_price/stop/target prices this app itself
+        # computed when planning the trade. If either is missing (the
+        # broker response didn't include a recognized price field this
+        # poll - see order_lifecycle._FILL_PRICE_FIELD_CANDIDATES), P&L is
+        # left None and pnl_status marks it explicitly incomplete rather
+        # than silently estimating it from a planned price that could be
+        # meaningfully different from what was actually paid/received.
+        trade_id = str(entry.get("entry_client_order_id") or "")
+        average_entry_price = entry.get("average_entry_fill_price")
+        pnl_complete = average_entry_price is not None and exited_average_price is not None
+        gross_pnl = round(exited_quantity * (exited_average_price - average_entry_price), 2) if pnl_complete else None
+        closed_record = {
+            "ticker": ticker,
+            "side": "BUY",
+            "entry_client_order_id": entry.get("entry_client_order_id"),
+            "stop_client_order_id": stop_client_order_id,
+            "target_client_order_id": target_client_order_id,
+            "requested_quantity": entry.get("quantity"),
+            "filled_quantity": protected_quantity,
+            "average_entry_price": average_entry_price,
+            "exit_type": exited_leg,
+            "exited_quantity": exited_quantity,
+            "average_exit_price": exited_average_price,
+            "entry_timestamp": entry.get("logged_at"),
+            "exit_timestamp": _now_utc().isoformat(),
+            "gross_realized_pnl": gross_pnl,
+            "fees": None,
+            "net_realized_pnl": gross_pnl,
+            "pnl_status": "complete" if pnl_complete else "incomplete_missing_fill_price",
+            "strategy": entry.get("strategy"),
+            "close_reason": f"{exited_leg}_filled",
+            "broker_evidence": {"exited_leg_status": exited_status},
+            "reconciled_at": _now_utc().isoformat(),
+        }
+        record_closed_trade(user_id, trade_id, closed_record)
+        ol.transition(entry, ol.CLOSED, closed_trade_id=trade_id, close_reason=f"{exited_leg}_filled")
+        try:
+            if pnl_complete:
+                add_manual_alert(
+                    user_id,
+                    {
+                        "type": "position_closed",
+                        "ticker": ticker,
+                        "message": (
+                            f"{ticker}: position closed via {exited_leg} ({exited_quantity:g} shares). "
+                            f"Realized P&L: ${gross_pnl:.2f}."
+                        ),
+                    },
+                )
+            else:
+                add_manual_alert(
+                    user_id,
+                    {
+                        "type": "position_closed_pnl_incomplete",
+                        "ticker": ticker,
+                        "message": (
+                            f"{ticker}: position closed via {exited_leg} ({exited_quantity:g} shares), but realized "
+                            "P&L could not be computed - the broker response didn't report an average fill price "
+                            "for the entry and/or the exit leg. Review this trade's actual fill prices manually; "
+                            "the closed-trade record is retained with pnl_status=incomplete_missing_fill_price."
+                        ),
+                    },
+                )
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        # PARTIAL exit - the exited leg's own remaining resting quantity
+        # already correctly covers what's left (same order, broker-managed
+        # remainder) - only the SIBLING needs an explicit resize down.
+        entry[f"{exited_leg}_leg_quantity"] = remaining_quantity
+        entry["filled_quantity"] = remaining_quantity
+        ol.transition(entry, ol.PROTECTION_PENDING)
+        sibling_price = float(entry.get("target") or 0) if sibling_leg == "target" else float(entry.get("stop") or 0)
+        _reconcile_protective_leg_quantity(user_id, creds, account_id, ticker, trading_day, entry, sibling_leg, remaining_quantity, sibling_price)
+        _confirm_and_finalize_protection(
+            user_id, creds, account_id, ticker, entry, remaining_quantity,
+            float(entry.get("stop") or 0), float(entry.get("target") or 0),
+        )
+
+    return True
+
+
+def _reconcile_entry_fill_and_protection(
+    user_id: str,
+    creds: Dict[str, str],
+    account_id: str,
+    ticker: str,
+    entry_client_order_id: str,
+    limit_price: float,
+    stop_price: float,
+    target_price: float,
+    trading_day: str,
+    entry: Dict[str, object],
+) -> Dict[str, object]:
+    """SINGLE PASS (no internal loop or sleep beyond the bounded
+    protection-confirmation poll) - the one function responsible for
+    keeping protection sized to the entry's ACTUAL, CURRENT cumulative
+    filled quantity. Two callers:
+      - _poll_fill_and_protect wraps this in a bounded sleep-and-retry
+        loop for a fast INITIAL result right after a fresh
+        placement/link/ambiguous-submission-reconciliation;
+      - _monitor_transitional_orders calls this directly, once per pass,
+        for ANY entry whose entry_order_terminal isn't True yet -
+        INCLUDING one already at PROTECTION_CONFIRMED_ACTIVE, since a day
+        limit entry order can keep filling MORE shares after protection
+        was already confirmed for what had filled so far. This is what
+        makes "a transition to PROTECTION_PENDING must not stop fill
+        monitoring" true: entry_order_terminal, not lifecycle_state, is
+        what actually decides whether more checking is needed -
+        VALID_TRANSITIONS explicitly allows PROTECTION_CONFIRMED_ACTIVE
+        -> PROTECTION_PENDING for exactly this resize case. See
+        order_lifecycle.FILL_MONITORING_STATES.
+
+    Step 1: if the entry's own order isn't confirmed broker-terminal yet,
+    poll it ONCE (no loop) for its latest cumulative filled_quantity and
+    status, and advance lifecycle_state forward accordingly.
+    entry["entry_order_terminal"] is stamped True only once a genuinely
+    final status (FILLED/CANCELLED/FAILED) is observed - never earlier,
+    and never un-set once True.
+
+    A CANCELLED or FAILED order is not automatically a zero-position
+    outcome - a real, common brokerage behavior is a day order partially
+    filling before the unfilled remainder is cancelled (session close, a
+    triggered risk control, etc). filled_quantity is checked BEFORE
+    deciding the outcome: a positive filled_quantity is treated exactly
+    like a full fill for protection purposes, and the cancelled/failed
+    remainder is recorded on the entry purely for the audit trail. Only a
+    confirmed filled_quantity of zero resolves to the true no-position
+    ENTRY_FAILED outcome.
+
+    Step 2: nothing to protect (filled_quantity <= 0) - return as-is (or
+    ENTRY_FAILED, if that's now confirmed terminal-and-zero).
+
+    Step 3: reconcile protection to match - advances lifecycle_state
+    through PROTECTION_PENDING (staying there if already there; returning
+    to it from PROTECTION_CONFIRMED_ACTIVE or PROTECTION_FAILED only if a
+    resize is actually needed - an entry that's fully filled, fully and
+    correctly protected, and broker-terminal is left completely alone,
+    not bounced through states forever), calls
+    _reconcile_protective_leg_quantity for BOTH legs (idempotent no-op if
+    already correctly sized; growing or shrinking as needed), re-confirms
+    both legs genuinely active, and lands on PROTECTION_CONFIRMED_ACTIVE
+    or PROTECTION_FAILED.
+
+    Raises if either leg's resize/placement did not fully succeed (after
+    still attempting BOTH legs and updating lifecycle_state as far as it
+    legitimately could) - the caller is responsible for treating that as
+    a failed monitor attempt (see monitor_last_error/monitor_attempt_count
+    in _monitor_transitional_orders)."""
+    current_state = entry.get("lifecycle_state")
+
+    if not entry.get("entry_order_terminal"):
+        detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, entry_client_order_id)
+        fill = ol.summarize_fill(detail)
+        new_filled_quantity = fill["filled_quantity"]
+        status = fill["status"]
+        # Broker-reported cumulative average fill price for the entry, if
+        # the response includes one (see order_lifecycle._FILL_PRICE_FIELD_CANDIDATES -
+        # unconfirmed field name, best-effort). Recorded on EVERY poll while
+        # present (not just once) so it reflects the latest cumulative
+        # average as more shares fill, never left stale at an early
+        # partial-fill price. Deliberately never falls back to limit_price
+        # here - a poll that doesn't report a price simply leaves this
+        # field exactly as it was (still None if never reported), which is
+        # what _reconcile_position_exit's P&L-completeness check depends on.
+        if fill.get("average_price") is not None:
+            entry["average_entry_fill_price"] = fill["average_price"]
+
+        if _entry_fill_is_final(status):
+            entry["entry_order_terminal"] = True
+            if status != "FILLED" and new_filled_quantity > 0:
+                # Distinct from a TRUE zero-fill cancellation (which gets
+                # its own clear "error" field via the ENTRY_FAILED
+                # transition below) - this specifically flags the more
+                # unusual "some shares filled, then the rest was
+                # cancelled/failed" case worth calling out on its own.
+                entry["unfilled_remainder_status"] = status
+
+        if current_state in (ol.ENTRY_SUBMITTED, ol.ENTRY_PARTIALLY_FILLED, ol.MANUAL_LINK_IN_PROGRESS):
+            if status == "PARTIAL FILLED":
+                ol.transition(entry, ol.ENTRY_PARTIALLY_FILLED, filled_quantity=new_filled_quantity)
+                current_state = ol.ENTRY_PARTIALLY_FILLED
+            elif new_filled_quantity > 0:
+                ol.transition(entry, ol.ENTRY_FILLED, filled_quantity=new_filled_quantity)
+                current_state = ol.ENTRY_FILLED
+            elif entry.get("entry_order_terminal"):
+                ol.transition(entry, ol.ENTRY_FAILED, error=f"entry order {status.lower()} at the broker", filled_quantity=0)
+                return entry
+            else:
+                entry["filled_quantity"] = new_filled_quantity  # still 0, still resting - stays where it was
+        else:
+            # Resuming from ENTRY_FILLED / PROTECTION_PENDING /
+            # PROTECTION_FAILED / PROTECTION_CONFIRMED_ACTIVE - just
+            # refresh the number; the lifecycle transition (if any) is
+            # decided below, uniformly, for both this and the fresh path.
+            entry["filled_quantity"] = new_filled_quantity
+
+    filled_quantity = float(entry.get("filled_quantity") or 0)
+    current_state = entry.get("lifecycle_state")
+
+    if filled_quantity <= 0:
+        if entry.get("entry_order_terminal") and current_state not in ol.TERMINAL_STATES:
+            ol.transition(entry, ol.ENTRY_FAILED, error="entry order finished with zero fill", filled_quantity=0)
+        return entry
+
+    # Realized risk - see the module-level note in _reconcile_protective_leg_quantity's
+    # docstring for the same "estimate, not a guarantee" caveat that applies
+    # to limit_price/stop_price as fill-price stand-ins. Computed only ONCE
+    # per entry (guarded by the "not already set" check) - on a resumed or
+    # resized call this was already computed (and alerted on, if
+    # applicable) by whichever earlier pass first confirmed a fill;
+    # recomputing on every resume would be harmless arithmetically but
+    # would risk re-firing the over-planned-risk alert on every single
+    # monitor tick while protection keeps retrying.
+    if "realized_risk_dollars" not in entry:
+        realized_risk_dollars = round(filled_quantity * (limit_price - stop_price), 2)
+        entry["realized_risk_dollars"] = realized_risk_dollars
+        planned_risk_dollars = entry.get("planned_risk_dollars")
+        if isinstance(planned_risk_dollars, (int, float)) and realized_risk_dollars > planned_risk_dollars + 0.01:
+            entry["realized_risk_exceeds_planned"] = True
+            try:
+                add_manual_alert(
+                    user_id,
+                    {
+                        "type": "realized_risk_exceeds_planned",
+                        "ticker": ticker,
+                        "message": (
+                            f"{ticker}: realized risk (${realized_risk_dollars:.2f} on {filled_quantity:g} filled shares) "
+                            f"exceeded the planned risk budget (${planned_risk_dollars:.2f}) for this entry. Review the "
+                            f"position - the sizing that was supposed to bound this trade's loss did not hold as expected."
+                        ),
+                    },
+                )
+            except Exception:  # noqa: BLE001 - never let alerting itself break the fill/protection flow
+                pass
+
+    current_state = entry.get("lifecycle_state")
+    if current_state in (ol.ENTRY_SUBMITTED, ol.ENTRY_PARTIALLY_FILLED, ol.MANUAL_LINK_IN_PROGRESS):
+        ol.transition(entry, ol.ENTRY_FILLED, filled_quantity=filled_quantity)
+        current_state = ol.ENTRY_FILLED
+    if current_state == ol.ENTRY_FILLED:
+        ol.transition(entry, ol.PROTECTION_PENDING)
+        current_state = ol.PROTECTION_PENDING
+    elif current_state == ol.PROTECTION_FAILED:
+        ol.transition(entry, ol.PROTECTION_PENDING)
+        current_state = ol.PROTECTION_PENDING
+    elif current_state == ol.PROTECTION_CONFIRMED_ACTIVE:
+        stop_already_sized = stop_price <= 0 or entry.get("stop_leg_quantity") == filled_quantity
+        target_already_sized = target_price <= 0 or entry.get("target_leg_quantity") == filled_quantity
+        if stop_already_sized and target_already_sized:
+            return entry  # steady state - fully filled, fully protected, broker-terminal or not - nothing to do
+        ol.transition(entry, ol.PROTECTION_PENDING)
+        current_state = ol.PROTECTION_PENDING
+    # else: already PROTECTION_PENDING from a prior pass - stay, fall through.
+
+    stop_resize_error: Optional[BaseException] = None
+    target_resize_error: Optional[BaseException] = None
+    try:
+        _reconcile_protective_leg_quantity(user_id, creds, account_id, ticker, trading_day, entry, "stop", filled_quantity, stop_price)
+    except Exception as error:  # noqa: BLE001 - still attempt the OTHER leg regardless
+        stop_resize_error = error
+    try:
+        _reconcile_protective_leg_quantity(user_id, creds, account_id, ticker, trading_day, entry, "target", filled_quantity, target_price)
+    except Exception as error:  # noqa: BLE001
+        target_resize_error = error
+
+    _confirm_and_finalize_protection(user_id, creds, account_id, ticker, entry, filled_quantity, stop_price, target_price)
+
+    if stop_resize_error or target_resize_error:
+        # Lifecycle_state above already reflects reality as best it could
+        # be determined - this is purely to surface the failure to the
+        # caller's own failed-attempt tracking (monitor_last_error etc.),
+        # since a resize failure is exactly the kind of thing that must
+        # count as a failed monitor attempt, not be silently absorbed.
+        raise RuntimeError(f"protective leg resize incomplete for {ticker}: stop={stop_resize_error}, target={target_resize_error}")
+
+    return entry
+
+
+def _poll_fill_and_protect(
+    user_id: str,
+    creds: Dict[str, str],
+    account_id: str,
+    ticker: str,
+    entry_client_order_id: str,
+    limit_price: float,
+    stop_price: float,
+    target_price: float,
+    trading_day: str,
+    entry: Dict[str, object],
+) -> Dict[str, object]:
+    """Bounded sleep-and-retry wrapper around
+    _reconcile_entry_fill_and_protection, for a FRESH entry
+    (ENTRY_SUBMITTED / ENTRY_PARTIALLY_FILLED / MANUAL_LINK_IN_PROGRESS)
+    right after a placement is accepted, an ambiguous submission is
+    reconciled, or a manual "link" resolution finds a strong match.
+    Exists purely so a caller gets a fast INITIAL result (up to
+    ENTRY_FILL_POLL_ATTEMPTS tries, ENTRY_FILL_POLL_INTERVAL_SECONDS
+    apart) instead of having to wait for the next monitor tick to see an
+    obviously-fast-filling order end up protected.
+
+    _monitor_transitional_orders, by contrast, calls
+    _reconcile_entry_fill_and_protection DIRECTLY - no bounded loop -
+    since re-checking again on ITS next tick (rather than blocking this
+    one while it processes potentially many other users' entries) is the
+    right trade-off for a monitor, and is also the only path that ever
+    resumes an entry from ENTRY_FILLED / PROTECTION_PENDING /
+    PROTECTION_FAILED / PROTECTION_CONFIRMED_ACTIVE (all four are invalid
+    starting points for the bounded loop here, which assumes the entry's
+    own fill has never yet been confirmed).
+
+    Stops retrying once entry_order_terminal is True AND protection has
+    reached PROTECTION_CONFIRMED_ACTIVE or PROTECTION_FAILED, or once
+    attempts are exhausted - whichever is left in the latter case
+    (typically still ENTRY_SUBMITTED with nothing filled yet, or
+    PROTECTION_PENDING mid-resize) is exactly what the monitor's next
+    pass picks up. Tolerates a failure on any individual attempt (a
+    transient broker error, or a leg resize that didn't complete this
+    round) and simply retries - the bounded window existing at all is a
+    UX nicety, not a correctness requirement; correctness comes from the
+    monitor continuing to retry indefinitely afterward."""
+    for attempt in range(ENTRY_FILL_POLL_ATTEMPTS):
+        if attempt > 0:
+            time.sleep(ENTRY_FILL_POLL_INTERVAL_SECONDS)
+        try:
+            entry = _reconcile_entry_fill_and_protection(
+                user_id=user_id,
+                creds=creds,
+                account_id=account_id,
+                ticker=ticker,
+                entry_client_order_id=entry_client_order_id,
+                limit_price=limit_price,
+                stop_price=stop_price,
+                target_price=target_price,
+                trading_day=trading_day,
+                entry=entry,
+            )
+        except Exception:  # noqa: BLE001 - transient failure this round; the monitor keeps retrying beyond this bounded window regardless
+            continue
+        current_state = entry.get("lifecycle_state")
+        if current_state in ol.TERMINAL_STATES or current_state in (ol.PROTECTION_CONFIRMED_ACTIVE, ol.PROTECTION_FAILED):
+            break
     return entry
 
 
@@ -3666,6 +4755,146 @@ def _parse_trusted_past_timestamp(raw: object, *, now: datetime, default: dateti
     if parsed > now:
         return default
     return parsed
+
+
+def _resolve_orphan_recovered_entry(
+    user_id: str, creds: Dict[str, str], account_id: str, entry: Dict[str, object]
+) -> Dict[str, object]:
+    """Called instead of the normal _poll_fill_and_protect resume, once
+    _reconcile_unknown_submission's broker lookup confirms a
+    _discover_orphaned_broker_entries-seeded entry (entry["orphan_recovered"]
+    is True) genuinely exists at the broker. Caller has already
+    transitioned entry to ENTRY_SUBMITTED.
+
+    This entry's stop/target were NEVER known - only ever this app's own
+    in-memory planning for a scan tick the process crashed before
+    finishing - and are never invented here either (see
+    _discover_orphaned_broker_entries's docstring for the full
+    reasoning). Letting the NORMAL _poll_fill_and_protect /
+    _reconcile_protective_leg_quantity flow run against a leg_price of 0
+    would eventually self-correct to PROTECTION_FAILED (the `leg_price <=
+    0` guard prevents an invented-price order), but only AFTER an
+    unbounded number of shares could keep filling against a still-resting
+    DAY limit order with no risk plan at all - reaching "unprotected but
+    labeled PROTECTION_FAILED" is not the same as ACTIVELY bounding that
+    exposure. This function is a DEFINED emergency policy instead:
+      - zero shares filled, order already broker-terminal (CANCELLED/
+        FAILED) - resolves cleanly to ENTRY_FAILED. No risk was ever
+        taken; nothing to alert about beyond the orphan-discovery alert
+        already fired.
+      - zero shares filled, order STILL resting - cancels it OUTRIGHT
+        right now, rather than leave a live, un-risk-planned order
+        resting at the broker that could fill later. Resolves to
+        ENTRY_FAILED once cancelled (no risk taken), with its own alert
+        explaining why.
+      - ANY shares filled (fully or partially) - cancels any STILL-
+        UNFILLED remainder immediately (this is "cancel any unfilled
+        entry remainder when safely identifiable" - bounds further
+        GROWING exposure with no protection plan), then transitions
+        ENTRY_FILLED -> PROTECTION_PENDING -> PROTECTION_FAILED (the only
+        valid path to PROTECTION_FAILED per order_lifecycle.VALID_TRANSITIONS)
+        and fires an IMMEDIATE critical alert. The alert and the
+        transition's own error text both say UNPROTECTED explicitly -
+        this position is never described as "protected" anywhere, since
+        it structurally cannot be until a human supplies real stop/target
+        levels."""
+    entry_client_order_id = str(entry.get("entry_client_order_id") or "")
+    ticker = str(entry.get("ticker", ""))
+    try:
+        detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, entry_client_order_id)
+        fill = ol.summarize_fill(detail)
+    except Exception as error:  # noqa: BLE001 - inconclusive, stays UNKNOWN_SUBMISSION_STATE for the next attempt
+        ol.transition(
+            entry,
+            ol.UNKNOWN_SUBMISSION_STATE,
+            last_reconciliation_attempt_at=_now_utc().isoformat(),
+            last_reconciliation_error=f"orphan fill-status lookup failed: {error}",
+        )
+        return entry
+
+    filled_quantity = fill["filled_quantity"]
+    status = fill["status"]
+
+    if filled_quantity <= 0:
+        if _entry_fill_is_final(status):
+            # Already CANCELLED/FAILED at the broker with zero fill - a
+            # clean, no-risk outcome, same as an ordinary zero-fill entry.
+            ol.transition(entry, ol.ENTRY_FAILED, error=f"orphan entry order {status.lower()} at the broker with zero fill", filled_quantity=0)
+            return entry
+        # Still resting, genuinely untouched - eliminate the unknown-risk
+        # exposure proactively rather than let it possibly fill later
+        # with still no protection plan.
+        try:
+            webull_api.cancel_order(creds["app_key"], creds["app_secret"], account_id, entry_client_order_id)
+        except Exception as error:  # noqa: BLE001
+            ol.transition(
+                entry,
+                ol.UNKNOWN_SUBMISSION_STATE,
+                last_reconciliation_attempt_at=_now_utc().isoformat(),
+                last_reconciliation_error=f"could not cancel unfilled orphan entry: {error}",
+            )
+            return entry
+        ol.transition(
+            entry, ol.ENTRY_FAILED,
+            error="orphan entry cancelled outright before any fill - stop/target were never known, so no risk was taken",
+            filled_quantity=0,
+        )
+        try:
+            add_manual_alert(
+                user_id,
+                {
+                    "type": "orphan_entry_cancelled_unfilled",
+                    "ticker": ticker,
+                    "priority": "critical",
+                    "message": (
+                        f"{ticker}: cancelled a recovered orphan entry order (client_order_id "
+                        f"{entry_client_order_id}) before it filled. Its stop-loss/take-profit levels were never "
+                        "known, so this app removed the unknown-risk exposure rather than risk it filling later "
+                        "with no protection plan at all."
+                    ),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return entry
+
+    # Some shares filled - cancel any still-unfilled remainder RIGHT NOW
+    # to stop further, GROWING unknown-risk exposure, then freeze+alert
+    # on the filled portion. Best-effort: even if the cancel itself
+    # fails, still proceed to freeze/alert on what's already filled -
+    # that risk is real regardless of whether the remainder gets cancelled.
+    if not _entry_fill_is_final(status):
+        try:
+            webull_api.cancel_order(creds["app_key"], creds["app_secret"], account_id, entry_client_order_id)
+        except Exception:  # noqa: BLE001 - best-effort; the alert below covers the filled portion either way
+            pass
+
+    ol.transition(entry, ol.ENTRY_FILLED, filled_quantity=filled_quantity)
+    ol.transition(entry, ol.PROTECTION_PENDING)
+    ol.transition(
+        entry, ol.PROTECTION_FAILED,
+        error=f"orphan entry: {filled_quantity:g} shares filled but stop/target were never known - never invented, never auto-protected",
+    )
+    entry["entry_order_terminal"] = True
+    try:
+        add_manual_alert(
+            user_id,
+            {
+                "type": "orphan_entry_filled_unprotected",
+                "ticker": ticker,
+                "priority": "critical",
+                "message": (
+                    f"{ticker}: a recovered orphan entry order (client_order_id {entry_client_order_id}) has "
+                    f"{filled_quantity:g} shares FILLED and UNPROTECTED. Its stop-loss/take-profit levels were "
+                    "never known and were never guessed. Any unfilled remainder of this order has been cancelled. "
+                    "New autonomous entries are frozen for this account. Review this position manually and "
+                    "protect or liquidate it directly at the broker."
+                ),
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return entry
 
 
 def _reconcile_unknown_submission(
@@ -3751,9 +4980,16 @@ def _reconcile_unknown_submission(
         return entry
 
     # The lookup succeeded - the broker DOES have a record of this order.
+    ol.transition(entry, ol.ENTRY_SUBMITTED, error=None)
+    if entry.get("orphan_recovered"):
+        # This entry's stop/target were never known (seeded by
+        # _discover_orphaned_broker_entries, not a normal placement) -
+        # the ordinary fill/protect flow below assumes real risk
+        # parameters exist. See _resolve_orphan_recovered_entry's
+        # docstring for the defined emergency policy used instead.
+        return _resolve_orphan_recovered_entry(user_id, creds, account_id, entry)
     # Resume fill-polling/protection exactly as if the original placement
     # call had returned; _poll_fill_and_protect interprets the status.
-    ol.transition(entry, ol.ENTRY_SUBMITTED, error=None)
     return _poll_fill_and_protect(
         user_id=user_id,
         creds=creds,
@@ -3766,6 +5002,206 @@ def _reconcile_unknown_submission(
         trading_day=str(entry.get("trading_day") or ""),
         entry=entry,
     )
+
+
+def _discover_orphaned_broker_entries(user_id: str, creds: Dict[str, str], account_id: str) -> int:
+    """Restart recovery for the gap no other reconciliation function
+    covers: a broker-ACCEPTED entry order whose local persistence never
+    happened at all - not even as UNKNOWN_SUBMISSION_STATE - because the
+    process crashed between webull_api.place_stock_order succeeding
+    (inside _submit_and_protect_entry) and record_overnight_order actually
+    being called back in _run_autonomous_trade_scan_locked's own loop (see
+    that function - the ONLY durable write for a fresh entry happens
+    there, after _submit_and_protect_entry already returns). Every other
+    reconciliation function in this app (_reconcile_unknown_submissions,
+    _monitor_transitional_orders, etc.) operates on entries ALREADY
+    present in overnight_orders.json - an order with zero local trace is
+    invisible to all of them.
+
+    Detection strategy - STRONG attribution, not prefix matching: a bare
+    "pt" prefix (2 characters) is not remotely specific enough to
+    authoritatively attribute an order to THIS user - it's trivially
+    satisfiable by coincidence, by a differently-configured deployment
+    sharing the same broker account, or even by a human manually typing a
+    client_order_id starting with those two letters. Instead, for every
+    BUY order in broker history (an entry; stop/target legs are always
+    SELL, so this can't misidentify a protective leg as an orphaned
+    entry) whose client_order_id is not already locally known, this
+    recomputes order_lifecycle.deterministic_client_order_id(user_id,
+    symbol, day, "entry", attempt=1) for every day in a bounded recent
+    window and requires an EXACT match against the row's own
+    client_order_id before treating it as this user's own order. This id
+    is a SHA-256 digest over (user_id, ticker, trading_day, leg, attempt) -
+    at 120 bits of entropy in the truncated hex portion, an exact match is
+    only possible if this exact function, with this exact user_id, was
+    the one that generated it; a coincidental collision is computationally
+    infeasible. attempt=1 only, matching _submit_and_protect_entry's own
+    fresh-placement call (a resubmission under attempt>1 does not apply
+    to entry orders anywhere in this codebase today). Diffs against EVERY
+    entry_client_order_id already known locally, in ANY lifecycle_state
+    (including terminal ones - a CLOSED or ENTRY_FAILED entry is still
+    "known", not an orphan). Anything left over, and STRONGLY attributed
+    by the exact-hash-match above, is broker-confirmed to exist and
+    locally unknown to exist at all.
+
+    Deliberately does NOT attempt to reconstruct stop/target risk
+    parameters for a discovered orphan - those were only ever this app's
+    own in-memory planning decision for that scan tick, never sent to the
+    broker as such, and guessing them now (e.g. by re-running strategy
+    scoring against current market data) would be inventing a NEW risk
+    plan after the fact, not recovering the original one - out of scope
+    for lifecycle reconciliation. Instead, seeds the orphan as
+    UNKNOWN_SUBMISSION_STATE (stop/target left unset) - the SAME frozen,
+    alerted, admin-resolvable state this app already uses for every other
+    "broker accepted something, this app cannot safely act on it alone"
+    situation. This is safe by construction, not by luck: if the orphan's
+    fill is later discovered by _reconcile_unknown_submission's normal
+    resume-via-_poll_fill_and_protect path, _reconcile_protective_leg_quantity's
+    `leg_price <= 0` guard means no protective order is ever placed at an
+    invented price - protection simply cannot be confirmed
+    (stop_client_order_id stays unset, so _confirm_and_finalize_protection's
+    stop_confirmed can never become True), landing on PROTECTION_FAILED
+    with its own existing alert - never a silently "confirmed protected"
+    position with zero real protection.
+
+    Idempotent by construction: re-running this on a later tick after the
+    orphan has already been recorded finds its entry_client_order_id in
+    the known-ids set and skips it - no duplicate record is ever created,
+    regardless of what trading_day this call happens to assign it (see
+    below).
+
+    Best-effort per row - one malformed history entry doesn't block
+    detecting others. Returns the count of NEW orphans recorded this
+    pass (0 if none, or if the history lookup itself failed - the caller
+    treats that the same as "nothing found", matching every other
+    reconciliation function's best-effort posture)."""
+    try:
+        history = webull_api.get_order_history(creds["app_key"], creds["app_secret"], account_id)
+    except Exception:  # noqa: BLE001 - inconclusive, not "nothing to recover" - just can't check this tick
+        return 0
+
+    known_ids = {str(order.get("entry_client_order_id") or "") for order in list_overnight_orders(user_id)}
+    discovered = 0
+    today_key = _trading_day_key()
+    # Bounded recent window to search for the trading_day that produces an
+    # exact deterministic-id match - a few days past get_order_history's
+    # own lookback as a buffer against weekend/holiday trading-day-vs-
+    # calendar-day drift, not an attempt to cover an unbounded past.
+    candidate_days = [_trading_day_key(_now_utc() - timedelta(days=offset)) for offset in range(0, webull_api.ORDER_HISTORY_LOOKBACK_DAYS + 3)]
+
+    for row in history:
+        client_order_id = row.get("client_order_id")
+        if not client_order_id or not isinstance(client_order_id, str):
+            continue
+        side = str(row.get("side", "") or "").upper()
+        if side != "BUY":
+            continue
+        if client_order_id in known_ids:
+            continue
+
+        ticker = str(row.get("symbol", "") or "").upper()
+        if not ticker:
+            continue
+
+        # STRONG attribution - see docstring. Only a row whose id exactly
+        # matches this user's own deterministic hash for this ticker on
+        # one of the candidate days is treated as "ours"; everything else
+        # (someone else's order, a different app, a coincidental prefix)
+        # is silently ignored, not flagged as an orphan.
+        attributed = any(
+            ol.deterministic_client_order_id(user_id, ticker, day, "entry", attempt=1) == client_order_id
+            for day in candidate_days
+        )
+        if not attributed:
+            continue
+
+        quantity_raw = row.get("total_quantity")
+        limit_price_raw = row.get("limit_price")
+        try:
+            quantity = float(quantity_raw) if quantity_raw is not None else 0.0
+            limit_price = float(limit_price_raw) if limit_price_raw is not None else 0.0
+        except (TypeError, ValueError):
+            quantity = 0.0
+            limit_price = 0.0
+
+        if quantity <= 0:
+            # Can't safely construct even a minimal local record from
+            # this row - still alert, so a human knows something matching
+            # this app's own id pattern exists at the broker that this
+            # pass could not bring under tracking, rather than staying
+            # silent about a detection it couldn't complete.
+            try:
+                add_manual_alert(
+                    user_id,
+                    {
+                        "type": "orphan_entry_could_not_be_recovered",
+                        "ticker": ticker or "UNKNOWN",
+                        "priority": "critical",
+                        "message": (
+                            f"A broker order (client_order_id {client_order_id}) CONFIRMED to be this account's "
+                            "own (exact deterministic-id match) was found in order history with no local record, "
+                            "but its quantity could not be safely parsed to create a tracked record. Review this "
+                            "order manually."
+                        ),
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            continue
+
+        orphan: Dict[str, object] = {}
+        ol.initialize(
+            orphan,
+            ol.UNKNOWN_SUBMISSION_STATE,
+            entry_client_order_id=client_order_id,
+            error=(
+                "orphan discovered via broker order-history reconciliation - no local record existed for this "
+                "broker-accepted order (likely a crash between placement and local persistence)"
+            ),
+        )
+        orphan["ticker"] = ticker
+        orphan["quantity"] = quantity
+        orphan["limit_price"] = limit_price
+        # Deliberately unset - see docstring: never invented, only ever
+        # supplied by a human resolving this through the existing
+        # ambiguous-submission admin workflow.
+        orphan["stop"] = 0
+        orphan["target"] = 0
+        # The day this orphan was DISCOVERED, not necessarily when it was
+        # actually placed (unknowable from here) - only used later to
+        # derive a deterministic, collision-free protective-leg id if this
+        # entry is ever resolved and filled; never relied on for anything
+        # date-sensitive or correctness-critical.
+        orphan["trading_day"] = today_key
+        orphan["orphan_recovered"] = True
+        orphan["status"] = "unknown_submission_state"
+        orphan["logged_at"] = _now_utc().isoformat()
+
+        record_overnight_order(user_id, orphan)
+        known_ids.add(client_order_id)
+        discovered += 1
+
+        try:
+            add_manual_alert(
+                user_id,
+                {
+                    "type": "orphan_entry_discovered",
+                    "ticker": ticker,
+                    "priority": "critical",
+                    "message": (
+                        f"{ticker}: recovered a broker order (client_order_id {client_order_id}, "
+                        f"{quantity:g} shares @ ${limit_price:.2f}) that had NO local record at all - likely a "
+                        "crash between placement and local persistence. New autonomous entries are frozen for "
+                        "this account until this is resolved. Its stop-loss/take-profit levels are UNKNOWN and "
+                        "were never guessed - review this position manually through the ambiguous-submission "
+                        "admin workflow before it will be automatically protected."
+                    ),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    return discovered
 
 
 def _reconcile_unknown_submissions(user_id: str, creds: Dict[str, str], account_id: str) -> bool:
@@ -3952,6 +5388,577 @@ def _recover_incomplete_manual_resolutions(user_id: str, creds: Dict[str, str], 
     return bool(find_incomplete_resolutions(user_id))
 
 
+# How long an ORDINARY transitional entry (order_lifecycle.MONITOR_RESUMABLE_STATES)
+# can sit with _monitor_transitional_orders making NO forward progress on it
+# before this app stops trusting its own ability to resolve it automatically
+# and freezes new entries account-wide instead - the same posture
+# UNKNOWN_SUBMISSION_STATE already takes for a different kind of
+# uncertainty. Longer than UNKNOWN_SUBMISSION_GRACE_PERIOD_SECONDS (15 min)
+# since these are typically lower-urgency (the entry's existence usually
+# ISN'T in question here, only its exact fill/protection status) and a
+# transient broker outage covering several consecutive fast-monitor ticks
+# should not itself trigger a freeze.
+MONITOR_STUCK_FREEZE_SECONDS = 1800
+
+# How stale fast_monitor_heartbeat.py's last-completed (or, if it's never
+# completed even once, last-started) stamp can get before this app treats
+# the fast monitor's SCHEDULER itself as unhealthy - "adding an endpoint
+# is insufficient" without a way to notice its cron job was never
+# configured, stopped firing, or is hanging. Set well above the intended
+# 30-60 second cadence (10 minutes = 10-20x that) so a couple of missed
+# or slow ticks don't false-positive, while still catching a scheduler
+# that's been silent for a meaningfully long time.
+FAST_MONITOR_HEARTBEAT_STALE_SECONDS = 600
+
+
+def _fast_monitor_health_status() -> Dict[str, object]:
+    """LOCAL-ONLY (no broker calls) read of fast_monitor_heartbeat.py's
+    latest recorded run, plus a computed "unhealthy" verdict - used by the
+    admin-wide banner (base.html) and by _run_autonomous_trade_scan_locked
+    to fire a one-shot alert when staleness is FIRST detected. Unhealthy
+    if:
+      - the fast monitor has NEVER run even once (the heartbeat file is
+        completely empty) - the scheduler was probably never configured;
+      - the most recent run STARTED but never recorded a matching
+        COMPLETED stamp, and enough time has passed that it can no longer
+        plausibly still be in flight - a hung run, a crash mid-run, or a
+        run whose completion write itself failed;
+      - the most recent COMPLETED stamp is older than
+        FAST_MONITOR_HEARTBEAT_STALE_SECONDS - the scheduler has gone
+        quiet, whether or not it ever ran successfully before.
+    This says nothing about whether the full 5-minute scan (a completely
+    separate, ALREADY-required cron job) is healthy - only about the
+    OPTIONAL faster monitor layered on top of it."""
+    heartbeat = get_fast_monitor_heartbeat_status()
+    now = _now_utc()
+    if not heartbeat:
+        return {"healthy": False, "reason": "the fast monitor has never run - its scheduler may not be configured", "heartbeat": heartbeat, "age_seconds": None}
+
+    last_completed_at_raw = heartbeat.get("last_completed_at")
+    last_started_at_raw = heartbeat.get("last_started_at")
+    most_recent_run_completed = heartbeat.get("last_started_run_id") and heartbeat.get("last_started_run_id") == heartbeat.get("last_completed_run_id")
+
+    if most_recent_run_completed:
+        # The most recent run finished cleanly - its completion time is
+        # the right reference point.
+        reference_raw = last_completed_at_raw
+        hung = False
+    else:
+        # The most recent run either never completed, or there's no
+        # completed record at all yet - use when it STARTED as the
+        # reference. A run that started recently may simply still be in
+        # flight, not stale; one that started long ago without ever
+        # completing is a hang, which age_seconds below will catch.
+        reference_raw = last_started_at_raw or last_completed_at_raw
+        hung = True
+
+    reference_at = _parse_trusted_past_timestamp(reference_raw, now=now, default=now)
+    age_seconds = (now - reference_at).total_seconds()
+
+    if age_seconds >= FAST_MONITOR_HEARTBEAT_STALE_SECONDS:
+        reason = (
+            f"the fast monitor started a run over {int(age_seconds // 60)} minutes ago that never completed"
+            if hung
+            else f"no completed fast-monitor run in over {int(age_seconds // 60)} minutes"
+        )
+        return {"healthy": False, "reason": reason, "heartbeat": heartbeat, "age_seconds": age_seconds}
+
+    return {"healthy": True, "reason": "", "heartbeat": heartbeat, "age_seconds": age_seconds}
+
+
+_FAST_MONITOR_UNHEALTHY_ALERT_MESSAGE = (
+    "The fast order monitor's scheduler appears misconfigured or stalled - no recent completed run has been "
+    "recorded. Fills and exits still rely on the slower 5-minute scan until this is fixed. Check the "
+    "fast-monitor-trigger cron job configuration."
+)
+
+
+def _alert_admins_fast_monitor_unhealthy_if_needed() -> None:
+    """Called once per full 5-minute scan tick (from api_autonomy_cron_trigger,
+    not per-user) - fires a manual alert to every admin account when
+    _fast_monitor_health_status reports unhealthy. Deliberately uses a
+    FIXED message text (no elapsed-minutes count baked in) so
+    add_manual_alert's own content-hash dedup (see alerts._build_alert_id)
+    makes repeated calls across ticks a no-op rather than spamming a new
+    alert every 5 minutes while the condition persists - this is what makes
+    it "one-shot": the first tick that observes staleness creates the
+    alert, every later tick while still unhealthy just re-affirms the same
+    alert id, and no explicit "already alerted" flag is needed. Does
+    nothing while healthy; an admin dismissing the alert does not change
+    heartbeat state, so it reappears (same id, effectively unchanged) if
+    the condition is still true next tick, mirroring the freeze banner's
+    own "dismissing doesn't clear it, only actual recovery does" behavior."""
+    health = _fast_monitor_health_status()
+    if health.get("healthy"):
+        return
+    for user_id in list_all_user_ids():
+        if not is_admin(user_id):
+            continue
+        try:
+            add_manual_alert(
+                user_id,
+                {
+                    "type": "fast_monitor_unhealthy",
+                    "ticker": "",
+                    "priority": "critical",
+                    "message": _FAST_MONITOR_UNHEALTHY_ALERT_MESSAGE,
+                },
+            )
+        except Exception:  # noqa: BLE001 - one admin's alert write failing must not block the scan tick
+            logger.exception("Failed to record fast-monitor-unhealthy alert for admin user_id=%s", user_id)
+
+
+# How stale full_scan_heartbeat.py's last-completed (or last-started, if
+# it's never completed even once) stamp can get before the full 5-minute
+# scan's OWN scheduler is treated as unhealthy. Render Cron Jobs use
+# standard cron syntax with a ONE-MINUTE minimum resolution (confirmed
+# against Render's own docs this session - see the note on
+# FAST_MONITOR_HEARTBEAT_STALE_SECONDS's sibling reasoning), so a job
+# intended to fire every 5 minutes should complete at least every ~300s;
+# 3x that margin (900s) tolerates a couple of missed/slow ticks without
+# false-positiving on a scheduler that's actually fine.
+FULL_SCAN_HEARTBEAT_STALE_SECONDS = 900
+
+
+def _full_scan_health_status() -> Dict[str, object]:
+    """LOCAL-ONLY (no broker calls) mirror of _fast_monitor_health_status,
+    but for the FULL 5-minute scan's own cron job
+    (/api/autonomy/cron-trigger) instead of the faster reconciliation-only
+    one. See full_scan_heartbeat.py."""
+    heartbeat = get_full_scan_heartbeat_status()
+    now = _now_utc()
+    if not heartbeat:
+        return {"healthy": False, "reason": "the full scan has never run - its scheduler may not be configured", "heartbeat": heartbeat, "age_seconds": None}
+
+    last_completed_at_raw = heartbeat.get("last_completed_at")
+    last_started_at_raw = heartbeat.get("last_started_at")
+    most_recent_run_completed = heartbeat.get("last_started_run_id") and heartbeat.get("last_started_run_id") == heartbeat.get("last_completed_run_id")
+
+    if most_recent_run_completed:
+        reference_raw = last_completed_at_raw
+        hung = False
+    else:
+        reference_raw = last_started_at_raw or last_completed_at_raw
+        hung = True
+
+    reference_at = _parse_trusted_past_timestamp(reference_raw, now=now, default=now)
+    age_seconds = (now - reference_at).total_seconds()
+
+    if age_seconds >= FULL_SCAN_HEARTBEAT_STALE_SECONDS:
+        reason = (
+            f"the full scan started a run over {int(age_seconds // 60)} minutes ago that never completed"
+            if hung
+            else f"no completed full-scan run in over {int(age_seconds // 60)} minutes"
+        )
+        return {"healthy": False, "reason": reason, "heartbeat": heartbeat, "age_seconds": age_seconds}
+
+    return {"healthy": True, "reason": "", "heartbeat": heartbeat, "age_seconds": age_seconds}
+
+
+_FULL_SCAN_UNHEALTHY_ALERT_MESSAGE = (
+    "The full 5-minute autonomous-scan's scheduler appears misconfigured or stalled - no recent completed run has "
+    "been recorded. This is the scan that resumes ordinary transitional orders when the faster optional monitor's "
+    "own cron job isn't configured, and the one that places new autonomous entries. Check the cron-trigger cron "
+    "job configuration."
+)
+
+
+def _alert_admins_full_scan_unhealthy_if_needed() -> None:
+    """Called once per fast-monitor-trigger tick (NOT per-user) - the
+    cross-check counterpart to _alert_admins_fast_monitor_unhealthy_if_needed:
+    that function lets the full 5-minute scan detect the FASTER monitor's
+    scheduler going silent; this one lets the FASTER monitor detect the
+    full scan's own scheduler going silent. Neither scheduler can ever
+    detect its OWN silence - only the other one calling it can. If BOTH
+    schedulers stop firing at once, neither cross-check can fire either,
+    which is exactly why an EXTERNAL, unauthenticated health-check
+    endpoint also exists (see api_autonomy_monitor_health) for a
+    third-party uptime service to poll independently of both. Same
+    fixed-message, content-hash-deduped one-shot pattern as its
+    counterpart."""
+    health = _full_scan_health_status()
+    if health.get("healthy"):
+        return
+    for user_id in list_all_user_ids():
+        if not is_admin(user_id):
+            continue
+        try:
+            add_manual_alert(
+                user_id,
+                {
+                    "type": "full_scan_unhealthy",
+                    "ticker": "",
+                    "priority": "critical",
+                    "message": _FULL_SCAN_UNHEALTHY_ALERT_MESSAGE,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to record full-scan-unhealthy alert for admin user_id=%s", user_id)
+
+
+# How stale continuous_monitor_heartbeat.py's signals can get before the
+# continuous monitor (Option A - a separately-deployed worker calling
+# /api/autonomy/continuous-monitor-tick every ~10s) is treated as
+# unhealthy. Set to a modest multiple of the WORKER's intended interval
+# (CONTINUOUS_MONITOR_DEFAULT_INTERVAL_SECONDS) rather than a large fixed
+# number like the slower schedulers use - a worker calling every 10s that
+# goes quiet for even a minute is already a meaningfully different
+# situation than a scheduler meant to fire every 5 minutes going quiet
+# for a minute. Deliberately NOT hardcoded here as a bare literal - it's
+# a small multiple of the worker's own configured interval, defined once
+# both are in the same place (see CONTINUOUS_MONITOR_DEFAULT_INTERVAL_SECONDS
+# just below) so tightening/loosening the worker's cadence keeps this
+# threshold sensibly scaled without a separate manual edit.
+CONTINUOUS_MONITOR_DEFAULT_INTERVAL_SECONDS = 10
+CONTINUOUS_MONITOR_HEARTBEAT_STALE_SECONDS = CONTINUOUS_MONITOR_DEFAULT_INTERVAL_SECONDS * 6  # 60s at the default 10s interval
+
+
+def _continuous_monitor_health_status() -> Dict[str, object]:
+    """LOCAL-ONLY (no broker calls) health read for the continuous
+    monitor - unlike _fast_monitor_health_status/_full_scan_health_status
+    (single started/completed pair), this tracks TWO independent signals
+    (see continuous_monitor_heartbeat.py's module docstring):
+      - last_request_received_at - proves the WORKER is alive and
+        successfully reaching/authenticating to this endpoint, regardless
+        of whether reconciliation itself then succeeds;
+      - last_completed_at - proves the ENDPOINT's own reconciliation
+        logic completed without hanging, for the request that most
+        recently arrived.
+    Unhealthy if EITHER signal is stale - a fresh "received" with a stale
+    "completed" specifically means the endpoint's own logic is stuck (the
+    worker is fine); a stale "received" means the worker itself has gone
+    quiet (regardless of how healthy the endpoint's last completion once
+    was)."""
+    heartbeat = get_continuous_monitor_heartbeat_status()
+    now = _now_utc()
+    if not heartbeat or not heartbeat.get("last_request_received_at"):
+        return {"healthy": False, "reason": "the continuous monitor worker has never called this endpoint - it may not be deployed/configured", "heartbeat": heartbeat, "age_seconds": None}
+
+    received_at = _parse_trusted_past_timestamp(heartbeat.get("last_request_received_at"), now=now, default=now)
+    received_age_seconds = (now - received_at).total_seconds()
+    if received_age_seconds >= CONTINUOUS_MONITOR_HEARTBEAT_STALE_SECONDS:
+        return {
+            "healthy": False,
+            "reason": f"the continuous monitor worker has not called this endpoint in over {int(received_age_seconds)}s - the worker process may be down",
+            "heartbeat": heartbeat,
+            "age_seconds": received_age_seconds,
+        }
+
+    most_recent_completed = heartbeat.get("last_request_run_id") and heartbeat.get("last_request_run_id") == heartbeat.get("last_completed_run_id")
+    if not most_recent_completed:
+        # The worker IS reaching us (received_age_seconds just passed),
+        # but the most recent request never recorded a completion - the
+        # endpoint's own reconciliation logic for that specific request
+        # is what's hung, not the worker.
+        return {
+            "healthy": False,
+            "reason": "the continuous monitor worker is calling this endpoint, but its most recent request never completed - reconciliation logic may be stuck",
+            "heartbeat": heartbeat,
+            "age_seconds": received_age_seconds,
+        }
+
+    completed_at = _parse_trusted_past_timestamp(heartbeat.get("last_completed_at"), now=now, default=now)
+    completed_age_seconds = (now - completed_at).total_seconds()
+    if completed_age_seconds >= CONTINUOUS_MONITOR_HEARTBEAT_STALE_SECONDS:
+        return {
+            "healthy": False,
+            "reason": f"no completed continuous-monitor reconciliation in over {int(completed_age_seconds)}s",
+            "heartbeat": heartbeat,
+            "age_seconds": completed_age_seconds,
+        }
+
+    return {"healthy": True, "reason": "", "heartbeat": heartbeat, "age_seconds": max(received_age_seconds, completed_age_seconds)}
+
+
+_CONTINUOUS_MONITOR_UNHEALTHY_ALERT_MESSAGE = (
+    "The continuous order monitor (the ~10-second worker) appears to be down or stalled - no recent activity has "
+    "been recorded. Fills, exits, and protection gaps still rely on the slower fast-monitor/full-scan schedulers "
+    "until this is fixed. Check the continuous monitor worker's deployment/logs."
+)
+
+
+def _alert_admins_continuous_monitor_unhealthy_if_needed() -> None:
+    """Called once per full 5-minute scan tick (NOT per-user), alongside
+    _alert_admins_fast_monitor_unhealthy_if_needed - the full scan is the
+    one scheduler that's already required regardless of whether either
+    faster mechanism is configured, making it the natural place to detect
+    and surface either of them going silent. Same fixed-message,
+    content-hash-deduped one-shot pattern as its siblings."""
+    health = _continuous_monitor_health_status()
+    if health.get("healthy"):
+        return
+    for user_id in list_all_user_ids():
+        if not is_admin(user_id):
+            continue
+        try:
+            add_manual_alert(
+                user_id,
+                {
+                    "type": "continuous_monitor_unhealthy",
+                    "ticker": "",
+                    "priority": "critical",
+                    "message": _CONTINUOUS_MONITOR_UNHEALTHY_ALERT_MESSAGE,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to record continuous-monitor-unhealthy alert for admin user_id=%s", user_id)
+
+
+def _record_monitor_attempt(order: Dict[str, object], *, progressed: bool, error: Optional[str], now_iso: str) -> None:
+    """Stamps failure-tracking fields on ONE overnight_orders entry after
+    ONE _monitor_transitional_orders attempt - called for every outcome
+    (success-with-progress, success-with-no-progress, a raised exception,
+    or a malformed record this app couldn't even attempt), never skipped
+    for any of them: "broker lookup failures and malformed transitional
+    records must count as failed monitor attempts and start/advance the
+    stuck timer" - a silent `continue` on exception would make exactly
+    the entries most in need of escalation invisible to it.
+
+    monitor_last_attempt_at is updated unconditionally, every call.
+    monitor_first_failure_at is stamped the first time progress stalls and
+    left untouched on every SUBSEQUENT stalled attempt (so it keeps
+    reflecting when the stall actually BEGAN, for
+    _has_stuck_transitional_orders_locally's threshold check) - cleared
+    the moment progress resumes. monitor_attempt_count counts CONSECUTIVE
+    no-progress attempts, reset to 0 on progress. monitor_last_error holds
+    the most recent attempt's error, if any - cleared on any attempt that
+    didn't raise, even one that also made no progress (an inconclusive
+    but errorless check still means the LAST thing that happened wasn't
+    an error)."""
+    order["monitor_last_attempt_at"] = now_iso
+    if progressed:
+        order["monitor_first_failure_at"] = None
+        order["monitor_attempt_count"] = 0
+        order["monitor_last_error"] = None
+        return
+    if not order.get("monitor_first_failure_at"):
+        order["monitor_first_failure_at"] = now_iso
+    order["monitor_attempt_count"] = int(order.get("monitor_attempt_count") or 0) + 1
+    order["monitor_last_error"] = error
+
+
+def _alert_if_entry_newly_stuck(user_id: str, order: Dict[str, object]) -> None:
+    """Fires a CRITICAL, ticker-scoped alert the first tick an individual
+    entry's own monitor_first_failure_at crosses MONITOR_STUCK_FREEZE_SECONDS -
+    called right after _record_monitor_attempt, for every outcome (no
+    forward progress this tick, whatever the reason). Deliberately a FIXED
+    message per entry (keyed by entry_client_order_id, no elapsed-minutes
+    count baked in) so add_manual_alert's own content-hash dedup (see
+    alerts._build_alert_id) makes this naturally one-shot per entry - the
+    same pattern as _alert_admins_fast_monitor_unhealthy_if_needed. This is
+    intentionally SEPARATE from the account-wide freeze itself
+    (_has_stuck_transitional_orders_locally / _has_unresolved_ambiguous_submission_locally,
+    which govern whether NEW entries are blocked) - dismissing this alert
+    from the notifications drawer only marks the ALERT read/dismissed; it
+    has no effect on that freeze predicate, which is a pure, independent
+    read of monitor_first_failure_at/lifecycle_state every time it's
+    checked. See test_dismissing_the_stuck_monitor_alert_does_not_release_the_freeze."""
+    stuck_since_raw = order.get("monitor_first_failure_at")
+    if not stuck_since_raw:
+        return
+    now = _now_utc()
+    stuck_since = _parse_trusted_past_timestamp(stuck_since_raw, now=now, default=now)
+    if (now - stuck_since).total_seconds() < MONITOR_STUCK_FREEZE_SECONDS:
+        return
+    ticker = str(order.get("ticker", "") or "")
+    entry_client_order_id = str(order.get("entry_client_order_id", "") or "unknown")
+    try:
+        add_manual_alert(
+            user_id,
+            {
+                "type": "monitor_stuck_freeze",
+                "ticker": ticker,
+                "priority": "critical",
+                "message": (
+                    f"{ticker} (entry {entry_client_order_id}): the fast order monitor has made no forward "
+                    f"progress on this entry for over {MONITOR_STUCK_FREEZE_SECONDS // 60} minutes - safe "
+                    "recovery can no longer be confidently proven. New autonomous entries are frozen account-wide "
+                    "until this is resolved. Dismissing this alert does NOT lift the freeze - only genuine forward "
+                    "progress on this entry (or manual intervention) does."
+                ),
+            },
+        )
+    except Exception:  # noqa: BLE001 - never let alerting itself break the monitor tick
+        pass
+
+
+def _monitor_transitional_orders(user_id: str, creds: Dict[str, str], account_id: str) -> bool:
+    """The fast, frequently-run per-order monitor - task list: "Build fast
+    per-order monitor decoupled from the 5-minute scan". Processes every
+    entry in one of TWO groups:
+      - order_lifecycle.MONITOR_RESUMABLE_STATES (ENTRY_SUBMITTED through
+        PROTECTION_FAILED): resumed via _reconcile_entry_fill_and_protection
+        directly (single pass, no internal sleep loop - unlike
+        _poll_fill_and_protect's bounded retry wrapper, which exists only
+        for a caller wanting a fast INITIAL result; this monitor gets its
+        own "next round" on its next tick instead of blocking this one).
+      - PROTECTION_CONFIRMED_ACTIVE: checked for an EXIT first
+        (_reconcile_position_exit - did a stop or target leg fill?), and
+        only if no exit was found AND the entry's own order isn't yet
+        broker-terminal, ALSO checked for further fill growth via
+        _reconcile_entry_fill_and_protection. This is what makes "a
+        transition to PROTECTION_PENDING must not stop fill monitoring"
+        true system-wide, not just within one function call - see
+        order_lifecycle.FILL_MONITORING_STATES.
+    Every leg placement anywhere in this chain uses the SAME deterministic,
+    VERSIONED client_order_ids (order_lifecycle.deterministic_client_order_id)
+    - re-submitting an already-placed leg under the same id is Webull's
+    own idempotency guard, never a duplicate; a genuine RESIZE uses a NEW
+    version instead of assuming a same-id resubmission would resize
+    anything (see _reconcile_protective_leg_quantity).
+
+    UNKNOWN_SUBMISSION_STATE and MANUAL_LINK_IN_PROGRESS (order_lifecycle.FROZEN_STATES)
+    are deliberately NOT in scope here - genuinely different problems (the
+    broker's response to the ORIGINAL submission itself is unknown, or a
+    manual admin resolution is mid-transaction) with their own
+    audit/evidence requirements, already handled by
+    _reconcile_unknown_submissions and _recover_incomplete_manual_resolutions
+    respectively. Callers of this function are expected to run those two
+    alongside it (see _run_fast_order_monitor and
+    _run_autonomous_trade_scan_locked) so an account frozen by either one
+    resumes as fast as this function's own calling cadence, not just once
+    per 5-minute scan.
+
+    Every entry processed here gets _record_monitor_attempt called on it,
+    for EVERY outcome including a raised exception or a malformed record
+    (missing ticker/entry_client_order_id) - none of those are silently
+    skipped. See _has_stuck_transitional_orders_locally: an entry stuck
+    long enough (by that tracking) freezes new entries account-wide, the
+    same "safe recovery cannot be proven" posture UNKNOWN_SUBMISSION_STATE
+    already takes for a different kind of uncertainty.
+
+    Best-effort per entry, same pattern as _reconcile_unknown_submissions -
+    one entry's broker call failing must not block the others or this
+    function's own return value for the rest.
+
+    Returns True if ANY entry this function is responsible for is still
+    non-terminal after this pass."""
+    orders = list_overnight_orders(user_id)
+    resumable = [order for order in orders if order.get("lifecycle_state") in ol.MONITOR_RESUMABLE_STATES]
+    exit_checkable = [order for order in orders if order.get("lifecycle_state") == ol.PROTECTION_CONFIRMED_ACTIVE]
+    now_iso = _now_utc().isoformat()
+    changed = False
+
+    for order in resumable + exit_checkable:
+        entry_client_order_id = order.get("entry_client_order_id")
+        ticker = str(order.get("ticker", ""))
+        trading_day = str(order.get("trading_day") or "")
+        if not entry_client_order_id or not ticker:
+            _record_monitor_attempt(order, progressed=False, error="malformed transitional record: missing entry_client_order_id or ticker", now_iso=now_iso)
+            _alert_if_entry_newly_stuck(user_id, order)
+            changed = True
+            continue
+
+        state_before = order.get("lifecycle_state")
+        try:
+            if state_before == ol.PROTECTION_CONFIRMED_ACTIVE:
+                exited = _reconcile_position_exit(user_id, creds, account_id, ticker, trading_day, order)
+                if not exited and not order.get("entry_order_terminal"):
+                    _reconcile_entry_fill_and_protection(
+                        user_id=user_id,
+                        creds=creds,
+                        account_id=account_id,
+                        ticker=ticker,
+                        entry_client_order_id=str(entry_client_order_id),
+                        limit_price=float(order.get("limit_price") or 0),
+                        stop_price=float(order.get("stop") or 0),
+                        target_price=float(order.get("target") or 0),
+                        trading_day=trading_day,
+                        entry=order,
+                    )
+            else:
+                _reconcile_entry_fill_and_protection(
+                    user_id=user_id,
+                    creds=creds,
+                    account_id=account_id,
+                    ticker=ticker,
+                    entry_client_order_id=str(entry_client_order_id),
+                    limit_price=float(order.get("limit_price") or 0),
+                    stop_price=float(order.get("stop") or 0),
+                    target_price=float(order.get("target") or 0),
+                    trading_day=trading_day,
+                    entry=order,
+                )
+        except Exception as error:  # noqa: BLE001 - one bad record shouldn't block the others or this monitor tick itself
+            _record_monitor_attempt(order, progressed=False, error=str(error), now_iso=now_iso)
+            _alert_if_entry_newly_stuck(user_id, order)
+            changed = True
+            continue
+
+        changed = True
+        progressed = order.get("lifecycle_state") != state_before
+        _record_monitor_attempt(order, progressed=progressed, error=None, now_iso=now_iso)
+        _alert_if_entry_newly_stuck(user_id, order)
+
+    if changed:
+        replace_overnight_orders(user_id, orders)
+
+    return any(
+        order.get("lifecycle_state") in ol.MONITOR_RESUMABLE_STATES
+        or (order.get("lifecycle_state") == ol.PROTECTION_CONFIRMED_ACTIVE and not order.get("entry_order_terminal"))
+        for order in orders
+    )
+
+
+def _has_stuck_transitional_orders_locally(user_id: str) -> bool:
+    """Fast, LOCAL-ONLY check (no broker calls) mirroring
+    _has_unresolved_ambiguous_submission_locally's own contract - True if
+    any entry has been sitting with NO forward progress
+    (_monitor_transitional_orders' monitor_first_failure_at, via
+    _record_monitor_attempt) for at least MONITOR_STUCK_FREEZE_SECONDS.
+    This is "safe recovery cannot be proven", not "the position is
+    definitely unsafe" - the position may well still be fine (or even
+    already fully protected at the broker, just unconfirmed by this
+    app's own polling), but this app can no longer confidently prove that
+    on its own, so it stops compounding the uncertainty with new capital
+    while a human looks at it - the same reasoning
+    UNKNOWN_SUBMISSION_STATE already applies to a different kind of
+    uncertainty."""
+    now = _now_utc()
+    for order in list_overnight_orders(user_id):
+        stuck_since_raw = order.get("monitor_first_failure_at")
+        if not stuck_since_raw:
+            continue
+        stuck_since = _parse_trusted_past_timestamp(stuck_since_raw, now=now, default=now)
+        if (now - stuck_since).total_seconds() >= MONITOR_STUCK_FREEZE_SECONDS:
+            return True
+    return False
+
+
+def _has_active_protection_gap_locally(user_id: str) -> bool:
+    """Fast, LOCAL-ONLY check (no broker calls) - True if any NON-TERMINAL
+    entry currently carries either:
+      - entry["ambiguous_exit_unresolved"] - both protective legs appeared
+        filled (see _reconcile_both_legs_filled_emergency) and this has
+        not since resolved conclusively; or
+      - entry["stop_protection_gap"] / entry["target_protection_gap"] -
+        a leg was cancelled to resize it and its replacement failed to
+        place even after an immediate retry (see
+        _reconcile_protective_leg_quantity), so that leg is CONFIRMED
+        GONE and NOT YET replaced - a genuine, current gap in coverage,
+        not a hypothetical one.
+    Both are IMMEDIATE, tick-granular freeze signals - deliberately
+    independent of and faster-acting than
+    _has_stuck_transitional_orders_locally's 30-minute no-progress
+    threshold, since "a leg is confirmed cancelled and unreplaced" or
+    "both legs appear to have filled" are urgent enough that waiting on
+    the generic stall timer would be too slow. Cleared automatically only
+    once the underlying condition is genuinely resolved - see each
+    field's own setter/clearer for exactly when - never on a timer and
+    never merely because a retry was ATTEMPTED. TERMINAL entries are
+    skipped so a resolved-but-still-flagged historical record (the flag
+    was never explicitly cleared on close, only found irrelevant) can't
+    freeze an account forever."""
+    for order in list_overnight_orders(user_id):
+        if order.get("lifecycle_state") in ol.TERMINAL_STATES:
+            continue
+        if order.get("ambiguous_exit_unresolved"):
+            return True
+        if order.get("stop_protection_gap") or order.get("target_protection_gap"):
+            return True
+    return False
+
+
 def _has_unresolved_ambiguous_submission_locally(user_id: str) -> bool:
     """Fast, LOCAL-ONLY check (no broker calls) for the persistent dashboard
     banner - reads whatever the last scan/reconciliation pass already
@@ -3959,7 +5966,7 @@ def _has_unresolved_ambiguous_submission_locally(user_id: str) -> bool:
     _reconcile_unknown_submissions' own "is anything still unresolved"
     check, but never attempts to resolve anything itself - purely a read.
 
-    Two INDEPENDENT signals, either one enough to freeze:
+    Four INDEPENDENT signals, any one enough to freeze:
       - any entry sitting in one of order_lifecycle.FROZEN_STATES
         (UNKNOWN_SUBMISSION_STATE itself, or MANUAL_LINK_IN_PROGRESS - a
         manual link resolution still mid-flight);
@@ -3971,12 +5978,23 @@ def _has_unresolved_ambiguous_submission_locally(user_id: str) -> bool:
         may already be PROTECTION_CONFIRMED_ACTIVE) - see
         _resolve_ambiguous_submission's docstring for why the closing
         audit write, not the state change itself, is what's allowed to
-        lift the freeze. This is also a LOCAL-ONLY disk read (the audit
-        log is a local file, not a broker call), so it doesn't violate
-        this function's own no-broker-calls contract."""
+        lift the freeze;
+      - _has_active_protection_gap_locally - an ambiguous double-fill exit
+        or a confirmed-but-unreplaced protective leg, both immediate,
+        tick-granular signals (see that function);
+      - _has_stuck_transitional_orders_locally - an ORDINARY entry (never
+        ambiguous, never manually resolved) that the fast per-order
+        monitor has made no progress on for too long. This is also a
+        LOCAL-ONLY disk read (the audit log and overnight_orders.json are
+        both local files, not broker calls), so it doesn't violate this
+        function's own no-broker-calls contract."""
     if any(order.get("lifecycle_state") in ol.FROZEN_STATES for order in list_overnight_orders(user_id)):
         return True
-    return bool(find_incomplete_resolutions(user_id))
+    if find_incomplete_resolutions(user_id):
+        return True
+    if _has_active_protection_gap_locally(user_id):
+        return True
+    return _has_stuck_transitional_orders_locally(user_id)
 
 
 def _count_users_with_unresolved_ambiguous_submissions() -> int:
@@ -4550,6 +6568,12 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
 
     _reconcile_exit_orders(user_id, creds, account_id)
     _refresh_stop_confidence(user_id, creds, account_id)
+    # Restart recovery for a broker-accepted entry that never got ANY
+    # local record at all (see _discover_orphaned_broker_entries) - must
+    # run BEFORE _reconcile_unknown_submissions below so a freshly
+    # discovered orphan is included in THIS SAME tick's freeze check, not
+    # one scan late.
+    _discover_orphaned_broker_entries(user_id, creds, account_id)
     # True if ANY entry - from this scan or an earlier one - is still stuck
     # in UNKNOWN_SUBMISSION_STATE after this reconciliation attempt, OR any
     # manual resolution transaction (_resolve_ambiguous_submission) is
@@ -4563,6 +6587,14 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
     # first occurred.
     has_unresolved_ambiguous_submission = _reconcile_unknown_submissions(user_id, creds, account_id)
     has_incomplete_manual_resolution = _recover_incomplete_manual_resolutions(user_id, creds, account_id)
+    # Resumes every ORDINARY entry (never ambiguous, never manually
+    # resolved) still transitional - see _monitor_transitional_orders.
+    # Also runs on its own, much faster cadence via _run_fast_order_monitor
+    # / the fast-monitor-trigger endpoint - this call is the safety net
+    # that still applies even if that faster external cron was never
+    # configured, so this app's OWN 5-minute scan never regresses to
+    # leaving these unresumed.
+    _monitor_transitional_orders(user_id, creds, account_id)
 
     risk_settings = get_autonomy_status(user_id)
     if risk_settings.get("emergency_stop_enabled"):
@@ -4669,7 +6701,12 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
     # UNKNOWN_SUBMISSION_STATE. See _reconcile_unknown_submissions'
     # docstring for why an unresolved ambiguous submission blocks every new
     # entry, not just the ones in the run that created it.
-    if not _new_entries_allowed(_current_webull_trading_session()):
+    if _new_entries_disabled_by_deployment_kill_switch():
+        new_entries_blocked_reason = (
+            "new autonomous entries are disabled platform-wide by a deployment-level kill switch "
+            "(PLUTO_DISABLE_NEW_ENTRIES) - existing positions are still monitored and protected normally"
+        )
+    elif not _new_entries_allowed(_current_webull_trading_session()):
         new_entries_blocked_reason = "outside CORE trading hours - a new entry can't get a real broker-side stop attached until CORE opens"
     elif has_unresolved_ambiguous_submission:
         new_entries_blocked_reason = (
@@ -4682,6 +6719,13 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
             "a manual resolution of a prior ambiguous order submission has not been durably confirmed complete - "
             "no new autonomous entries will be placed for this account until it is (existing positions are still "
             "monitored and protected normally)"
+        )
+    elif _has_stuck_transitional_orders_locally(user_id):
+        new_entries_blocked_reason = (
+            f"an ordinary entry has made no fill/protection progress for at least "
+            f"{MONITOR_STUCK_FREEZE_SECONDS // 60} minutes despite repeated monitor attempts - safe recovery "
+            "cannot be proven, so no new autonomous entries will be placed for this account until a human "
+            "reviews it (existing positions are still monitored and protected normally)"
         )
     else:
         new_entries_blocked_reason = ""
@@ -4710,6 +6754,27 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
                 "reason_skipped": reason,
             }
         )
+
+    # Leading market-regime SHADOW signal (VIX) - fetched/computed ONCE per
+    # scan tick, not once per candidate: the level doesn't meaningfully
+    # change within a single scan, and there can be several candidates.
+    # SHADOW MODE ONLY - see regime.py's module docstring. This snapshot
+    # and mapping are recorded on every candidate below (entry["regime_shadow"])
+    # purely for later backtesting; nothing derived from them is read by
+    # entries_allowed, sizing, the LLM step, or order submission anywhere
+    # in this function. Deliberately computed even when `candidates` is
+    # empty - cheap, cached, and keeps the shadow record warm for
+    # whenever entries next become allowed rather than only on ticks that
+    # happen to have qualifying candidates.
+    try:
+        vix_snapshot = get_vix_snapshot()
+        shadow_mapping = compute_shadow_adjustment(vix_snapshot)
+    except Exception:  # noqa: BLE001 - shadow/research code must never affect the real scan
+        vix_snapshot = {
+            "vix_level": None, "source_time": None, "fetch_time": None,
+            "age_seconds": None, "status": "unavailable", "used_stale_cache": False,
+        }
+        shadow_mapping = {"mapping_version": None, "proposed_adjustment": 0, "reasoning": "shadow computation failed"}
 
     for candidate_index, opp in enumerate(candidates):
         if candidate_index > 0:
@@ -4789,6 +6854,60 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
             # order_lifecycle.deterministic_client_order_id.
             "trading_day": today_key,
         }
+
+        # Leading market-regime SHADOW observation (VIX, see regime.py) -
+        # RECORD ONLY. Deliberately computed and stored entirely OUTSIDE
+        # the real decision path below: it never sets entry["status"],
+        # never skips/resizes/vetoes, and is not read by the LLM step,
+        # sizing, or submission. Wrapped in its own try/except so that
+        # even an unanticipated bug in this shadow/research code can
+        # never block, alter, or crash the real scan - see
+        # REGIME_MAPPING_VERSION in regime.py for why this stays
+        # observation-only until backtested.
+        try:
+            raw_confidence = int(opp.get("confidence", 0) or 0)
+            shadow_proposed_adjustment = int(shadow_mapping.get("proposed_adjustment", 0) or 0)
+            shadow_adjusted_confidence = raw_confidence + shadow_proposed_adjustment
+            # The SAME threshold the real candidate list was already
+            # filtered by above (OVERNIGHT_MIN_CONFIDENCE) - not a
+            # separate hardcoded shadow threshold - so this is a genuine
+            # apples-to-apples comparison against production's own bar.
+            # raw_crosses_threshold is always True here (qualifying{}
+            # already filtered on it) but is recorded explicitly rather
+            # than assumed, so this stays correct if that upstream filter
+            # ever changes.
+            raw_crosses_threshold = raw_confidence >= OVERNIGHT_MIN_CONFIDENCE
+            shadow_crosses_threshold = shadow_adjusted_confidence >= OVERNIGHT_MIN_CONFIDENCE
+            source_time = vix_snapshot.get("source_time")
+            fetch_time = vix_snapshot.get("fetch_time")
+            entry["regime_shadow"] = {
+                "regime_mode": "shadow",
+                "mapping_version": shadow_mapping.get("mapping_version"),
+                "strategy": opp.get("strategy"),
+                "vix_level": vix_snapshot.get("vix_level"),
+                "vix_source_time": source_time.isoformat() if source_time else None,
+                "vix_fetch_time": fetch_time.isoformat() if fetch_time else None,
+                "vix_age_seconds": vix_snapshot.get("age_seconds"),
+                "vix_status": vix_snapshot.get("status"),
+                "vix_used_stale_cache": vix_snapshot.get("used_stale_cache"),
+                "raw_confidence": raw_confidence,
+                "proposed_adjustment": shadow_proposed_adjustment,
+                "shadow_adjusted_confidence": shadow_adjusted_confidence,
+                "actual_decision_threshold": OVERNIGHT_MIN_CONFIDENCE,
+                "raw_crosses_threshold": raw_crosses_threshold,
+                "shadow_crosses_threshold": shadow_crosses_threshold,
+                "would_change_decision": shadow_crosses_threshold != raw_crosses_threshold,
+                "reasoning": shadow_mapping.get("reasoning"),
+                # Joins this shadow record back to autonomy/closed_trades.py's
+                # own trade_id once the trade (if any) is later closed -
+                # backfilled just before record_overnight_order below, once
+                # entry_client_order_id is known.
+                "ticker": ticker,
+                "trading_day": today_key,
+                "entry_client_order_id": None,
+            }
+        except Exception as shadow_error:  # noqa: BLE001 - shadow/research code must never affect the real scan
+            entry["regime_shadow"] = {"regime_mode": "shadow", "error": str(shadow_error)}
 
         # Optional second-opinion pass - only runs if the user configured
         # their own Anthropic key. Reviews the setup after it already passed
@@ -4894,6 +7013,13 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
             entry["status"] = "failed"
             entry["error"] = str(error)
             skipped.append(entry)
+        if isinstance(entry.get("regime_shadow"), dict):
+            # Backfilled here, not at construction time - entry_client_order_id
+            # is only set once ol.initialize runs inside
+            # _submit_and_protect_entry above, but this is the SAME entry
+            # dict, so the shadow record and the real submission outcome
+            # stay joinable in the one persisted overnight_order record.
+            entry["regime_shadow"]["entry_client_order_id"] = entry.get("entry_client_order_id")
         record_overnight_order(user_id, entry)
         if entry.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE:
             # Circuit breaker: an ambiguous submission means this account's
@@ -4951,11 +7077,27 @@ def api_autonomy_cron_trigger():
     """Called on a timer by a Render Cron Job, not by a logged-in browser -
     authenticated by a shared secret instead of a session cookie. Runs the
     scan for every registered user currently in AUTONOMOUS mode; does nothing
-    for everyone else."""
+    for everyone else.
+
+    Also does one LOCAL-ONLY (no broker calls) check per tick - not per
+    user - of the fast monitor's own heartbeat, alerting every admin
+    account if it's gone stale/was never configured (see
+    _alert_admins_fast_monitor_unhealthy_if_needed). This full 5-minute
+    scan is the one cron job that's already required regardless of
+    whether the faster optional monitor's own separate cron job was ever
+    set up, which is what makes it the right place to detect and surface
+    that the faster one is missing or stalled. Records its OWN heartbeat
+    (full_scan_heartbeat.py) around the whole per-user loop, which the
+    FASTER monitor's own endpoint cross-checks in the other direction -
+    see _alert_admins_full_scan_unhealthy_if_needed."""
     expected_secret = os.environ.get("CRON_SECRET", "").strip()
     provided_secret = request.headers.get("X-Cron-Secret", "").strip()
     if not expected_secret or not hmac.compare_digest(expected_secret, provided_secret):
         return _api_failure("Invalid or missing cron secret.", status_code=401, error_code="unauthorized", ok=False)
+
+    _alert_admins_fast_monitor_unhealthy_if_needed()
+    _alert_admins_continuous_monitor_unhealthy_if_needed()
+    run_id = record_full_scan_run_started()
 
     results = []
     for user_id in list_all_user_ids():
@@ -4976,7 +7118,293 @@ def api_autonomy_cron_trigger():
             except Exception as error:  # noqa: BLE001 - one user's failure shouldn't block others
                 results.append({"user_id": user_id, "ok": False, "error": str(error)})
 
+    record_full_scan_run_completed(
+        run_id,
+        ran_for_users=len(results),
+        failures_by_account={r["user_id"]: r["error"] for r in results if not r.get("ok")},
+    )
+
     return _api_success({"ran_for_users": len(results), "results": results}, ok=True, ran_for_users=len(results))
+
+
+@app.route("/api/autonomy/fast-monitor-trigger", methods=["POST"])
+def api_autonomy_fast_monitor_trigger():
+    """Called on a SHORT timer by a SEPARATE, more-frequent Render Cron Job
+    than the one hitting /api/autonomy/cron-trigger above (that one runs
+    the full 5-minute scan). Runs ONLY _run_fast_order_monitor for each
+    user _user_needs_fast_monitor_pass says has something to check -
+    reconciliation/resumption passes, never the market-scan/new-candidate-
+    sizing work the full scan does - see that function's docstring for
+    exactly why that narrow scope is what makes this safe to run this
+    often.
+
+    CADENCE CORRECTION (confirmed against Render's own docs this session,
+    since this had previously been described as "30-60 seconds" without
+    verification): Render Cron Jobs use standard cron expression syntax,
+    whose minimum resolution is ONE MINUTE - there is no native way to
+    schedule a Render Cron Job more often than once per minute. The
+    realistic cadence for this endpoint via a native Render Cron Job is
+    therefore ~60 seconds, not 30-60. A Render Cron Job also does not
+    natively call an HTTP endpoint - it runs an arbitrary shell command in
+    a container on each firing, so the actual cron job configuration must
+    literally be a curl command, e.g.:
+        curl -X POST -H "X-Cron-Secret: $CRON_SECRET" https://<this-app>/api/autonomy/fast-monitor-trigger
+    with CRON_SECRET set as an environment variable on THAT Cron Job
+    service (Render env vars are per-service, not shared automatically
+    with the main web service).
+
+    Deliberately NOT filtered by autonomy mode (unlike the cron-trigger
+    endpoint above, whose _run_autonomous_trade_scan call legitimately
+    IS AUTONOMOUS-only, since THAT work includes placing new entries) -
+    see _user_needs_fast_monitor_pass: "safety monitoring must continue
+    when autonomy is switched OFF - OFF prevents new entries only". A
+    user who turned autonomy off is still fully covered here as long as
+    they have anything transitional, tracked, or unresolved.
+
+    This endpoint existing does NOT, on its own, make the fast monitor
+    active - the Render Cron Job described above still needs to be set up
+    separately (outside this repo). Until then, _run_autonomous_trade_scan_locked's
+    own direct call to _monitor_transitional_orders is the only thing
+    resuming ordinary transitional orders, at the slower 5-minute cadence -
+    and that call is STILL gated by AUTONOMOUS mode today, since it only
+    runs as part of the full scan the cron-trigger endpoint already
+    restricts that way.
+
+    Records a heartbeat (fast_monitor_heartbeat.py) around the ENTIRE
+    sweep - a "started" stamp before the per-user loop, a "completed"
+    stamp (with aggregate entries-checked/still-transitional counts and a
+    per-account failure map) after it - regardless of how many users had
+    anything to do. "Adding an endpoint is insufficient" without a way to
+    tell whether its scheduler is actually calling it: see
+    _fast_monitor_health_status, which the full 5-minute scan and the
+    admin-wide banner both surface a "monitor unhealthy" signal from if
+    this heartbeat goes stale.
+
+    Also does the CROSS-CHECK in the other direction - checks the FULL
+    scan's own heartbeat (_alert_admins_full_scan_unhealthy_if_needed) and
+    alerts if IT has gone stale. Neither scheduler can detect its own
+    silence; each can only detect the OTHER'S. See that function's
+    docstring for the residual gap this still leaves (both stopping at
+    once) and api_autonomy_monitor_health, the external, unauthenticated
+    endpoint that exists specifically to close it via a third-party uptime
+    monitor."""
+    expected_secret = os.environ.get("CRON_SECRET", "").strip()
+    provided_secret = request.headers.get("X-Cron-Secret", "").strip()
+    if not expected_secret or not hmac.compare_digest(expected_secret, provided_secret):
+        return _api_failure("Invalid or missing cron secret.", status_code=401, error_code="unauthorized", ok=False)
+
+    _alert_admins_full_scan_unhealthy_if_needed()
+    run_id = record_fast_monitor_run_started()
+    results = []
+    failures_by_account: Dict[str, str] = {}
+    total_entries_checked = 0
+    total_still_transitional = 0
+    for user_id in list_all_user_ids():
+        # _user_needs_fast_monitor_pass alone would skip a user with ZERO
+        # local records - but that is EXACTLY the orphan-discovery case
+        # (see _discover_orphaned_broker_entries, now called from inside
+        # _run_fast_order_monitor): local state can't identify a missing
+        # local write, so a Webull-configured user must still get a pass
+        # even with nothing locally transitional. is_webull_configured is
+        # a cheap, local-only check; _run_fast_order_monitor's own setup
+        # still validates the account is actually connected and raises
+        # ValidationError (caught below, same as any other per-user
+        # failure) if not.
+        if not (_user_needs_fast_monitor_pass(user_id) or is_webull_configured(user_id)):
+            continue
+        with app.test_request_context():
+            session["user_id"] = user_id
+            try:
+                monitor_result = _run_fast_order_monitor(user_id)
+                results.append({"user_id": user_id, "ok": True, **monitor_result})
+                total_entries_checked += int(monitor_result.get("entries_checked") or 0)
+                total_still_transitional += int(monitor_result.get("still_transitional_count") or 0)
+            except ScanAlreadyRunningError:
+                # Benign, expected overlap with a concurrent full scan (or
+                # another fast tick) for the same user - skip, the next
+                # tick will try again shortly.
+                results.append({"user_id": user_id, "ok": True, "skipped": "scan_already_running"})
+            except Exception as error:  # noqa: BLE001 - one user's failure shouldn't block others
+                results.append({"user_id": user_id, "ok": False, "error": str(error)})
+                failures_by_account[user_id] = str(error)
+
+    record_fast_monitor_run_completed(
+        run_id,
+        entries_checked=total_entries_checked,
+        still_transitional=total_still_transitional,
+        failures_by_account=failures_by_account,
+    )
+
+    return _api_success({"ran_for_users": len(results), "results": results}, ok=True, ran_for_users=len(results))
+
+
+@app.route("/api/autonomy/continuous-monitor-tick", methods=["POST"])
+def api_autonomy_continuous_monitor_tick():
+    """Option A (per explicit reviewer decision): the endpoint a SEPARATE,
+    independently-deployed worker process (a Render Background Worker -
+    see continuous_monitor_worker.py, NOT part of this web service) calls
+    on a tight loop (default CONTINUOUS_MONITOR_DEFAULT_INTERVAL_SECONDS,
+    10s) to reconcile active orders far faster than the ~60s fast-monitor
+    cron or the 5-minute full scan can. The worker itself has NO disk
+    access and NO Webull credentials - it is a supervised scheduler only;
+    THIS endpoint, which already owns the persistent disk and every
+    user's encrypted credentials, is what actually performs reconciliation,
+    by calling _run_fast_order_monitor per user - the exact same,
+    already-tested, never-scans-never-places-entries function the
+    ~60s cron-triggered fast-monitor-trigger endpoint calls (see
+    test_fast_monitor_never_scans_scores_or_places_a_new_entry, which
+    covers this call path too).
+
+    AUTHENTICATION - a DEDICATED secret (MONITOR_WORKER_SECRET), NOT
+    CRON_SECRET: this endpoint is meant to be called far more frequently,
+    from a differently-deployed process, and rotating/revoking its
+    credential should never require also rotating the slower cron jobs'
+    shared secret. Same constant-time comparison (hmac.compare_digest)
+    already used for CRON_SECRET elsewhere in this file - never a plain
+    `==`, which would leak timing information about how many leading
+    characters matched.
+
+    NEVER scans for candidates or places entry orders - structurally
+    true, not merely documented: this calls _run_fast_order_monitor,
+    which only ever calls _discover_orphaned_broker_entries,
+    _reconcile_exit_orders, _reconcile_unknown_submissions,
+    _recover_incomplete_manual_resolutions, and _monitor_transitional_orders -
+    none of which touch get_market_data/build_strategy_intelligence/
+    _submit_and_protect_entry/webull_api.place_stock_order.
+
+    Includes every user with unfinished orders REGARDLESS of autonomy
+    mode - same _user_needs_fast_monitor_pass(user_id) or
+    is_webull_configured(user_id) gate as the fast-monitor-trigger
+    endpoint (see that endpoint's own comment for why the OR is
+    necessary: local state alone can't identify a user needing orphan
+    discovery).
+
+    NO OVERLAPPING REQUESTS, enforced at two independent layers:
+      - the WORKER itself must never fire the next request before the
+        previous one returns or times out (see continuous_monitor_worker.py -
+        a strictly sequential loop, not a fire-and-forget interval timer);
+      - belt-and-suspenders on THIS side: continuous_monitor_tick_lock()
+        is a GLOBAL, non-blocking lock - if a previous tick's per-user
+        loop is somehow still running when a new request arrives (a
+        worker bug, a duplicate deploy, a retried request racing the
+        original), this one returns 409 immediately rather than doing
+        redundant/racy work. Existing PER-ACCOUNT locks
+        (scan_lock.user_scan_lock, held inside _run_fast_order_monitor)
+        remain the actual authoritative data-race protection regardless -
+        this global lock only prevents wasted duplicate WORK, since any
+        real per-user conflict was already impossible before this lock
+        existed.
+
+    Records TWO heartbeat signals (continuous_monitor_heartbeat.py) -
+    "worker reached us" (stamped before the lock, so recorded even on a
+    409-skip) and "reconciliation completed" (stamped after the per-user
+    loop) - see that module's docstring for why both are needed
+    independently."""
+    expected_secret = os.environ.get("MONITOR_WORKER_SECRET", "").strip()
+    provided_secret = request.headers.get("X-Monitor-Worker-Secret", "").strip()
+    if not expected_secret or not hmac.compare_digest(expected_secret, provided_secret):
+        return _api_failure("Invalid or missing monitor worker secret.", status_code=401, error_code="unauthorized", ok=False)
+
+    run_id = record_continuous_monitor_request_received()
+
+    try:
+        with continuous_monitor_tick_lock():
+            results = []
+            failures_by_account: Dict[str, str] = {}
+            total_entries_checked = 0
+            total_still_transitional = 0
+            for user_id in list_all_user_ids():
+                if not (_user_needs_fast_monitor_pass(user_id) or is_webull_configured(user_id)):
+                    continue
+                with app.test_request_context():
+                    session["user_id"] = user_id
+                    try:
+                        monitor_result = _run_fast_order_monitor(user_id)
+                        results.append({"user_id": user_id, "ok": True, **monitor_result})
+                        total_entries_checked += int(monitor_result.get("entries_checked") or 0)
+                        total_still_transitional += int(monitor_result.get("still_transitional_count") or 0)
+                    except ScanAlreadyRunningError:
+                        # Benign, expected overlap with a concurrent full
+                        # scan (or fast-monitor tick) for the SAME user -
+                        # skip, the next tick will try again shortly.
+                        results.append({"user_id": user_id, "ok": True, "skipped": "scan_already_running"})
+                    except Exception as error:  # noqa: BLE001 - one user's failure shouldn't block others
+                        results.append({"user_id": user_id, "ok": False, "error": str(error)})
+                        failures_by_account[user_id] = str(error)
+
+            record_continuous_monitor_reconciliation_completed(
+                run_id,
+                entries_checked=total_entries_checked,
+                still_transitional=total_still_transitional,
+                failures_by_account=failures_by_account,
+            )
+    except ContinuousMonitorTickAlreadyRunningError as error:
+        # Deliberately does NOT call record_continuous_monitor_reconciliation_completed -
+        # no reconciliation actually happened this request. "Worker
+        # reached us" was already recorded above regardless.
+        return _api_failure(str(error), status_code=409, error_code="continuous_monitor_tick_already_running", ok=False)
+
+    return _api_success({"ran_for_users": len(results), "results": results}, ok=True, ran_for_users=len(results))
+
+
+@app.route("/api/autonomy/monitor-health", methods=["GET"])
+def api_autonomy_monitor_health():
+    """DELIBERATELY UNAUTHENTICATED (no CRON_SECRET, no session) and
+    read-only - the residual gap neither in-app scheduler can close on its
+    own: _alert_admins_fast_monitor_unhealthy_if_needed and
+    _alert_admins_full_scan_unhealthy_if_needed each let ONE scheduler
+    detect the OTHER going silent, but if BOTH stop firing at the exact
+    same time (e.g. the whole web service is down, or both Render Cron
+    Jobs were deleted together), neither cross-check ever runs, and
+    nothing inside this app can notice its own total silence. This
+    endpoint exists so an EXTERNAL, independent uptime service (e.g.
+    UptimeRobot, Healthchecks.io, Render's own health checks pointed at a
+    custom path) can poll it on its own schedule and alert through a
+    completely separate channel (email/SMS/PagerDuty) if it ever stops
+    responding at all - closing that gap requires configuring such a
+    service in the operator's own account; this endpoint is the piece
+    this app can provide, not a substitute for actually setting one up.
+
+    MINIMAL response shape, deliberately - reviewer instruction: no
+    per-scheduler breakdown, no reasons, no heartbeat internals, no user
+    IDs, no account details, no error text, no paths, no secrets. Just:
+        {"healthy": bool, "last_completed_age_seconds": number | null}
+    A human-readable "why" (which scheduler, what error) is already
+    available to admins via _build_page_context's fast_monitor_health/
+    full_scan_health fields (session-authenticated, admin-only) - this
+    public, unauthenticated surface exists ONLY so an external uptime
+    service can detect total silence, not to explain it. GET, not POST
+    (no CRON_SECRET to protect it with), and NOT registered in
+    _TOKEN_AUTH_PATHS - see _PUBLIC_PATHS, where this path is listed
+    instead, so the global before_request session-auth gate never blocks
+    an external caller with no session either.
+
+    last_completed_age_seconds is the WORST (largest / most stale) age
+    across every tracked scheduler, rounded to a whole second - "how long
+    since the least-recently-healthy signal last completed" - null only
+    if a scheduler has literally never run even once (age is undefined,
+    not merely large).
+
+    Tracks THREE schedulers as of the continuous-monitor (Option A) work:
+    fast_monitor, full_scan, and continuous_monitor. overall_healthy
+    requires ALL THREE to be healthy - once the continuous-monitor worker
+    is actually deployed, this endpoint will correctly report unhealthy
+    if IT alone goes quiet, even while the two slower schedulers are
+    fine, since it's now the PRIMARY safety mechanism. Before the worker
+    is deployed at all, continuous_monitor's own health check reports
+    unhealthy with age_seconds=None (never called) - deploying this
+    endpoint code before the worker exists will make this report
+    unhealthy; that is an accurate reflection of the architecture this
+    endpoint now describes, not a bug, and is exactly why the worker
+    should be deployed at the same time as - or before - this code."""
+    fast_monitor = _fast_monitor_health_status()
+    full_scan = _full_scan_health_status()
+    continuous_monitor = _continuous_monitor_health_status()
+    overall_healthy = bool(fast_monitor.get("healthy")) and bool(full_scan.get("healthy")) and bool(continuous_monitor.get("healthy"))
+    ages = [a for a in (fast_monitor.get("age_seconds"), full_scan.get("age_seconds"), continuous_monitor.get("age_seconds")) if a is not None]
+    last_completed_age_seconds = round(max(ages)) if ages else None
+    payload = {"healthy": overall_healthy, "last_completed_age_seconds": last_completed_age_seconds}
+    return _api_success(payload, status_code=200 if overall_healthy else 503, **payload)
 
 
 @app.route("/api/accounts", methods=["GET"])

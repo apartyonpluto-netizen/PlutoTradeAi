@@ -107,12 +107,25 @@ def add_manual_alert(user_id: str, payload: Dict[str, str]) -> Dict[str, str]:
     message = (payload.get("message", "") or "").strip()
     if not message:
         raise ValueError("Alert message is required.")
+    # "critical" is reserved for conditions that need IMMEDIATE human
+    # attention - an accidental short position, a resize that left a leg
+    # genuinely unprotected, a monitor freeze - anything else defaults to
+    # "normal" and renders identically to today. Deliberately NOT folded
+    # into _build_alert_id's hash (still type|ticker|message only, exactly
+    # as before this field existed) - that would change every existing
+    # alert's id format and break both dedup for anything already on disk
+    # and the "repeated calls collapse to one alert" contract other
+    # callers (e.g. the fast-monitor-unhealthy alert) rely on.
+    priority = (payload.get("priority", "normal") or "normal").strip().lower()
+    if priority not in ("normal", "critical"):
+        priority = "normal"
 
     alert = {
         "id": _build_alert_id(alert_type=alert_type, ticker=ticker, message=message),
         "type": alert_type,
         "ticker": ticker,
         "message": message,
+        "priority": priority,
         "source": "manual",
         "created_at": _now_iso(),
     }

@@ -52,3 +52,44 @@ def user_scan_lock(user_id: str) -> Iterator[None]:
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         fd.close()
+
+
+class ContinuousMonitorTickAlreadyRunningError(PlutoTradeError):
+    """Raised when a continuous-monitor-tick request arrives while a
+    PRIOR tick's per-user loop is still running - belt-and-suspenders
+    against overlapping requests at the ENDPOINT level, on top of (not
+    instead of) the worker's own "never fire the next request before the
+    previous one returns" discipline and the per-account
+    user_scan_lock/ScanAlreadyRunningError that already makes any actual
+    per-user DATA race structurally impossible regardless. This is GLOBAL
+    (one lock, not per-user), since the entire per-user loop for one tick
+    is the unit of work being protected against duplication, not any
+    single account's data."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message=message, status_code=409, error_code="continuous_monitor_tick_already_running", details={})
+
+
+@contextmanager
+def continuous_monitor_tick_lock() -> Iterator[None]:
+    """GLOBAL (not per-user) OS-level file lock, non-blocking - same
+    fcntl.flock mechanics as user_scan_lock, but scoped to the whole
+    continuous-monitor-tick endpoint rather than one account. See
+    ContinuousMonitorTickAlreadyRunningError's docstring for why this
+    exists ON TOP OF, not instead of, the per-account locks the per-user
+    reconciliation work inside the tick already holds."""
+    lock_path = DATA_DIR / ".continuous_monitor_tick.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fd = open(lock_path, "w")
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ContinuousMonitorTickAlreadyRunningError("A continuous-monitor tick is already running - skipping this request.")
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        fd.close()

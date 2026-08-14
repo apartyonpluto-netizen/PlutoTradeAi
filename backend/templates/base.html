@@ -186,6 +186,28 @@
         </div>
         {% endif %}
 
+        {% if fast_monitor_health and not fast_monitor_health.healthy %}
+        <div class="ambiguous-freeze-banner admin-wide-freeze-banner" role="alert" id="fastMonitorUnhealthyBanner">
+            <strong>Fast order monitor unhealthy.</strong>
+            {{ fast_monitor_health.reason }}. This monitor is what protects fills and detects exits between the
+            regular 5-minute scans platform-wide - while it is not running, positions still rely on the slower
+            5-minute scan for protection and exit detection. This is visible only to administrators. Check the
+            scheduler configuration for the fast-monitor-trigger endpoint. This banner clears automatically once a
+            recent run is recorded.
+        </div>
+        {% endif %}
+
+        {% if full_scan_health and not full_scan_health.healthy %}
+        <div class="ambiguous-freeze-banner admin-wide-freeze-banner" role="alert" id="fullScanUnhealthyBanner">
+            <strong>Full autonomous scan unhealthy.</strong>
+            {{ full_scan_health.reason }}. This is the scan that places new autonomous entries and resumes ordinary
+            transitional orders when the faster monitor isn't configured - platform-wide, no accounts are getting
+            new autonomous trades or their regular 5-minute reconciliation pass while this is stale. This is
+            visible only to administrators. Check the scheduler configuration for the cron-trigger endpoint. This
+            banner clears automatically once a recent run is recorded.
+        </div>
+        {% endif %}
+
         {% block content %}{% endblock %}
     </main>
 </div>
@@ -207,7 +229,7 @@
 
     <div id="alertList">
         {% for alert in alerts %}
-        <div class="alert-row {{ 'alert-read' if alert.read else '' }}" data-alert-id="{{ alert.id }}">
+        <div class="alert-row {{ 'alert-read' if alert.read else '' }} {{ 'alert-critical' if alert.priority == 'critical' else '' }}" data-alert-id="{{ alert.id }}">
             <div>
                 <b>{{ alert.category }}</b>
                 <time class="alert-time" data-timestamp="{{ alert.created_at or '' }}">--</time>

@@ -1140,6 +1140,17 @@ select:focus {
     background: rgba(137, 83, 198, 0.15);
 }
 
+.alert-row.alert-critical {
+    border: 1px solid var(--negative);
+    border-left-width: 4px;
+    background: rgba(229, 72, 77, 0.12);
+}
+
+.alert-row.alert-critical b::before {
+    content: "CRITICAL \2014 ";
+    color: var(--negative);
+}
+
 .alert-row p {
     margin: 4px 0 0;
     color: var(--text-secondary);

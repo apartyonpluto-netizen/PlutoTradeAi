@@ -135,7 +135,7 @@ const renderAlertList = (listNode, alerts = []) => {
   listNode.innerHTML = alerts
     .map(
       (alert) => `
-      <div class="alert-row ${alert.read ? "alert-read" : ""}" data-alert-id="${escapeHtml(alert.id)}">
+      <div class="alert-row ${alert.read ? "alert-read" : ""} ${alert.priority === "critical" ? "alert-critical" : ""}" data-alert-id="${escapeHtml(alert.id)}">
         <div>
           <b>${escapeHtml(alert.category || alert.type || "System")}</b>
           <time class="alert-time" data-timestamp="${escapeHtml(alert.created_at || "")}">${escapeHtml(formatRelativeTime(alert.created_at))}</time>

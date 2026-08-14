@@ -150,6 +150,41 @@
     </table>
 </section>
 
+<section class="panel panel-table">
+    <div class="panel-head"><h3>Autonomous Closed Trades &mdash; Realized P&amp;L</h3><span>{{ closed_trades|length }} closed</span></div>
+    <p class="muted">
+        The durable, conclusively-recorded outcome of every autonomous position this app has confirmed CLOSED &mdash;
+        built from each protective leg's own broker status, never inferred merely because a position disappeared.
+        This is the authoritative source for realized P&amp;L; the sandbox sell-order log above is a raw order log,
+        not this reconciled record.
+    </p>
+    <table>
+        <thead><tr><th>Ticker</th><th>Filled Qty</th><th>Avg Entry</th><th>Exit Type</th><th>Avg Exit</th><th>Realized P&amp;L</th><th>Close Reason</th><th>Exited</th></tr></thead>
+        <tbody>
+        {% for trade in closed_trades %}
+        <tr>
+            <td>{{ trade.ticker }}</td>
+            <td>{{ trade.filled_quantity }}</td>
+            <td>${{ "%.2f"|format(trade.average_entry_price|float) if trade.average_entry_price is not none else "—" }}</td>
+            <td>{{ trade.exit_type|upper if trade.exit_type else "—" }}</td>
+            <td>${{ "%.2f"|format(trade.average_exit_price|float) if trade.average_exit_price is not none else "—" }}</td>
+            <td class="{{ 'tone-positive' if trade.net_realized_pnl and trade.net_realized_pnl|float > 0 else 'tone-negative' if trade.net_realized_pnl and trade.net_realized_pnl|float < 0 else '' }}">
+                {% if trade.net_realized_pnl is not none %}
+                    ${{ "%.2f"|format(trade.net_realized_pnl|float) }}
+                {% else %}
+                    <span title="The broker response for this trade's entry and/or exit didn't report an average fill price - P&amp;L was never estimated from a planned price as a substitute.">Incomplete</span>
+                {% endif %}
+            </td>
+            <td>{{ trade.close_reason or "—" }}</td>
+            <td class="alert-time" data-timestamp="{{ trade.exit_timestamp or '' }}">--</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8" class="muted">No autonomous positions have been conclusively closed yet.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
 {% set open_paper_trades = paper_trades|selectattr("status", "equalto", "Open")|list %}
 {% set closed_paper_trades = paper_trades|rejectattr("status", "equalto", "Open")|list %}
 

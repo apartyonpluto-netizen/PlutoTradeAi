@@ -37,6 +37,7 @@ def _run_scan_with_mocks(user_id, opportunities, record_overnight_order_mock):
          patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"), \
          patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
          patch.object(pluto_app.webull_api, "get_open_orders", return_value=[]), \
+         patch.object(pluto_app.webull_api, "get_order_history", return_value=[]), \
          patch.object(
              pluto_app.webull_api,
              "get_account_balance",
@@ -84,6 +85,45 @@ def _candidates():
     ]
 
 
+def test_deployment_kill_switch_blocks_new_entries_but_reconciliation_still_ran(user_id, monkeypatch):
+    """The deployment-level kill switch must block every new entry
+    platform-wide while leaving reconciliation/exit-monitoring/protection
+    work running exactly as normal - proven here by asserting BOTH halves:
+    zero entries placed, AND the reconciliation mocks were still called."""
+    monkeypatch.setenv("PLUTO_DISABLE_NEW_ENTRIES", "true")
+    with patch.object(pluto_app, "get_webull_credentials", return_value=CREDS), \
+         patch.object(pluto_app, "is_webull_configured", return_value=True), \
+         patch.object(pluto_app, "get_anthropic_api_key", return_value=""), \
+         patch.object(pluto_app, "get_accounts", return_value=[{"platform": "webull", "status": "Connected"}]), \
+         patch.object(pluto_app.webull_api, "get_paper_accounts", return_value=[{"account_id": "acct-1"}]), \
+         patch.object(pluto_app.webull_api, "find_individual_cash_account", return_value={"account_id": "acct-1"}), \
+         patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"), \
+         patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
+         patch.object(pluto_app.webull_api, "get_open_orders", return_value=[]), \
+         patch.object(pluto_app.webull_api, "get_order_history", return_value=[]), \
+         patch.object(
+             pluto_app.webull_api, "get_account_balance",
+             return_value={"total_net_liquidation_value": 100000.0, "total_day_profit_loss": 0.0, "account_currency_assets": [{"buying_power": "1000000"}]},
+         ), \
+         patch.object(pluto_app, "_build_page_context", return_value={"upcoming_opportunities": _candidates()}), \
+         patch.object(pluto_app, "_submit_and_protect_entry") as mock_submit, \
+         patch.object(pluto_app, "_reconcile_exit_orders") as mock_reconcile_exit, \
+         patch.object(pluto_app, "_discover_orphaned_broker_entries") as mock_orphan_discover, \
+         patch.object(pluto_app, "_monitor_transitional_orders", return_value=False) as mock_monitor, \
+         patch.object(pluto_app, "time"):
+        result = pluto_app._run_autonomous_trade_scan_locked(user_id)
+
+    mock_submit.assert_not_called()  # no new entry attempted at all
+    assert result["placed_count"] == 0
+    for item in result["skipped"]:
+        assert "kill switch" in item["reason_skipped"]
+
+    # Reconciliation/exit-monitoring/protection work ran anyway.
+    mock_reconcile_exit.assert_called_once()
+    mock_orphan_discover.assert_called_once()
+    mock_monitor.assert_called_once()
+
+
 def test_scan_places_both_candidates_when_recording_never_fails(user_id):
     # Sanity check for the mocking harness itself, before proving the
     # failure case below - both candidates should place normally.
@@ -120,6 +160,7 @@ def test_disk_write_failure_recording_an_entry_halts_the_rest_of_the_scan(user_i
          patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"), \
          patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
          patch.object(pluto_app.webull_api, "get_open_orders", return_value=[]), \
+         patch.object(pluto_app.webull_api, "get_order_history", return_value=[]), \
          patch.object(
              pluto_app.webull_api,
              "get_account_balance",
@@ -169,6 +210,7 @@ def test_ambiguous_submission_circuit_breaker_halts_the_scan(user_id):
          patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"), \
          patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
          patch.object(pluto_app.webull_api, "get_open_orders", return_value=[]), \
+         patch.object(pluto_app.webull_api, "get_order_history", return_value=[]), \
          patch.object(
              pluto_app.webull_api,
              "get_account_balance",

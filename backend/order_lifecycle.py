@@ -80,6 +80,48 @@ ALL_STATES = {
 # lifecycle_state has already moved past everything in this set.
 FROZEN_STATES = {UNKNOWN_SUBMISSION_STATE, MANUAL_LINK_IN_PROGRESS}
 
+# Every state an ORDINARY (non-ambiguous-submission, non-manual-link)
+# entry can be sitting in when the process dies mid-flight, up through
+# (but not including) a first successful protection confirmation.
+# Deliberately excludes CLOSED/ENTRY_FAILED (nothing left to do) and
+# excludes FROZEN_STATES above (those have their OWN dedicated
+# reconciliation, with their own audit/evidence requirements - see
+# _reconcile_unknown_submissions and _recover_incomplete_manual_resolutions
+# in app.py). See app.py's _monitor_transitional_orders, the fast
+# per-order monitor that resumes every entry in one of these states.
+#
+# NOTE: PROTECTION_CONFIRMED_ACTIVE is intentionally NOT here even though
+# it also needs ongoing monitoring - see FILL_MONITORING_STATES below for
+# why that's a separate, broader set.
+MONITOR_RESUMABLE_STATES = {
+    ENTRY_SUBMITTED,
+    ENTRY_PARTIALLY_FILLED,
+    ENTRY_FILLED,
+    PROTECTION_PENDING,
+    PROTECTION_FAILED,
+}
+
+# MONITOR_RESUMABLE_STATES plus PROTECTION_CONFIRMED_ACTIVE - the broader
+# set of states where an entry might STILL need broker-side reconciliation
+# even though its FIRST protection confirmation already succeeded. Two
+# independent reasons an entry at PROTECTION_CONFIRMED_ACTIVE can still
+# need attention, both checked by app.py's fast monitor:
+#   - the underlying entry order might not be broker-terminal yet (a day
+#     limit order can keep filling MORE shares after an earlier partial
+#     fill was already protected) - see entry["entry_order_terminal"] and
+#     _reconcile_entry_fill_and_protection, which resizes protection to
+#     match the broker's latest cumulative fill. VALID_TRANSITIONS
+#     deliberately allows PROTECTION_CONFIRMED_ACTIVE -> PROTECTION_PENDING
+#     for exactly this resize case - "a transition to PROTECTION_PENDING
+#     must not stop fill monitoring" is what this state's continued
+#     membership here is for;
+#   - the position may have EXITED (a stop or target leg filled) without
+#     this app having noticed yet - see _reconcile_position_exit, which
+#     confirms which leg (if either) actually executed directly from its
+#     own broker status, never by inferring exit from the position simply
+#     no longer appearing in the broker's positions list.
+FILL_MONITORING_STATES = MONITOR_RESUMABLE_STATES | {PROTECTION_CONFIRMED_ACTIVE}
+
 # Terminal states need no further monitoring. Everything else is
 # "transitional" - the set the fast monitor and restart-recovery scan both
 # look for (see monitor scan logic in app.py / order_monitor.py).
@@ -200,20 +242,61 @@ def deterministic_client_order_id(user_id: str, ticker: str, trading_day: str, l
     return "pt" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:30]
 
 
+# Candidate field names for a leg's average/actual FILL PRICE, tried in
+# order against a get_order_detail response. NONE of these has been
+# empirically confirmed present in a real Webull response this session -
+# the only shape "confirmed live" so far (see summarize_fill's docstring)
+# is status/total_quantity/filled_quantity/order_id, with no price field
+# observed. This list is a best-effort extraction attempt, not a verified
+# contract: summarize_fill treats a response with none of these keys as
+# "fill price unknown" (average_price=None), which is the CORRECT and
+# REQUIRED behavior either way - a missing/unconfirmed field name and a
+# broker response that genuinely omits the price are indistinguishable
+# from here, and both must fail closed into "unknown", never fall back to
+# a proposed/planned price silently standing in as if it were real.
+_FILL_PRICE_FIELD_CANDIDATES = (
+    "avg_filled_price",
+    "avgFilledPrice",
+    "filled_price",
+    "avg_price",
+    "average_price",
+    "averagePrice",
+)
+
+
 def summarize_fill(order_detail: Dict[str, object]) -> Dict[str, object]:
     """Extracts the fields this app actually needs from a Webull
     get_order_detail response - real shape confirmed live this session:
     {"orders": [{"status": "FILLED", "total_quantity": "1", "filled_quantity": "1", ...}]}.
     Returns zeros/UNKNOWN for a response with no matching leg rather than
     raising, since a not-yet-visible order is a normal transient state for a
-    monitor poll, not an error."""
+    monitor poll, not an error.
+
+    average_price is best-effort (see _FILL_PRICE_FIELD_CANDIDATES) and
+    None whenever no candidate field is present - callers computing
+    realized P&L MUST treat None as "unknown", never substitute a planned/
+    proposed price (limit_price, stop, target) as if it were the real
+    fill price. See _reconcile_position_exit in app.py, which marks a
+    closed trade's P&L incomplete rather than estimating it when this is
+    None for either leg."""
     orders = order_detail.get("orders") or []
     leg = orders[0] if orders else {}
     total_quantity = float(leg.get("total_quantity", 0) or 0)
     filled_quantity = float(leg.get("filled_quantity", 0) or 0)
+    average_price: Optional[float] = None
+    for field_name in _FILL_PRICE_FIELD_CANDIDATES:
+        raw_value = leg.get(field_name)
+        if raw_value in (None, "", "0", 0):
+            continue
+        try:
+            average_price = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        break
     return {
         "status": str(leg.get("status", "UNKNOWN")),
         "total_quantity": total_quantity,
         "filled_quantity": filled_quantity,
         "order_id": leg.get("order_id", ""),
+        "average_price": average_price,
     }

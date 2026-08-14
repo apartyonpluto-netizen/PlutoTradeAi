@@ -314,7 +314,15 @@ def test_summarize_fill_extracts_from_real_response_shape():
         ],
     }
     summary = ol.summarize_fill(response)
-    assert summary == {"status": "FILLED", "total_quantity": 10.0, "filled_quantity": 10.0, "order_id": "HVJKDIDP6LNU0DUMND87DG16TA"}
+    assert summary == {
+        "status": "FILLED",
+        "total_quantity": 10.0,
+        "filled_quantity": 10.0,
+        "order_id": "HVJKDIDP6LNU0DUMND87DG16TA",
+        # This REAL captured response has no fill-price field at all -
+        # confirms average_price must default to None, not a guess.
+        "average_price": None,
+    }
 
 
 def test_summarize_fill_handles_partial():
@@ -329,3 +337,23 @@ def test_summarize_fill_handles_missing_orders_list_without_raising():
     assert summary["status"] == "UNKNOWN"
     assert summary["filled_quantity"] == 0.0
     assert summary["total_quantity"] == 0.0
+    assert summary["average_price"] is None
+
+
+def test_summarize_fill_extracts_average_price_when_present():
+    """Best-effort - tries several plausible field names since none has
+    been empirically confirmed against a real Webull response (see
+    _FILL_PRICE_FIELD_CANDIDATES)."""
+    for field_name in ("avg_filled_price", "avgFilledPrice", "filled_price", "avg_price", "average_price", "averagePrice"):
+        response = {"orders": [{"status": "FILLED", "total_quantity": "10", "filled_quantity": "10", "order_id": "X", field_name: "123.45"}]}
+        summary = ol.summarize_fill(response)
+        assert summary["average_price"] == 123.45, f"field {field_name} was not extracted"
+
+
+def test_summarize_fill_ignores_a_zero_or_blank_price_field():
+    """A zero/empty price is treated the same as absent - never trusted as
+    a genuine $0.00 fill price, which would silently corrupt P&L math."""
+    for bad_value in ("0", 0, "", None):
+        response = {"orders": [{"status": "FILLED", "total_quantity": "10", "filled_quantity": "10", "order_id": "X", "avg_filled_price": bad_value}]}
+        summary = ol.summarize_fill(response)
+        assert summary["average_price"] is None
