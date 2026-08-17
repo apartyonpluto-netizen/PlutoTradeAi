@@ -1,0 +1,52 @@
+name: Fast monitor scheduler
+
+# Fires the live app's fast-monitor-trigger endpoint on the same 5-minute
+# GitHub Actions granularity as the full scan, but OFFSET by 2 minutes (see
+# the cron expression below) so the two schedules interleave rather than
+# always firing in the same instant - if one run is delayed by GitHub's own
+# queue (observed this session: real-world cadence can drift toward roughly
+# hourly even on a */5 schedule), the other still has a chance to land
+# in between.
+#
+# This endpoint is deliberately narrower than cron-trigger: reconciliation/
+# resumption passes only (no market scan, no new entries, no LLM calls -
+# see api_autonomy_fast_monitor_trigger's own docstring in app.py), and it
+# runs for every Webull-configured account regardless of autonomy mode, not
+# just AUTONOMOUS-mode ones.
+#
+# Honesty check: GitHub Actions cannot actually deliver the sub-minute
+# cadence this endpoint was originally designed for (see fast_order_monitor
+# in app.py) - that job now belongs to the plutotradeai-continuous-monitor
+# Render Background Worker, which polls every ~10 seconds via a dedicated,
+# supervised process. This workflow exists as an INDEPENDENT FALLBACK LAYER,
+# not a replacement for that worker - if the worker service is ever down,
+# deleted, or out of Render credits, this still provides a reconciliation
+# pass roughly every 5(-ish) minutes during market hours, and its own
+# heartbeat feeds the three-way cross-scheduler watchdog
+# (_fast_monitor_health_status / /api/autonomy/monitor-health) so that gap
+# would actually be visible instead of silent.
+#
+# Reuses the SAME CRON_SECRET repository secret already configured for the
+# autonomous-scan-scheduler workflow - fast-monitor-trigger authenticates
+# with the identical X-Cron-Secret header/env var, not the separate
+# MONITOR_WORKER_SECRET the continuous-monitor worker uses.
+on:
+  schedule:
+    - cron: "2-57/5 13-21 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  trigger-fast-monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call the fast-monitor-trigger endpoint
+        run: |
+          response=$(curl -s -o /tmp/response.json -w "%{http_code}" \
+            -X POST "https://plutotradeai-tqsl.onrender.com/api/autonomy/fast-monitor-trigger" \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}")
+          echo "HTTP status: $response"
+          cat /tmp/response.json
+          if [ "$response" -ne 200 ]; then
+            echo "Fast-monitor trigger failed with status $response"
+            exit 1
+          fi
