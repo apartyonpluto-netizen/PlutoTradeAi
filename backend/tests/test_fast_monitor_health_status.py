@@ -32,12 +32,15 @@ def test_recent_clean_completion_is_healthy():
 
 def test_stale_completed_run_is_unhealthy():
     """The most recent run finished cleanly, but that was a long time ago -
-    the scheduler has stopped calling the fast-monitor-trigger endpoint."""
+    the scheduler has stopped calling the fast-monitor-trigger endpoint.
+    Well past FAST_MONITOR_HEARTBEAT_STALE_SECONDS (5400s, recalibrated
+    this session against real GitHub Actions scheduling gaps - see that
+    constant's own comment), not just past the old 600s value."""
     heartbeat = {
         "last_started_run_id": "run-1",
-        "last_started_at": _iso(-timedelta(seconds=900)),
+        "last_started_at": _iso(-timedelta(seconds=6000)),
         "last_completed_run_id": "run-1",
-        "last_completed_at": _iso(-timedelta(seconds=890)),
+        "last_completed_at": _iso(-timedelta(seconds=5990)),
     }
     with patch.object(pluto_app, "get_fast_monitor_heartbeat_status", return_value=heartbeat):
         status = pluto_app._fast_monitor_health_status()
@@ -48,12 +51,12 @@ def test_stale_completed_run_is_unhealthy():
 def test_started_long_ago_and_never_completed_is_unhealthy_hung():
     """A run started, and it's been long enough that it can no longer
     plausibly still be in flight - a crash mid-run, or a request that never
-    returned."""
+    returned. Well past FAST_MONITOR_HEARTBEAT_STALE_SECONDS (5400s)."""
     heartbeat = {
         "last_started_run_id": "run-2",
-        "last_started_at": _iso(-timedelta(seconds=900)),
+        "last_started_at": _iso(-timedelta(seconds=6000)),
         "last_completed_run_id": "run-1",
-        "last_completed_at": _iso(-timedelta(seconds=850)),
+        "last_completed_at": _iso(-timedelta(seconds=5950)),
     }
     with patch.object(pluto_app, "get_fast_monitor_heartbeat_status", return_value=heartbeat):
         status = pluto_app._fast_monitor_health_status()
@@ -94,7 +97,7 @@ def test_a_stale_runs_late_completion_does_not_clobber_a_newer_runs_hang_verdict
     health."""
     heartbeat = {
         "last_started_run_id": "run-2",
-        "last_started_at": _iso(-timedelta(seconds=900)),
+        "last_started_at": _iso(-timedelta(seconds=6000)),
         "last_completed_run_id": "run-1",
         "last_completed_at": _iso(-timedelta(seconds=10)),
     }

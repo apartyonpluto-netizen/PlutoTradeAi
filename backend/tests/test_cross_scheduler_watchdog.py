@@ -34,11 +34,14 @@ def test_full_scan_recent_clean_completion_is_healthy():
 
 
 def test_full_scan_stale_completion_is_unhealthy():
+    """Well past FULL_SCAN_HEARTBEAT_STALE_SECONDS (5400s, recalibrated
+    this session against real GitHub Actions scheduling gaps - see that
+    constant's own comment), not just past the old 900s value."""
     heartbeat = {
         "last_started_run_id": "run-1",
-        "last_started_at": _iso(-timedelta(seconds=1200)),
+        "last_started_at": _iso(-timedelta(seconds=6000)),
         "last_completed_run_id": "run-1",
-        "last_completed_at": _iso(-timedelta(seconds=1190)),
+        "last_completed_at": _iso(-timedelta(seconds=5990)),
     }
     with patch.object(pluto_app, "get_full_scan_heartbeat_status", return_value=heartbeat):
         status = pluto_app._full_scan_health_status()

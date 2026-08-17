@@ -5465,11 +5465,24 @@ MONITOR_STUCK_FREEZE_SECONDS = 1800
 # completed even once, last-started) stamp can get before this app treats
 # the fast monitor's SCHEDULER itself as unhealthy - "adding an endpoint
 # is insufficient" without a way to notice its cron job was never
-# configured, stopped firing, or is hanging. Set well above the intended
-# 30-60 second cadence (10 minutes = 10-20x that) so a couple of missed
-# or slow ticks don't false-positive, while still catching a scheduler
-# that's been silent for a meaningfully long time.
-FAST_MONITOR_HEARTBEAT_STALE_SECONDS = 600
+# configured, stopped firing, or is hanging.
+#
+# fast-monitor-trigger is currently driven by a GitHub Actions workflow
+# (.github/workflows/fast-monitor-scheduler.yml, configured `*/5`) - NOT
+# a dedicated Render Cron Job, which is what the original 600s threshold
+# here assumed. Empirically observed this session (via the GitHub Actions
+# API, across both this workflow and its autonomous-scan-scheduler
+# sibling): actual firing gaps regularly run 15-70 minutes even on a
+# `*/5` schedule - GitHub's own scheduler queue, not this app, is the
+# bottleneck. 600s would false-positive on completely normal scheduling
+# jitter, training whoever's watching to ignore this alert. Set to
+# comfortably exceed the worst gap observed so far with real margin,
+# while still catching a scheduler that's genuinely been disabled/broken
+# for hours, not minutes. The dedicated, always-on continuous-monitor
+# worker (CONTINUOUS_MONITOR_HEARTBEAT_STALE_SECONDS, far tighter) is the
+# fast-reacting layer now; this is a slower fallback and its threshold
+# should reflect that, not the cadence it was never actually able to hit.
+FAST_MONITOR_HEARTBEAT_STALE_SECONDS = 5400
 
 
 def _fast_monitor_health_status() -> Dict[str, object]:
@@ -5574,14 +5587,18 @@ def _alert_admins_fast_monitor_unhealthy_if_needed() -> None:
 
 # How stale full_scan_heartbeat.py's last-completed (or last-started, if
 # it's never completed even once) stamp can get before the full 5-minute
-# scan's OWN scheduler is treated as unhealthy. Render Cron Jobs use
-# standard cron syntax with a ONE-MINUTE minimum resolution (confirmed
-# against Render's own docs this session - see the note on
-# FAST_MONITOR_HEARTBEAT_STALE_SECONDS's sibling reasoning), so a job
-# intended to fire every 5 minutes should complete at least every ~300s;
-# 3x that margin (900s) tolerates a couple of missed/slow ticks without
-# false-positiving on a scheduler that's actually fine.
-FULL_SCAN_HEARTBEAT_STALE_SECONDS = 900
+# scan's OWN scheduler is treated as unhealthy.
+#
+# Same recalibration, and the same evidence, as
+# FAST_MONITOR_HEARTBEAT_STALE_SECONDS above: this is driven by a GitHub
+# Actions workflow (.github/workflows/autonomous-scan-scheduler.yml,
+# configured `*/5`), not a Render Cron Job, and real-world gaps of
+# 15-70+ minutes have been directly observed via the GitHub Actions API
+# even on that schedule. The original 900s threshold was set assuming a
+# ~300s real cadence this platform doesn't actually deliver, and would
+# false-positive on ordinary GitHub scheduling jitter multiple times a
+# day. Widened to comfortably clear the worst gap observed so far.
+FULL_SCAN_HEARTBEAT_STALE_SECONDS = 5400
 
 
 def _full_scan_health_status() -> Dict[str, object]:
