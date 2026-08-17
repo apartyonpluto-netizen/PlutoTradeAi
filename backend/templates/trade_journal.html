@@ -247,8 +247,8 @@
         {% for order in overnight_orders %}
         <tr>
             <td>{{ order.ticker }}</td>
-            <td>{{ order.status }}{{ order.error and " — " ~ order.error or "" }}{{ order.reason_skipped and " — " ~ order.reason_skipped or "" }}</td>
-            <td>{{ order.quantity or "—" }}</td>
+            <td>{{ order.display_status or order.status }}{{ order.error and " — " ~ order.error or "" }}{{ order.reason_skipped and " — " ~ order.reason_skipped or "" }}</td>
+            <td>{% if order.filled_quantity is not none and order.quantity is not none and order.filled_quantity != order.quantity %}{{ order.filled_quantity }} / {{ order.quantity }} filled{% else %}{{ order.quantity or "—" }}{% endif %}</td>
             <td>{{ order.limit_price and "$" ~ order.limit_price or "—" }}</td>
             <td>{{ order.confidence and order.confidence ~ "%" or "—" }}</td>
             <td>{{ order.trade_thesis or order.why_ai_likes_it or "—" }}</td>

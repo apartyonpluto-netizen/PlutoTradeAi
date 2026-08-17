@@ -1865,6 +1865,56 @@ def notifications_page() -> str:
     return render_template("notifications.html", **_build_page_context(include_suggestions=True, include_news=True))
 
 
+# The Overnight Orders table used to render order["status"] directly - a
+# field set exactly ONCE at initial placement ("placed"/"failed"/"skipped"/
+# "unknown_submission_state") and never updated again anywhere in the
+# reconciliation code. Meanwhile order["lifecycle_state"] IS mutated live
+# by _monitor_transitional_orders/_reconcile_entry_fill_and_protection/
+# _reconcile_position_exit as the order actually fills, gets protected,
+# and closes - but nothing ever showed it, so a user watching that table
+# would see "placed" forever even for an order that filled, was protected,
+# and later closed hours ago. This maps the real, current lifecycle_state
+# to a human label for display - it does NOT touch order["status"] or
+# order["lifecycle_state"] themselves, which other code (including this
+# same route's own "todays_orders" filter below) still reads unchanged.
+_LIFECYCLE_STATE_DISPLAY_LABELS = {
+    ol.ENTRY_SUBMITTED: "Order submitted",
+    ol.ENTRY_PARTIALLY_FILLED: "Partially filled",
+    ol.ENTRY_FILLED: "Filled - protecting",
+    ol.PROTECTION_PENDING: "Placing protection",
+    ol.PROTECTION_CONFIRMED_ACTIVE: "Filled & protected",
+    ol.PROTECTION_FAILED: "Protection failed",
+    ol.CLOSED: "Closed",
+    ol.ENTRY_FAILED: "Failed",
+    ol.UNKNOWN_SUBMISSION_STATE: "Ambiguous - reconciling",
+    ol.MANUALLY_RESOLVED_NO_ORDER: "Manually resolved",
+    ol.MANUAL_LINK_IN_PROGRESS: "Manual resolution in progress",
+}
+
+
+def _overnight_order_display_status(order: Dict[str, object]) -> str:
+    """What the Overnight Orders table's Status column should actually
+    show for one order - see the module comment above this function for
+    why order["status"] alone is stale. Ambiguous-exit and protection-gap
+    freezes (see _flag_ambiguous_exit_unresolved /
+    _reconcile_protective_leg_quantity) take priority over the raw
+    lifecycle_state label even though PROTECTION_CONFIRMED_ACTIVE would
+    otherwise map to "Filled & protected" - a frozen, needs-manual-review
+    position must never display as if everything is fine."""
+    if order.get("ambiguous_exit_unresolved"):
+        return "Needs manual review (ambiguous exit)"
+    if order.get("stop_protection_gap") or order.get("target_protection_gap"):
+        return "Needs manual review (protection gap)"
+    lifecycle_state = order.get("lifecycle_state")
+    if lifecycle_state:
+        return _LIFECYCLE_STATE_DISPLAY_LABELS.get(str(lifecycle_state), str(lifecycle_state))
+    # No lifecycle_state at all means this candidate never reached order
+    # submission (skipped below the confidence floor, sizing rejected it,
+    # the LLM step vetoed it, etc.) - order["status"]/["reason_skipped"]
+    # are the right, and only, fields for those - unchanged.
+    return str(order.get("status") or "unknown")
+
+
 @app.route("/trade-journal")
 def trade_journal_page() -> str:
     context = _build_page_context(include_reversal=True, include_trend=True)
@@ -1872,6 +1922,8 @@ def trade_journal_page() -> str:
     context["paper_trades"] = list_paper_trades(user_id)
     context["paper_trade_summary"] = get_paper_trade_summary(user_id)
     overnight_orders = list_overnight_orders(user_id)
+    for order in overnight_orders:
+        order["display_status"] = _overnight_order_display_status(order)
     context["overnight_orders"] = overnight_orders
     # Durably closed autonomous trades - realized P&L and exit details as
     # recorded by _reconcile_position_exit once CLOSED, not derived from
