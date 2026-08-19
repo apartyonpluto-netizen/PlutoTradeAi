@@ -36,16 +36,36 @@ def test_full_scan_recent_clean_completion_is_healthy():
 def test_full_scan_stale_completion_is_unhealthy():
     """Well past FULL_SCAN_HEARTBEAT_STALE_SECONDS (5400s, recalibrated
     this session against real GitHub Actions scheduling gaps - see that
-    constant's own comment), not just past the old 900s value."""
+    constant's own comment), not just past the old 900s value. Forces
+    "inside the scheduler's active window" so this test is deterministic
+    regardless of when it actually runs - see test_fast_monitor_health_status.py
+    for the full set of window-aware tests (shared logic, tested once)."""
     heartbeat = {
         "last_started_run_id": "run-1",
         "last_started_at": _iso(-timedelta(seconds=6000)),
         "last_completed_run_id": "run-1",
         "last_completed_at": _iso(-timedelta(seconds=5990)),
     }
-    with patch.object(pluto_app, "get_full_scan_heartbeat_status", return_value=heartbeat):
+    with patch.object(pluto_app, "get_full_scan_heartbeat_status", return_value=heartbeat), \
+         patch.object(pluto_app, "_within_scheduled_trigger_window", return_value=True):
         status = pluto_app._full_scan_health_status()
     assert status["healthy"] is False
+
+
+def test_full_scan_stale_completion_outside_the_trigger_window_is_still_healthy():
+    """Same fix as the fast-monitor mirror - an overnight/weekend gap
+    this size (5990s, past the 5400s intraday threshold) must not be
+    flagged outside the scheduler's active window."""
+    heartbeat = {
+        "last_started_run_id": "run-1",
+        "last_started_at": _iso(-timedelta(seconds=6000)),
+        "last_completed_run_id": "run-1",
+        "last_completed_at": _iso(-timedelta(seconds=5990)),
+    }
+    with patch.object(pluto_app, "get_full_scan_heartbeat_status", return_value=heartbeat), \
+         patch.object(pluto_app, "_within_scheduled_trigger_window", return_value=False):
+        status = pluto_app._full_scan_health_status()
+    assert status["healthy"] is True
 
 
 # --- cross-check alerting -------------------------------------------------------

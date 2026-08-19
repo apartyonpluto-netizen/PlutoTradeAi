@@ -5461,6 +5461,49 @@ def _recover_incomplete_manual_resolutions(user_id: str, creds: Dict[str, str], 
 # should not itself trigger a freeze.
 MONITOR_STUCK_FREEZE_SECONDS = 1800
 
+# The GitHub Actions schedulers (.github/workflows/autonomous-scan-scheduler.yml,
+# fast-monitor-scheduler.yml) both only fire 13:00-21:00 UTC, Monday-Friday
+# - see those files' own comments for why (approximates 9am-5pm ET with a
+# buffer, deliberately NOT DST-aware, since GitHub Actions cron is plain
+# UTC). Silence OUTSIDE that window is entirely expected - there is no
+# scheduled trigger to be silent FROM overnight or on a weekend. Found
+# empirically this session: recalibrating FAST_MONITOR_HEARTBEAT_STALE_SECONDS/
+# FULL_SCAN_HEARTBEAT_STALE_SECONDS for intraday GitHub Actions jitter
+# (below) without ALSO accounting for this overnight/weekend gap made the
+# staleness check false-positive every single night - a ~15-hour expected
+# gap is far larger than any intraday jitter threshold could reasonably
+# be set to. This is a small, self-contained mirror of the schedule those
+# YAML files actually use - not the DST-aware CORE/PRE/POST market-session
+# concept (_current_webull_trading_session), which is a different thing
+# answering a different question (is Webull open for a new order right
+# now), not (is our external cron expected to have fired recently).
+_SCHEDULED_TRIGGER_WINDOW_START_UTC_HOUR = 13
+_SCHEDULED_TRIGGER_WINDOW_END_UTC_HOUR = 21
+
+
+def _within_scheduled_trigger_window(now: Optional[datetime] = None) -> bool:
+    """True if `now` (default: current UTC time) falls within the GitHub
+    Actions schedulers' own active window - see the constants above."""
+    now = now or _now_utc()
+    if now.weekday() >= 5:  # Saturday=5, Sunday=6 (datetime.weekday())
+        return False
+    return _SCHEDULED_TRIGGER_WINDOW_START_UTC_HOUR <= now.hour < _SCHEDULED_TRIGGER_WINDOW_END_UTC_HOUR
+
+
+def _effective_heartbeat_stale_threshold(intraday_threshold: float, max_gap_seconds: float, now: Optional[datetime] = None) -> float:
+    """The tight intraday_threshold applies while we're inside the
+    scheduler's own active window (a real gap during that window is worth
+    catching quickly, per the empirical 15-70 minute jitter this session
+    measured). Outside it - nights, weekends - a long gap is entirely
+    expected, so the much wider max_gap_seconds applies instead: generous
+    enough to span a normal weekend without alarming, but still short
+    enough to eventually catch a scheduler that's been genuinely disabled
+    or broken, not just quiet overnight."""
+    if _within_scheduled_trigger_window(now):
+        return intraday_threshold
+    return max_gap_seconds
+
+
 # How stale fast_monitor_heartbeat.py's last-completed (or, if it's never
 # completed even once, last-started) stamp can get before this app treats
 # the fast monitor's SCHEDULER itself as unhealthy - "adding an endpoint
@@ -5482,7 +5525,19 @@ MONITOR_STUCK_FREEZE_SECONDS = 1800
 # worker (CONTINUOUS_MONITOR_HEARTBEAT_STALE_SECONDS, far tighter) is the
 # fast-reacting layer now; this is a slower fallback and its threshold
 # should reflect that, not the cadence it was never actually able to hit.
+#
+# Only applies INSIDE the scheduler's own active window
+# (_within_scheduled_trigger_window) - see FAST_MONITOR_HEARTBEAT_MAX_GAP_SECONDS
+# for the much wider threshold used outside it (nights/weekends), where a
+# long gap is expected, not a fault.
 FAST_MONITOR_HEARTBEAT_STALE_SECONDS = 5400
+
+# The outer bound used OUTSIDE the scheduler's active window - covers the
+# longest entirely-normal gap (a Friday afternoon's last run to Monday
+# morning's first one, roughly 60-64 hours) plus real margin for a long
+# weekend/holiday, while still eventually flagging a scheduler that's
+# been genuinely abandoned rather than staying silent forever.
+FAST_MONITOR_HEARTBEAT_MAX_GAP_SECONDS = 345600  # 4 days
 
 
 def _fast_monitor_health_status() -> Dict[str, object]:
@@ -5492,14 +5547,22 @@ def _fast_monitor_health_status() -> Dict[str, object]:
     to fire a one-shot alert when staleness is FIRST detected. Unhealthy
     if:
       - the fast monitor has NEVER run even once (the heartbeat file is
-        completely empty) - the scheduler was probably never configured;
+        completely empty) - the scheduler was probably never configured.
+        Unconditional on the trigger window - "never run at all" is worth
+        surfacing regardless of what time it's checked;
       - the most recent run STARTED but never recorded a matching
         COMPLETED stamp, and enough time has passed that it can no longer
         plausibly still be in flight - a hung run, a crash mid-run, or a
-        run whose completion write itself failed;
-      - the most recent COMPLETED stamp is older than
-        FAST_MONITOR_HEARTBEAT_STALE_SECONDS - the scheduler has gone
-        quiet, whether or not it ever ran successfully before.
+        run whose completion write itself failed. Also unconditional on
+        the trigger window: a run that started must complete within
+        seconds in ordinary operation, whatever time of day it started -
+        this is OUR code getting stuck, not the external scheduler simply
+        not having fired yet;
+      - the most recent COMPLETED stamp is older than the EFFECTIVE
+        threshold for right now (see _effective_heartbeat_stale_threshold) -
+        tight while inside the scheduler's active window, much wider
+        outside it, since a long overnight/weekend gap there is expected,
+        not a fault.
     This says nothing about whether the full 5-minute scan (a completely
     separate, ALREADY-required cron job) is healthy - only about the
     OPTIONAL faster monitor layered on top of it."""
@@ -5528,8 +5591,14 @@ def _fast_monitor_health_status() -> Dict[str, object]:
 
     reference_at = _parse_trusted_past_timestamp(reference_raw, now=now, default=now)
     age_seconds = (now - reference_at).total_seconds()
+    # Hung-run detection stays on the tight intraday threshold regardless
+    # of the trigger window (see the docstring above); only a clean
+    # completion's staleness gets the window-aware, wider tolerance.
+    threshold = FAST_MONITOR_HEARTBEAT_STALE_SECONDS if hung else _effective_heartbeat_stale_threshold(
+        FAST_MONITOR_HEARTBEAT_STALE_SECONDS, FAST_MONITOR_HEARTBEAT_MAX_GAP_SECONDS, now
+    )
 
-    if age_seconds >= FAST_MONITOR_HEARTBEAT_STALE_SECONDS:
+    if age_seconds >= threshold:
         reason = (
             f"the fast monitor started a run over {int(age_seconds // 60)} minutes ago that never completed"
             if hung
@@ -5598,7 +5667,17 @@ def _alert_admins_fast_monitor_unhealthy_if_needed() -> None:
 # ~300s real cadence this platform doesn't actually deliver, and would
 # false-positive on ordinary GitHub scheduling jitter multiple times a
 # day. Widened to comfortably clear the worst gap observed so far.
+#
+# Only applies INSIDE the scheduler's own active window
+# (_within_scheduled_trigger_window) - see FULL_SCAN_HEARTBEAT_MAX_GAP_SECONDS
+# for the much wider threshold used outside it (nights/weekends), where a
+# long gap is expected, not a fault - see _fast_monitor_health_status's
+# own docstring for the fuller reasoning, shared by this mirror function.
 FULL_SCAN_HEARTBEAT_STALE_SECONDS = 5400
+
+# Same outer bound, and the same reasoning, as
+# FAST_MONITOR_HEARTBEAT_MAX_GAP_SECONDS above.
+FULL_SCAN_HEARTBEAT_MAX_GAP_SECONDS = 345600  # 4 days
 
 
 def _full_scan_health_status() -> Dict[str, object]:
@@ -5624,8 +5703,14 @@ def _full_scan_health_status() -> Dict[str, object]:
 
     reference_at = _parse_trusted_past_timestamp(reference_raw, now=now, default=now)
     age_seconds = (now - reference_at).total_seconds()
+    # Hung-run detection stays on the tight intraday threshold regardless
+    # of the trigger window; only a clean completion's staleness gets the
+    # window-aware, wider tolerance - see _fast_monitor_health_status.
+    threshold = FULL_SCAN_HEARTBEAT_STALE_SECONDS if hung else _effective_heartbeat_stale_threshold(
+        FULL_SCAN_HEARTBEAT_STALE_SECONDS, FULL_SCAN_HEARTBEAT_MAX_GAP_SECONDS, now
+    )
 
-    if age_seconds >= FULL_SCAN_HEARTBEAT_STALE_SECONDS:
+    if age_seconds >= threshold:
         reason = (
             f"the full scan started a run over {int(age_seconds // 60)} minutes ago that never completed"
             if hung
