@@ -164,6 +164,21 @@
     </table>
 </section>
 
+<section class="panel" data-preview-scan>
+    <div class="panel-head">
+        <h3>Preview Scan</h3>
+        <span>Read-Only</span>
+    </div>
+    <p class="muted">
+        Runs the agent's real market scan and sizing logic right now &mdash; the same market data, the same
+        account balance, the same risk math a real autonomous scan would use &mdash; and shows exactly what it
+        would do. Nothing is ever submitted to the broker and nothing is saved; this is a look at the agent's
+        own research before any real order is placed.
+    </p>
+    <button type="button" id="previewScanButton">Preview Scan</button>
+    <div id="previewScanResult" class="preview-scan-result"></div>
+</section>
+
 <section class="panel">
     <div class="panel-head">
         <h3>AI Reasoning</h3>

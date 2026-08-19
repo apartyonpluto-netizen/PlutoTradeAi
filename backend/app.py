@@ -3792,7 +3792,7 @@ def _refresh_stop_confidence(user_id: str, creds: Dict[str, str], account_id: st
         replace_overnight_orders(user_id, orders)
 
 
-def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
+def _run_autonomous_trade_scan(user_id: str, dry_run: bool = False) -> Dict[str, object]:
     """Thin wrapper around _run_autonomous_trade_scan_locked that holds an
     OS-level per-user lock (scan_lock.py) for the scan's entire duration.
     gunicorn runs multiple worker processes, and this function is called
@@ -3802,9 +3802,15 @@ def _run_autonomous_trade_scan(user_id: str) -> Dict[str, object]:
     independently pass the position-cap/risk checks and place orders that
     were never meant to coexist. Raises ScanAlreadyRunningError (a
     PlutoTradeError, so it surfaces as a friendly 409) if a scan for this
-    user is already in flight."""
+    user is already in flight.
+
+    dry_run passes straight through to _run_autonomous_trade_scan_locked -
+    still held under the SAME lock even though a preview has no broker side
+    effects of its own, so it can never read a torn/mid-update snapshot of
+    overnight_orders.json while a REAL scan for this user is concurrently
+    writing to it."""
     with user_scan_lock(user_id):
-        return _run_autonomous_trade_scan_locked(user_id)
+        return _run_autonomous_trade_scan_locked(user_id, dry_run=dry_run)
 
 
 def _user_needs_fast_monitor_pass(user_id: str) -> bool:
@@ -6880,7 +6886,7 @@ def _resolve_ambiguous_submission(
     return {"entry": entry, "evidence": evidence, "audit_record": completed_record, "resolution_id": resolution_id}
 
 
-def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
+def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Dict[str, object]:
     """Scans current setups the same way the dashboard does, and for the
     highest-confidence bullish ones places real (sandbox) DAY limit orders on
     Webull - the trading session (CORE/ALL/NIGHT) is picked automatically by
@@ -6890,7 +6896,20 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
     Pure function of user_id - safe to call from a real request or from the
     cron trigger's simulated per-user request context. Callers must go
     through _run_autonomous_trade_scan above, not this directly, to hold the
-    per-user lock for the scan's duration."""
+    per-user lock for the scan's duration.
+
+    dry_run=True runs the EXACT SAME discovery/threshold/sizing logic - real
+    market data, real account balance, real risk math - but never calls
+    _submit_and_protect_entry, never places or cancels anything at the
+    broker, and never writes record_overnight_order or a research-log entry.
+    Built for a user-facing "preview what the agent would do right now"
+    action (see api_autonomy_preview_scan) - the whole point is showing the
+    agent's OWN live research and candidate selection before anything
+    real happens, not a hardcoded/hand-picked trade. Existing-position
+    reconciliation (_reconcile_exit_orders and friends) is also skipped
+    under dry_run, for the same reason - a preview must have zero side
+    effects on anything already resting at the broker, not just on new
+    entries."""
     creds = get_webull_credentials(user_id)
     if not is_webull_configured(user_id):
         raise ValidationError("Enter your Webull App Key and App Secret in Account Hub before running the trade scan.")
@@ -6908,35 +6927,45 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
         raise ValidationError("No Webull sandbox account found for these credentials.")
     account_id = cash_account["account_id"]
 
-    _reconcile_exit_orders(user_id, creds, account_id)
-    _refresh_stop_confidence(user_id, creds, account_id)
-    # Restart recovery for a broker-accepted entry that never got ANY
-    # local record at all (see _discover_orphaned_broker_entries) - must
-    # run BEFORE _reconcile_unknown_submissions below so a freshly
-    # discovered orphan is included in THIS SAME tick's freeze check, not
-    # one scan late.
-    _discover_orphaned_broker_entries(user_id, creds, account_id)
-    # True if ANY entry - from this scan or an earlier one - is still stuck
-    # in UNKNOWN_SUBMISSION_STATE after this reconciliation attempt, OR any
-    # manual resolution transaction (_resolve_ambiguous_submission) is
-    # still incomplete after restart recovery has had a chance to resume
-    # it (see _recover_incomplete_manual_resolutions - covers both a
-    # link stuck in MANUAL_LINK_IN_PROGRESS and a resolution whose closing
-    # audit write never durably landed). Gates every NEW entry below (see
-    # the comment above entries_allowed) - this account's true committed
-    # capital isn't confidently known while either is true, so nothing new
-    # gets sized against it, no matter how many scans ago the ambiguity
-    # first occurred.
-    has_unresolved_ambiguous_submission = _reconcile_unknown_submissions(user_id, creds, account_id)
-    has_incomplete_manual_resolution = _recover_incomplete_manual_resolutions(user_id, creds, account_id)
-    # Resumes every ORDINARY entry (never ambiguous, never manually
-    # resolved) still transitional - see _monitor_transitional_orders.
-    # Also runs on its own, much faster cadence via _run_fast_order_monitor
-    # / the fast-monitor-trigger endpoint - this call is the safety net
-    # that still applies even if that faster external cron was never
-    # configured, so this app's OWN 5-minute scan never regresses to
-    # leaving these unresumed.
-    _monitor_transitional_orders(user_id, creds, account_id)
+    # Every one of these reconciliation passes can place, cancel, or resize
+    # a REAL order at the broker for an EXISTING position - a preview must
+    # have zero side effects on anything already resting there, so dry_run
+    # skips this entire block. Neither ambiguity flag can be true without
+    # having actually submitted something first, so both default to False
+    # rather than "unknown" - nothing for either to be ambiguous ABOUT yet.
+    if not dry_run:
+        _reconcile_exit_orders(user_id, creds, account_id)
+        _refresh_stop_confidence(user_id, creds, account_id)
+        # Restart recovery for a broker-accepted entry that never got ANY
+        # local record at all (see _discover_orphaned_broker_entries) - must
+        # run BEFORE _reconcile_unknown_submissions below so a freshly
+        # discovered orphan is included in THIS SAME tick's freeze check, not
+        # one scan late.
+        _discover_orphaned_broker_entries(user_id, creds, account_id)
+        # True if ANY entry - from this scan or an earlier one - is still stuck
+        # in UNKNOWN_SUBMISSION_STATE after this reconciliation attempt, OR any
+        # manual resolution transaction (_resolve_ambiguous_submission) is
+        # still incomplete after restart recovery has had a chance to resume
+        # it (see _recover_incomplete_manual_resolutions - covers both a
+        # link stuck in MANUAL_LINK_IN_PROGRESS and a resolution whose closing
+        # audit write never durably landed). Gates every NEW entry below (see
+        # the comment above entries_allowed) - this account's true committed
+        # capital isn't confidently known while either is true, so nothing new
+        # gets sized against it, no matter how many scans ago the ambiguity
+        # first occurred.
+        has_unresolved_ambiguous_submission = _reconcile_unknown_submissions(user_id, creds, account_id)
+        has_incomplete_manual_resolution = _recover_incomplete_manual_resolutions(user_id, creds, account_id)
+        # Resumes every ORDINARY entry (never ambiguous, never manually
+        # resolved) still transitional - see _monitor_transitional_orders.
+        # Also runs on its own, much faster cadence via _run_fast_order_monitor
+        # / the fast-monitor-trigger endpoint - this call is the safety net
+        # that still applies even if that faster external cron was never
+        # configured, so this app's OWN 5-minute scan never regresses to
+        # leaving these unresumed.
+        _monitor_transitional_orders(user_id, creds, account_id)
+    else:
+        has_unresolved_ambiguous_submission = False
+        has_incomplete_manual_resolution = False
 
     risk_settings = get_autonomy_status(user_id)
     if risk_settings.get("emergency_stop_enabled"):
@@ -7171,7 +7200,14 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
         analysis of the VIX shadow signal (or any other future research
         signal) isn't built only from the subset that reached submission -
         see research_log.py's own module docstring on survivorship bias.
-        Never lets a logging failure affect the real scan."""
+        Never lets a logging failure affect the real scan.
+
+        No-ops entirely under dry_run - a preview run isn't a real evaluated
+        candidate with real consequences, and mixing preview rows into the
+        durable research log would corrupt the survivorship-bias analysis
+        that log exists for."""
+        if dry_run:
+            return
         try:
             record_research_decision(
                 user_id,
@@ -7337,7 +7373,8 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
                 entry["status"] = "skipped"
                 entry["reason_skipped"] = veto_reason
                 skipped.append(entry)
-                record_overnight_order(user_id, entry)
+                if not dry_run:
+                    record_overnight_order(user_id, entry)
                 _log_research_decision(
                     ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
                     raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=veto_reason,
@@ -7351,6 +7388,20 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
                 raise ValueError("No valid entry price computed for this ticker.")
             stop_price = float(entry.get("stop") or 0)
             target_price = float(entry.get("target") or 0)
+            if dry_run:
+                # The entire point: show exactly what the agent's OWN
+                # research found and would have done, WITHOUT ever calling
+                # _submit_and_protect_entry - no broker call, no order, no
+                # persisted record. Reserved against local_reservations
+                # anyway so a second preview candidate in the same run sizes
+                # itself against a realistic remaining budget, matching what
+                # a real run would actually do.
+                entry["status"] = "preview"
+                entry["stop_price"] = stop_price
+                entry["target_price"] = target_price
+                placed.append(entry)
+                local_reservations += _reservation_notional(quantity, limit_price)
+                continue
             _submit_and_protect_entry(
                 user_id=user_id,
                 creds=creds,
@@ -7471,6 +7522,22 @@ def _run_autonomous_trade_scan_locked(user_id: str) -> Dict[str, object]:
 @api_guard
 def api_autonomy_run_overnight_scan():
     summary = _run_autonomous_trade_scan(_current_user_id())
+    return _api_success(summary, **summary)
+
+
+@app.route("/api/autonomy/preview-scan", methods=["POST"])
+@api_guard
+def api_autonomy_preview_scan():
+    """Runs the REAL scan - real market data, real account balance, real
+    risk-based sizing - but with dry_run=True, so nothing is ever submitted
+    to the broker and nothing is persisted (see _run_autonomous_trade_scan_locked's
+    dry_run docstring for the exact guarantee). Built for exactly one
+    purpose: let a user see precisely what the agent's own research and
+    candidate selection would do RIGHT NOW, before ever authorizing a real
+    submission - the agent does the research; the human still decides
+    whether to act on it. Session-authenticated like every other manual
+    autonomy action, not the cron secret."""
+    summary = _run_autonomous_trade_scan(_current_user_id(), dry_run=True)
     return _api_success(summary, **summary)
 
 

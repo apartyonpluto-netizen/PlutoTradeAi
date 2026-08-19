@@ -968,6 +968,67 @@ const bindAccountHubPage = () => {
     });
   });
 
+  const previewScanResult = document.getElementById("previewScanResult");
+  const previewScanBtn = document.getElementById("previewScanButton");
+  if (previewScanBtn instanceof HTMLButtonElement && previewScanResult instanceof HTMLElement) {
+    const renderPreviewCandidate = (entry, isPlaced) => {
+      const item = document.createElement("li");
+      item.className = isPlaced ? "preview-scan-candidate placed" : "preview-scan-candidate skipped";
+      const heading = document.createElement("strong");
+      heading.textContent = isPlaced
+        ? `${entry.ticker} — would buy ${entry.quantity} share(s) at $${entry.limit_price}`
+        : `${entry.ticker || "(unknown)"} — skipped`;
+      item.appendChild(heading);
+      const detail = document.createElement("p");
+      detail.className = "muted";
+      if (isPlaced) {
+        detail.textContent =
+          `Confidence ${entry.confidence}. Stop $${entry.stop_price}, target $${entry.target_price}.` +
+          (entry.why_ai_likes_it ? ` ${entry.why_ai_likes_it}` : "");
+      } else {
+        detail.textContent = entry.reason_skipped || entry.error || "No reason given.";
+      }
+      item.appendChild(detail);
+      return item;
+    };
+
+    previewScanBtn.addEventListener("click", async () => {
+      previewScanBtn.disabled = true;
+      const originalText = previewScanBtn.textContent;
+      previewScanBtn.textContent = "Scanning...";
+      previewScanResult.replaceChildren();
+      try {
+        const result = await requestJson("/api/autonomy/preview-scan", { method: "POST" });
+        const summary = document.createElement("p");
+        summary.className = "muted";
+        summary.textContent = result.entries_allowed
+          ? `Looked at ${result.candidates_found} setup(s), ${result.candidates_qualifying} qualifying. Nothing submitted — preview only.`
+          : `Looked at ${result.candidates_found} setup(s). New entries are currently blocked: ${result.new_entries_blocked_reason}`;
+        previewScanResult.appendChild(summary);
+        const list = document.createElement("ul");
+        list.className = "preview-scan-list";
+        (result.placed || []).forEach((entry) => list.appendChild(renderPreviewCandidate(entry, true)));
+        (result.skipped || []).forEach((entry) => list.appendChild(renderPreviewCandidate(entry, false)));
+        if (!list.children.length) {
+          const empty = document.createElement("li");
+          empty.className = "muted";
+          empty.textContent = "No setups found this scan.";
+          list.appendChild(empty);
+        }
+        previewScanResult.appendChild(list);
+      } catch (error) {
+        showToast(error.message, "error");
+        const errorText = document.createElement("p");
+        errorText.className = "muted";
+        errorText.textContent = error.message;
+        previewScanResult.appendChild(errorText);
+      } finally {
+        previewScanBtn.disabled = false;
+        previewScanBtn.textContent = originalText;
+      }
+    });
+  }
+
   const modal = document.getElementById("setupModal");
   if (!(modal instanceof HTMLElement)) return;
   const closeModal = () => {
