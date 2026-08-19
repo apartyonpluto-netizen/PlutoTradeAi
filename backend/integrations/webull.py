@@ -113,9 +113,40 @@ def _get_trade_client(app_key: str, app_secret: str):
         return trade_client
 
 
+def _call_with_429_retry(action_label: str, call):
+    """Retries a read-only Webull API call up to 3 times on a 429
+    (rate-limited) response, matching the backoff _place_order_with_retry
+    already uses for placement calls. Every read call in this module
+    (accounts, balance, positions, open orders, order history) had NO retry
+    logic at all until this was added: the SDK raises a raw ServerException
+    for ANY non-2xx response (see the note above REPEAT_ORDER_ERROR_CODE
+    below), so a single transient 429 previously propagated straight out as
+    an unhandled exception - and for the paginated get_open_orders/
+    get_order_history specifically, could abort an otherwise-successful
+    multi-page read partway through. Re-raises as ValueError, the same
+    exception type every existing caller of these getters already handles
+    via `except ValueError` - this changes retry behavior only, not what
+    callers see on final failure."""
+    from webull.core.exception.exceptions import ClientException, ServerException
+
+    last_error: Optional[BaseException] = None
+    for attempt in range(3):
+        try:
+            return call()
+        except ServerException as error:
+            last_error = error
+            if error.get_http_status() == 429 and attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise ValueError(f"Webull API error ({action_label}): HTTP {error.get_http_status()}") from error
+        except ClientException as error:
+            raise ValueError(f"Webull API error ({action_label}): {error}") from error
+    raise ValueError(f"Webull API error ({action_label}): exhausted retries with no response received")
+
+
 def get_paper_accounts(app_key: str, app_secret: str) -> List[Dict[str, Any]]:
     trade_client = _get_trade_client(app_key, app_secret)
-    response = trade_client.account_v2.get_account_list()
+    response = _call_with_429_retry("accounts", lambda: trade_client.account_v2.get_account_list())
     if response.status_code != 200:
         raise ValueError(f"Webull API error (accounts): HTTP {response.status_code}")
     accounts = response.json()
@@ -131,7 +162,7 @@ def find_individual_cash_account(accounts: List[Dict[str, Any]]) -> Optional[Dic
 
 def get_account_balance(app_key: str, app_secret: str, account_id: str) -> Dict[str, Any]:
     trade_client = _get_trade_client(app_key, app_secret)
-    response = trade_client.account_v2.get_account_balance(account_id)
+    response = _call_with_429_retry("balance", lambda: trade_client.account_v2.get_account_balance(account_id))
     if response.status_code != 200:
         raise ValueError(f"Webull API error (balance): HTTP {response.status_code}")
     return response.json()
@@ -139,7 +170,7 @@ def get_account_balance(app_key: str, app_secret: str, account_id: str) -> Dict[
 
 def get_account_positions(app_key: str, app_secret: str, account_id: str) -> List[Dict[str, Any]]:
     trade_client = _get_trade_client(app_key, app_secret)
-    response = trade_client.account_v2.get_account_position(account_id)
+    response = _call_with_429_retry("positions", lambda: trade_client.account_v2.get_account_position(account_id))
     if response.status_code != 200:
         raise ValueError(f"Webull API error (positions): HTTP {response.status_code}")
     positions = response.json()
@@ -293,18 +324,23 @@ def _fetch_order_detail(trade_client, account_id: str, client_order_id: str) -> 
     lookup itself failed for an unrelated reason."""
     from webull.core.exception.exceptions import ClientException, ServerException
 
-    try:
-        response = trade_client.order_v2.get_order_detail(account_id, client_order_id)
-    except ServerException as error:
-        raise _classify_server_exception(error, "order detail") from error
-    except ClientException as error:
-        raise AmbiguousOrderSubmission(f"Webull API error (order detail): {error}") from error
-    if response.status_code != 200:
-        # Reachable only for a 2xx status that isn't literally 200 - a real
-        # ServerException (see above) already covers every non-2xx case per
-        # the SDK's own get_response() behavior.
-        raise AmbiguousOrderSubmission(f"Webull API error (order detail): HTTP {response.status_code}")
-    return response.json()
+    for attempt in range(3):
+        try:
+            response = trade_client.order_v2.get_order_detail(account_id, client_order_id)
+        except ServerException as error:
+            if error.get_http_status() == 429 and attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise _classify_server_exception(error, "order detail") from error
+        except ClientException as error:
+            raise AmbiguousOrderSubmission(f"Webull API error (order detail): {error}") from error
+        if response.status_code != 200:
+            # Reachable only for a 2xx status that isn't literally 200 - a real
+            # ServerException (see above) already covers every non-2xx case per
+            # the SDK's own get_response() behavior.
+            raise AmbiguousOrderSubmission(f"Webull API error (order detail): HTTP {response.status_code}")
+        return response.json()
+    raise AmbiguousOrderSubmission(f"Webull API error (order detail): exhausted retries with no response received")
 
 
 def get_order_detail(app_key: str, app_secret: str, account_id: str, client_order_id: str) -> Dict[str, Any]:
@@ -371,12 +407,12 @@ def get_open_orders(app_key: str, app_secret: str, account_id: str) -> List[Dict
     last_client_order_id: Optional[str] = None
 
     for _ in range(_OPEN_ORDERS_MAX_PAGES):
-        response = trade_client.order_v2.get_order_open(
+        response = _call_with_429_retry("open orders", lambda: trade_client.order_v2.get_order_open(
             account_id,
             page_size=OPEN_ORDERS_PAGE_SIZE,
             last_order_id=last_order_id,
             last_client_order_id=last_client_order_id,
-        )
+        ))
         if response.status_code != 200:
             raise ValueError(f"Webull API error (open orders): HTTP {response.status_code}")
         payload = response.json()
@@ -480,14 +516,14 @@ def get_order_history(app_key: str, app_secret: str, account_id: str, days_back:
     last_client_order_id: Optional[str] = None
 
     for _ in range(_ORDER_HISTORY_MAX_PAGES):
-        response = trade_client.order_v2.get_order_history(
+        response = _call_with_429_retry("order history", lambda: trade_client.order_v2.get_order_history(
             account_id,
             page_size=ORDER_HISTORY_PAGE_SIZE,
             start_date=start_date,
             end_date=end_date,
             last_order_id=last_order_id,
             last_client_order_id=last_client_order_id,
-        )
+        ))
         if response.status_code != 200:
             raise ValueError(f"Webull API error (order history): HTTP {response.status_code}")
         payload = response.json()
