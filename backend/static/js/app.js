@@ -902,6 +902,72 @@ const bindAccountHubPage = () => {
     });
   }
 
+  const manualTestOrderResult = document.getElementById("manualTestOrderResult");
+  const placeManualTestOrderBtn = document.getElementById("placeManualTestOrderButton");
+  if (placeManualTestOrderBtn instanceof HTMLButtonElement) {
+    placeManualTestOrderBtn.addEventListener("click", async () => {
+      const tickerInput = document.getElementById("manualTestOrderTicker");
+      const quantityInput = document.getElementById("manualTestOrderQuantity");
+      const limitPriceInput = document.getElementById("manualTestOrderLimitPrice");
+      const ticker = tickerInput instanceof HTMLInputElement ? tickerInput.value.trim().toUpperCase() : "";
+      const quantity = quantityInput instanceof HTMLInputElement ? Number(quantityInput.value) : NaN;
+      const limitPrice = limitPriceInput instanceof HTMLInputElement ? Number(limitPriceInput.value) : NaN;
+      if (!ticker || !quantity || !limitPrice) {
+        showToast("Enter a ticker, quantity, and limit price.", "error");
+        return;
+      }
+      if (
+        !window.confirm(
+          `Place a REAL BUY limit order for ${quantity} share(s) of ${ticker} at $${limitPrice} on your Webull sandbox? ` +
+            `The server will reject this if the price isn't comfortably below the current market price.`
+        )
+      ) {
+        return;
+      }
+      placeManualTestOrderBtn.disabled = true;
+      const originalText = placeManualTestOrderBtn.textContent;
+      placeManualTestOrderBtn.textContent = "Placing...";
+      try {
+        await requestJson("/api/webull/place-test-order", {
+          method: "POST",
+          body: JSON.stringify({ ticker, quantity, limit_price: limitPrice }),
+        });
+        showToast(`Test order placed for ${ticker}.`, "success");
+        window.location.reload();
+      } catch (error) {
+        if (manualTestOrderResult instanceof HTMLElement) manualTestOrderResult.textContent = error.message;
+        showToast(error.message, "error");
+      } finally {
+        placeManualTestOrderBtn.disabled = false;
+        placeManualTestOrderBtn.textContent = originalText;
+      }
+    });
+  }
+
+  document.querySelectorAll(".cancel-manual-test-order").forEach((button) => {
+    if (!(button instanceof HTMLButtonElement)) return;
+    button.addEventListener("click", async () => {
+      const clientOrderId = button.dataset.clientOrderId || "";
+      if (!clientOrderId) return;
+      if (!window.confirm("Cancel this test order? This sends a real cancel request to your Webull sandbox.")) return;
+      button.disabled = true;
+      try {
+        const result = await requestJson("/api/webull/cancel-test-order", {
+          method: "POST",
+          body: JSON.stringify({ client_order_id: clientOrderId }),
+        });
+        showToast(
+          result.zero_fill_confirmed ? "Cancelled - zero shares filled." : `Cancelled - ${result.filled_quantity} share(s) had already filled.`,
+          result.zero_fill_confirmed ? "success" : "error"
+        );
+        window.location.reload();
+      } catch (error) {
+        showToast(error.message, "error");
+        button.disabled = false;
+      }
+    });
+  });
+
   const modal = document.getElementById("setupModal");
   if (!(modal instanceof HTMLElement)) return;
   const closeModal = () => {

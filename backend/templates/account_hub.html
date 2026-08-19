@@ -121,6 +121,49 @@
     </article>
 </section>
 
+<section class="panel" data-manual-test-order>
+    <div class="panel-head">
+        <h3>Manual Test Order</h3>
+        <span>Webull Sandbox</span>
+    </div>
+    <p class="muted">
+        Places ONE small BUY limit order against your own real Webull sandbox account for deliberate,
+        controlled testing &mdash; entry only, never a stop/target. The limit price is rejected server-side
+        unless it's comfortably below the current market price, so it cannot plausibly fill. Built for staged
+        validation of this app's own order-placement/cancellation code paths.
+    </p>
+    <div class="grid-form" style="margin-top: 12px;">
+        <input type="text" id="manualTestOrderTicker" placeholder="Ticker (e.g. AAPL)">
+        <input type="number" id="manualTestOrderQuantity" placeholder="Quantity" min="1" max="5" value="1">
+        <input type="number" id="manualTestOrderLimitPrice" placeholder="Limit price ($)" step="0.01">
+        <button type="button" id="placeManualTestOrderButton">Place Test Order</button>
+    </div>
+    <p class="muted" id="manualTestOrderResult"></p>
+    <table id="manualTestOrdersTable">
+        <thead><tr><th>Ticker</th><th>Qty</th><th>Limit</th><th>Status</th><th>Logged</th><th>Action</th></tr></thead>
+        <tbody>
+        {% for order in manual_test_orders %}
+        <tr data-client-order-id="{{ order.entry_client_order_id }}">
+            <td>{{ order.ticker }}</td>
+            <td>{{ order.quantity or "—" }}</td>
+            <td>{{ order.limit_price and "$" ~ order.limit_price or "—" }}</td>
+            <td class="manual-test-order-status">{{ order.status }}{{ order.error and " — " ~ order.error or "" }}</td>
+            <td class="alert-time" data-timestamp="{{ order.logged_at or '' }}">--</td>
+            <td>
+                {% if order.status == "placed" %}
+                <button type="button" class="ghost-button cancel-manual-test-order" data-client-order-id="{{ order.entry_client_order_id }}">Cancel</button>
+                {% else %}
+                &mdash;
+                {% endif %}
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="muted">No manual test orders placed yet.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
 <section class="panel">
     <div class="panel-head">
         <h3>AI Reasoning</h3>

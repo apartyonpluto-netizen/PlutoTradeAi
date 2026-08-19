@@ -1857,6 +1857,11 @@ def account_hub_page() -> str:
     # autonomy/scan_run_log.py's module docstring for why "the cron job
     # returned HTTP 200" doesn't by itself answer that question.
     context["scan_runs"] = list_scan_runs(user_id, limit=50)
+    # Manual Test Order panel - see api_webull_place_test_order's own
+    # docstring for what this tool is and its safety rails.
+    context["manual_test_orders"] = [
+        order for order in list_overnight_orders(user_id) if order.get("source") == "manual_test_order"
+    ]
     return render_template("account_hub.html", **context)
 
 
@@ -2045,6 +2050,171 @@ def api_close_webull_position():
     POSITIONS_CACHE.pop(user_id, None)
     BALANCE_CACHE.pop(user_id, None)
     return _api_success(entry, **entry)
+
+
+# Built for staged sandbox validation ("Stage 2: one tiny entry and
+# zero-fill cancellation" - see conversation history) and left as a
+# permanent, reusable, audited tool per explicit user request, rather
+# than a one-off script - so it's deliberately narrow, not a general
+# "place any order" capability. See api_webull_place_test_order's own
+# docstring for the full safety-rail reasoning.
+MANUAL_TEST_ORDER_MAX_QUANTITY = 5
+MANUAL_TEST_ORDER_MIN_DISCOUNT_FROM_MARKET = 0.20
+
+
+@app.route("/api/webull/place-test-order", methods=["POST"])
+@api_guard
+def api_webull_place_test_order():
+    """Places ONE small, manually-triggered BUY limit order against the
+    caller's own real Webull sandbox account.
+
+    Deliberately narrow and safety-railed, not a general "place any
+    order" capability:
+      - hardcoded side=BUY (this app is long/CALL-only everywhere else
+        too - see brains/strategy_brain.py);
+      - quantity capped at MANUAL_TEST_ORDER_MAX_QUANTITY;
+      - limit_price is REJECTED server-side (never just trusted from the
+        client) unless it's at least MANUAL_TEST_ORDER_MIN_DISCOUNT_FROM_MARKET
+        below the CURRENT live market price - this is what makes
+        "cannot plausibly fill" a structural guarantee of using this
+        endpoint, not merely an instruction to whoever calls it;
+      - never places a stop/target/bracket - entry only. Protection is a
+        separate, later concern, not this tool's job;
+      - durably recorded via record_overnight_order with
+        source="manual_test_order", visible in the existing Trade
+        Journal Overnight Orders table like everything else, and so
+        api_webull_cancel_test_order below can verify a given
+        client_order_id actually came from THIS tool before touching it."""
+    payload = request.get_json(silent=True) or {}
+    ticker = str(payload.get("ticker", "")).strip().upper()
+    quantity = payload.get("quantity")
+    limit_price = payload.get("limit_price")
+
+    if not ticker:
+        raise ValidationError("Ticker is required.")
+    try:
+        quantity = int(quantity)
+    except (TypeError, ValueError):
+        raise ValidationError("Quantity must be a whole number.")
+    if not (0 < quantity <= MANUAL_TEST_ORDER_MAX_QUANTITY):
+        raise ValidationError(f"Quantity must be between 1 and {MANUAL_TEST_ORDER_MAX_QUANTITY} shares for a manual test order.")
+    try:
+        limit_price = float(limit_price)
+    except (TypeError, ValueError):
+        raise ValidationError("Limit price must be a number.")
+    if limit_price <= 0:
+        raise ValidationError("Limit price must be positive.")
+
+    user_id = _current_user_id()
+    creds = get_webull_credentials(user_id)
+    if not is_webull_configured(user_id):
+        raise ValidationError("Enter your Webull App Key and App Secret in Account Hub first.")
+
+    quote_rows, _quote_errors, _last_updated = scan_market(tickers=[ticker])
+    quote_row = quote_rows[0] if quote_rows else None
+    if not quote_row or not quote_row.get("price"):
+        raise ValidationError(
+            f"Could not fetch a current market price for {ticker} - refusing to place a test order without one "
+            f"to validate the limit price against."
+        )
+    market_price = float(quote_row["price"])
+    max_allowed_limit_price = round(market_price * (1 - MANUAL_TEST_ORDER_MIN_DISCOUNT_FROM_MARKET), 2)
+    if limit_price > max_allowed_limit_price:
+        raise ValidationError(
+            f"Limit price ${limit_price:,.2f} is too close to the current market price (${market_price:,.2f}) for "
+            f"a manual test order - must be at least {int(MANUAL_TEST_ORDER_MIN_DISCOUNT_FROM_MARKET * 100)}% below "
+            f"market (${max_allowed_limit_price:,.2f} or lower) so it cannot plausibly fill."
+        )
+
+    sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
+    cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
+    if not cash_account:
+        raise ValidationError("No Webull sandbox account found for these credentials.")
+    account_id = cash_account["account_id"]
+
+    client_order_id = f"manualtest{uuid.uuid4().hex[:24]}"
+    entry = {
+        "ticker": ticker,
+        "side": "BUY",
+        "quantity": quantity,
+        "limit_price": limit_price,
+        "market_price_at_placement": market_price,
+        "account_id": account_id,
+        "status": "pending",
+        "source": "manual_test_order",
+        "entry_client_order_id": client_order_id,
+    }
+    try:
+        result = webull_api.place_stock_order(
+            app_key=creds["app_key"],
+            app_secret=creds["app_secret"],
+            account_id=account_id,
+            symbol=ticker,
+            side="BUY",
+            quantity=quantity,
+            limit_price=limit_price,
+            trading_session=_current_webull_trading_session(),
+            client_order_id=client_order_id,
+        )
+        entry["status"] = "placed"
+        entry["webull_response"] = result
+    except Exception as error:  # noqa: BLE001 - surface the failure, don't crash the request
+        entry["status"] = "failed"
+        entry["error"] = str(error)
+        record_overnight_order(user_id, entry)
+        raise ValidationError(f"Failed to place test order for {ticker}: {error}") from error
+
+    record_overnight_order(user_id, entry)
+    return _api_success(entry, **entry)
+
+
+@app.route("/api/webull/cancel-test-order", methods=["POST"])
+@api_guard
+def api_webull_cancel_test_order():
+    """Cancels a resting order previously placed by
+    api_webull_place_test_order above, and confirms via a FRESH broker
+    read that it actually ended with zero shares filled - "zero-fill
+    cancellation" verified, not assumed. Refuses to touch any order this
+    endpoint didn't itself create (source != "manual_test_order") - this
+    is deliberately NOT a general-purpose "cancel any order" capability."""
+    payload = request.get_json(silent=True) or {}
+    client_order_id = str(payload.get("client_order_id", "")).strip()
+    if not client_order_id:
+        raise ValidationError("client_order_id is required.")
+
+    user_id = _current_user_id()
+    orders = list_overnight_orders(user_id)
+    record = next((o for o in orders if o.get("entry_client_order_id") == client_order_id), None)
+    if not record or record.get("source") != "manual_test_order":
+        raise ValidationError("No manual test order found with that client_order_id for this account.")
+
+    creds = get_webull_credentials(user_id)
+    if not is_webull_configured(user_id):
+        raise ValidationError("Enter your Webull App Key and App Secret in Account Hub first.")
+    account_id = record.get("account_id")
+    if not account_id:
+        raise ValidationError("This test order has no recorded account_id - cannot look it up at the broker.")
+
+    try:
+        webull_api.cancel_order(creds["app_key"], creds["app_secret"], account_id, client_order_id)
+    except Exception as error:  # noqa: BLE001 - surface the failure, don't crash the request
+        raise ValidationError(f"Failed to cancel test order {client_order_id}: {error}") from error
+
+    order_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, client_order_id)
+    fill = ol.summarize_fill(order_detail)
+
+    record["status"] = "cancelled"
+    record["cancel_confirmed_status"] = fill["status"]
+    record["cancel_confirmed_filled_quantity"] = fill["filled_quantity"]
+    replace_overnight_orders(user_id, orders)
+
+    result = {
+        "client_order_id": client_order_id,
+        "broker_status": fill["status"],
+        "filled_quantity": fill["filled_quantity"],
+        "zero_fill_confirmed": fill["filled_quantity"] == 0,
+    }
+    return _api_success(result, **result)
 
 
 @app.route("/candle-brain")
