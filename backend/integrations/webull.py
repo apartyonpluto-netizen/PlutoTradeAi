@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # Paper-trading OpenAPI apps authenticate against a separate sandbox host from
 # the live-trading API - api.webull.com rejects sandbox credentials with a
@@ -27,6 +28,19 @@ _SENSITIVE_LOG_FIELD = re.compile(
     re.IGNORECASE,
 )
 _webull_sdk_logging_configured = False
+
+# The continuous-monitor tick (every ~10s, around the clock, for every
+# Webull-connected user - see continuous_monitor_worker.py) was rebuilding a
+# fresh ApiClient/TradeClient (SignerFactory, DefaultEndpointResolver, retry
+# policy, etc.) on EVERY single webull_api call - several per user per tick.
+# That sustained allocation churn, running 24/7 regardless of market hours,
+# matched the web service's observed memory-climbs-until-OOM-kill pattern on
+# Render. Credentials (app_key, app_secret) are static per connected account,
+# so it's safe to build the client graph once per credential pair and reuse
+# it - this does NOT change auth/network behavior, it only avoids rebuilding
+# the same lightweight object graph on every call.
+_trade_client_cache: Dict[Tuple[str, str], Any] = {}
+_trade_client_cache_lock = threading.Lock()
 
 
 class _RedactSensitiveWebullFields(logging.Filter):
@@ -65,24 +79,38 @@ def is_configured(app_key: str, app_secret: str) -> bool:
 
 
 def _get_trade_client(app_key: str, app_secret: str):
-    from webull.core.client import ApiClient
-    from webull.trade.trade_client import TradeClient
-
     app_key = (app_key or "").strip()
     app_secret = (app_secret or "").strip()
     if not app_key or not app_secret:
         raise ValueError("Webull API credentials are not configured for this account.")
 
-    _redact_webull_sdk_logging()
-    api_client = ApiClient(app_key, app_secret, _REGION_ID)
-    # Marks this instance as already having its logging configured, so
-    # TradeClient._init_logger skips installing its own (duplicate,
-    # unredacted) handler - _redact_webull_sdk_logging above is the only
-    # handler that ever gets attached, once per process.
-    api_client._stream_logger_set = True
-    api_client._file_logger_set = True
-    api_client.add_endpoint(_REGION_ID, _SANDBOX_ENDPOINT)
-    return TradeClient(api_client)
+    cache_key = (app_key, app_secret)
+    cached_client = _trade_client_cache.get(cache_key)
+    if cached_client is not None:
+        return cached_client
+
+    with _trade_client_cache_lock:
+        # Re-check inside the lock - another thread may have built and
+        # cached this exact credential pair's client while we were waiting.
+        cached_client = _trade_client_cache.get(cache_key)
+        if cached_client is not None:
+            return cached_client
+
+        from webull.core.client import ApiClient
+        from webull.trade.trade_client import TradeClient
+
+        _redact_webull_sdk_logging()
+        api_client = ApiClient(app_key, app_secret, _REGION_ID)
+        # Marks this instance as already having its logging configured, so
+        # TradeClient._init_logger skips installing its own (duplicate,
+        # unredacted) handler - _redact_webull_sdk_logging above is the only
+        # handler that ever gets attached, once per process.
+        api_client._stream_logger_set = True
+        api_client._file_logger_set = True
+        api_client.add_endpoint(_REGION_ID, _SANDBOX_ENDPOINT)
+        trade_client = TradeClient(api_client)
+        _trade_client_cache[cache_key] = trade_client
+        return trade_client
 
 
 def get_paper_accounts(app_key: str, app_secret: str) -> List[Dict[str, Any]]:
