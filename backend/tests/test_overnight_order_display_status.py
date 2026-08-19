@@ -142,6 +142,31 @@ def test_trade_journal_page_shows_partial_fill_quantity(user_id):
     assert "4 / 10 filled" in body
 
 
+def test_trade_journal_page_shows_plain_quantity_when_filled_quantity_was_never_set(user_id):
+    """Found live in production: an order record with NO filled_quantity
+    key at all (e.g. a manual test order, or a freshly-submitted
+    autonomous entry before any fill has been detected) must show the
+    plain requested quantity, not a broken "/ 1 filled" - Jinja's
+    `is not none` alone is true for a genuinely MISSING key too (its
+    Undefined sentinel is not literally None), so the quantity cell needs
+    `is defined` as well, not just `is not none`."""
+    registered_user_id = _registered_user(user_id[:8] + "nofq")
+    record_overnight_order(registered_user_id, {
+        "ticker": "AAPL", "status": "placed", "quantity": 1, "limit_price": 200.0,
+        "source": "manual_test_order",
+        # deliberately no "filled_quantity" key at all
+    })
+
+    with pluto_app.app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["user_id"] = registered_user_id
+        response = client.get("/trade-journal")
+
+    body = response.data.decode("utf-8")
+    assert "/ 1 filled" not in body  # the broken pattern this regression covers
+    assert "<td>1</td>" in body
+
+
 def test_trade_journal_page_still_shows_skip_reason_for_pre_submission_skips(user_id):
     """A candidate that never reached submission at all (no
     lifecycle_state) must keep showing its original skip reason - this
