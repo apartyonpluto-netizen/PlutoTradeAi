@@ -4,8 +4,11 @@ import hmac
 import json
 import math
 import os
+import resource
 import secrets as secrets_module
+import sys
 import time
+import tracemalloc
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
@@ -353,6 +356,64 @@ if os.environ.get("FORCE_SECURE_COOKIES", "0") == "1":
     app.config["SESSION_COOKIE_SECURE"] = True
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
+# --- TEMPORARY memory-leak diagnostic instrumentation (2026-08-19) ---------
+# Added while actively debugging recurring OOM crashes on Render. The
+# trade-client-caching fix in integrations/webull.py cut the crash
+# frequency from every 5-30 minutes down to roughly every 2 hours, but a
+# residual, slower leak clearly remains, and an Explore-agent audit ruled
+# out every module-level cache in this file (MARKET_CACHE and friends
+# below) as unreachable from the hot ~10s continuous-monitor loop. With no
+# shell/debugger access to the live deployment, this points tracemalloc
+# directly at that loop instead and logs the biggest-growing allocation
+# sites periodically via the normal logger, so they show up in Render's own
+# log viewer with no extra tooling needed. REMOVE once the residual leak is
+# found and fixed - not meant to be permanent. ru_maxrss's unit is
+# platform-dependent (KB on Linux, where this actually runs in production;
+# bytes on macOS) - the /1024 below is correct for the Linux deployment,
+# not necessarily for local dev.
+_MEMORY_PROFILING_ENABLED = (
+    os.environ.get("PLUTO_MEMORY_PROFILING", "1").strip().lower() not in ("0", "false", "off")
+    # tracemalloc instruments every allocation process-wide - real, measurable
+    # overhead across the whole test suite for zero diagnostic value (tests
+    # never loop the continuous-monitor-tick endpoint enough times to log
+    # anything). Skip it under pytest - checking sys.modules rather than the
+    # PYTEST_CURRENT_TEST env var, since that var is only set once a test is
+    # actually RUNNING, not yet during collection when this module (and this
+    # line) first gets imported; the pytest package itself is already in
+    # sys.modules by then regardless.
+    and "pytest" not in sys.modules
+)
+if _MEMORY_PROFILING_ENABLED:
+    tracemalloc.start(10)
+_memory_profile_baseline_snapshot = tracemalloc.take_snapshot() if _MEMORY_PROFILING_ENABLED else None
+_memory_profile_tick_count = 0
+_MEMORY_PROFILE_LOG_EVERY_N_TICKS = 30  # ~5 minutes at the worker's default 10s interval
+
+
+def _maybe_log_memory_profile_snapshot() -> None:
+    """Called once per continuous-monitor-tick request - logs a tracemalloc
+    diff against the FIRST snapshot ever taken (process start) every
+    _MEMORY_PROFILE_LOG_EVERY_N_TICKS calls, so the log shows exactly which
+    allocation site is growing over time, not just that memory is growing
+    overall. Never lets a profiling failure affect the real tick - this is
+    diagnostic-only, wrapped defensively."""
+    global _memory_profile_tick_count
+    if not _MEMORY_PROFILING_ENABLED:
+        return
+    _memory_profile_tick_count += 1
+    if _memory_profile_tick_count % _MEMORY_PROFILE_LOG_EVERY_N_TICKS != 0:
+        return
+    try:
+        peak_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        logger.warning("MEMORY_PROFILE: tick=%d peak_rss_mb=%.1f", _memory_profile_tick_count, peak_rss_mb)
+        current_snapshot = tracemalloc.take_snapshot()
+        top_stats = current_snapshot.compare_to(_memory_profile_baseline_snapshot, "lineno")
+        for stat in top_stats[:8]:
+            logger.warning("MEMORY_PROFILE:   %s", stat)
+    except Exception as error:  # noqa: BLE001 - diagnostic code must never affect the real tick
+        logger.warning("MEMORY_PROFILE: snapshot failed: %s", error)
+# --- end temporary memory-leak diagnostic instrumentation ------------------
 
 # Curated, liquid Nasdaq-heavy scan universe (mostly Nasdaq-100 constituents
 # plus SPY/QQQ). scan_market() fetches this in two batched yf.download() calls
@@ -8045,6 +8106,11 @@ def api_autonomy_continuous_monitor_tick():
                 still_transitional=total_still_transitional,
                 failures_by_account=failures_by_account,
             )
+            # Temporary leak-hunting instrumentation - see the module-level
+            # comment above _MEMORY_PROFILING_ENABLED. This IS the ~10s hot
+            # loop under investigation, so the snapshot is taken from
+            # exactly the code path in question.
+            _maybe_log_memory_profile_snapshot()
     except ContinuousMonitorTickAlreadyRunningError as error:
         # Deliberately does NOT call record_continuous_monitor_reconciliation_completed -
         # no reconciliation actually happened this request. "Worker
