@@ -56,6 +56,16 @@ def scan_market(
     results: List[Dict[str, str]] = []
 
     try:
+        # timeout=15 - found live in production (2026-08-20, market open):
+        # with no timeout at all, a Yahoo rate-limit response
+        # (YFRateLimitError) can leave yfinance retrying/hanging well past
+        # gunicorn's own 60s worker timeout instead of failing fast into
+        # the except below. With only 2 gunicorn workers, one request stuck
+        # this long can starve every other request (including unrelated
+        # pages) of a worker to run on at all, surfacing as a 502 that never
+        # even reaches this app's own request logging. 15s (not 8s, like
+        # the single-ticker brains below) since this one call covers the
+        # WHOLE scan universe (~48 tickers) at once, not just one.
         daily = yf.download(
             tickers=" ".join(scan_tickers),
             period="1mo",
@@ -64,6 +74,7 @@ def scan_market(
             progress=False,
             threads=True,
             group_by="ticker",
+            timeout=15,
         )
         intraday = yf.download(
             tickers=" ".join(scan_tickers),
@@ -73,6 +84,7 @@ def scan_market(
             progress=False,
             threads=True,
             group_by="ticker",
+            timeout=15,
         )
     except Exception as error:
         return [], [f"Scanner fetch failed: {error}"], now_stamp

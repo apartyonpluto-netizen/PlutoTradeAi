@@ -113,6 +113,10 @@ def build_chart_levels(ticker: str, extended_hours: Dict[str, object] | None = N
     extended_hours = extended_hours or {}
 
     try:
+        # timeout=8 - see market_scanner.py's own comment on the identical
+        # fix for the full incident writeup (production 502s at market
+        # open, traced to an unbounded yfinance hang under Yahoo rate
+        # limiting starving gunicorn's whole worker pool).
         daily = yf.download(
             tickers=normalized,
             period="9mo",
@@ -120,6 +124,7 @@ def build_chart_levels(ticker: str, extended_hours: Dict[str, object] | None = N
             auto_adjust=False,
             progress=False,
             threads=False,
+            timeout=8,
         )
         intraday = yf.download(
             tickers=normalized,
@@ -129,6 +134,7 @@ def build_chart_levels(ticker: str, extended_hours: Dict[str, object] | None = N
             progress=False,
             threads=False,
             prepost=True,
+            timeout=8,
         )
     except Exception as error:
         return _insufficient_payload(normalized, f"Market data fetch failed: {error}")
