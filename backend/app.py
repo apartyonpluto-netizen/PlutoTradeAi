@@ -1404,6 +1404,8 @@ def _build_page_context(
     include_news: bool = False,
     include_trusted_accounts: bool = False,
     include_patterns: bool = False,
+    include_opportunities: bool = True,
+    include_options: bool = True,
     force_refresh: bool = False,
     focus_ticker: str = "",
 ) -> Dict[str, object]:
@@ -1506,7 +1508,12 @@ def _build_page_context(
         NEWS_CACHE.get("rows", []) if _cache_is_fresh(NEWS_CACHE) and NEWS_CACHE.get("user_id") == user_id else []
     )
 
-    intelligence_tickers = _resolve_analysis_tickers(watchlist_tickers, scanner_rows, limit=6)
+    # include_opportunities=False skips this entire block - a caller that
+    # only wants reversal/trend/news/patterns (api_reversal_map,
+    # api_trend_detection) was previously paying for the full
+    # strategy+chart+options pipeline below on every call regardless, for
+    # data it never even reads out of the returned context.
+    intelligence_tickers = _resolve_analysis_tickers(watchlist_tickers, scanner_rows, limit=6) if include_opportunities else []
     scanner_map = {str(row.get("ticker", "")).upper(): row for row in scanner_rows}
 
     def _fetch_ticker_intelligence(ticker: str) -> Tuple[str, Dict[str, object], Dict[str, object], Dict[str, object]]:
@@ -1526,16 +1533,28 @@ def _build_page_context(
                 chart_levels_map[ticker] = chart
 
         # Options data alone fires several Yahoo requests per ticker (expiration
-        # list + one option_chain() call per expiration). Running all tickers at
+        # list + one option_chain() call per expiration) - the heaviest,
+        # most rate-limit-risky part of this whole function - and its
+        # output (options_expirations/expected_move below) is purely
+        # DISPLAY data: nothing in _run_autonomous_trade_scan_locked's own
+        # candidate/entry construction ever reads either field, only the
+        # confidence/ideal_entry/stop/target that come from strategy/chart
+        # instead. include_options=False (used by that scan, and by
+        # extension its preview-scan dry_run sibling) skips this burst
+        # entirely for a caller that doesn't need it, without changing what
+        # a human looking at the dashboard sees. Running all tickers at
         # full concurrency stacks those into a burst large enough to trip
         # Yahoo's rate limiting, so this pool is capped well below the others.
-        with ThreadPoolExecutor(max_workers=min(3, len(intelligence_tickers))) as executor:
-            options_map = dict(
-                zip(
-                    intelligence_tickers,
-                    executor.map(lambda t: get_options_data_for_ticker(t, force_refresh=force_refresh), intelligence_tickers),
+        if include_options:
+            with ThreadPoolExecutor(max_workers=min(3, len(intelligence_tickers))) as executor:
+                options_map = dict(
+                    zip(
+                        intelligence_tickers,
+                        executor.map(lambda t: get_options_data_for_ticker(t, force_refresh=force_refresh), intelligence_tickers),
+                    )
                 )
-            )
+        else:
+            options_map = {}
     else:
         options_map = {}
 
@@ -2680,13 +2699,18 @@ def api_chart_levels_ticker(ticker: str):
 
 @app.route("/api/reversal-map", methods=["GET"])
 def api_reversal_map():
-    context = _build_page_context(include_reversal=True, include_trend=True)
+    # Only reads reversal_rows/trend_errors below - include_opportunities=False
+    # skips the entire strategy+chart+options pipeline this route was
+    # previously paying for on every poll without ever touching its output.
+    context = _build_page_context(include_reversal=True, include_trend=True, include_opportunities=False)
     return jsonify({"rows": context["reversal_rows"], "errors": context["trend_errors"]})
 
 
 @app.route("/api/trend-detection", methods=["GET"])
 def api_trend_detection():
-    context = _build_page_context(include_reversal=True, include_trend=True)
+    # Same reasoning as api_reversal_map just above - only reads
+    # trend_rows/trend_errors, never upcoming_opportunities.
+    context = _build_page_context(include_reversal=True, include_trend=True, include_opportunities=False)
     return jsonify({"rows": context["trend_rows"], "errors": context["trend_errors"]})
 
 
@@ -7099,7 +7123,16 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
     max_position_exposure_percent = float(risk_settings.get("max_position_exposure_percent", 0) or 0)
     position_exposure_cap = _compute_position_exposure_cap(current_balance, max_position_exposure_percent)
 
-    context = _build_page_context(include_reversal=True, include_trend=True)
+    # include_options=False - the heaviest, most rate-limit-risky part of
+    # _build_page_context (a real options-chain fetch per intelligence
+    # ticker) feeds only options_expirations/expected_move on each
+    # opportunity below, and neither field is ever read past this point -
+    # candidate selection, sizing, and _submit_and_protect_entry all key off
+    # ideal_entry/stop/target/confidence, which come from strategy/chart,
+    # not options. Found while investigating the OOM crashes that
+    # repeatedly line up with this exact scan trigger's own GitHub Actions
+    # run timestamps (see the Autonomous scan scheduler 502 failures).
+    context = _build_page_context(include_reversal=True, include_trend=True, include_options=False)
     opportunities = context.get("upcoming_opportunities", [])
 
     today_key = _trading_day_key()

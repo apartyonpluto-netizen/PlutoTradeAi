@@ -7,6 +7,24 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
+# Hoisted to module level (2026-08-19) - these four were previously
+# function-local imports inside _call_with_429_retry, _classify_server_exception,
+# _place_order_with_retry, and _fetch_order_detail, re-running the import
+# statement on EVERY call even though the actual module was already cached in
+# sys.modules after the first time. Found while chasing the residual OOM
+# leak: a live tracemalloc snapshot on the deployed service showed
+# <frozen importlib._bootstrap>/_bootstrap_external as the single largest
+# still-growing allocation site by a wide margin (~1MB, 10000+ objects,
+# bigger than any of this app's own code) - _fetch_order_detail alone runs
+# once per transitional order on every fast-monitor/continuous-monitor pass,
+# so this import statement was executing an enormous number of times.
+# Exception class objects themselves are lightweight and side-effect-free to
+# import eagerly, unlike the ApiClient/TradeClient SDK client construction
+# (which is a genuinely heavier, credential-specific object - see
+# _get_trade_client's own per-credential-pair caching instead).
+from webull.core.exception import error_code
+from webull.core.exception.exceptions import ClientException, ServerException
+
 # Paper-trading OpenAPI apps authenticate against a separate sandbox host from
 # the live-trading API - api.webull.com rejects sandbox credentials with a
 # generic 401 "invalid credentials" error that gives no hint the real problem
@@ -127,8 +145,6 @@ def _call_with_429_retry(action_label: str, call):
     exception type every existing caller of these getters already handles
     via `except ValueError` - this changes retry behavior only, not what
     callers see on final failure."""
-    from webull.core.exception.exceptions import ClientException, ServerException
-
     last_error: Optional[BaseException] = None
     for attempt in range(3):
         try:
@@ -256,8 +272,6 @@ def _classify_server_exception(error: "ServerException", action_label: str) -> E
     SDK) - is checked first and is always ambiguous, since there is no
     genuine parsed code to even check against the allowlist. Every other,
     unrecognized code is ambiguous by default."""
-    from webull.core.exception import error_code
-
     code = error.get_error_code()
     if code == error_code.SDK_UNKNOWN_SERVER_ERROR:
         return AmbiguousOrderSubmission(f"Webull API error ({action_label}): {error}")
@@ -282,8 +296,6 @@ def _place_order_with_retry(trade_client, account_id: str, order: Dict[str, Any]
     failure - timeout, dropped connection, malformed local request) is
     always ambiguous: it never proves the broker even received the
     request."""
-    from webull.core.exception.exceptions import ClientException, ServerException
-
     client_order_id = order["client_order_id"]
     last_error: Optional[ServerException] = None
     for attempt in range(3):
@@ -322,8 +334,6 @@ def _fetch_order_detail(trade_client, account_id: str, client_order_id: str) -> 
     in app.py) rely on this distinction to know whether a failed lookup
     conclusively proves the order was never created, or merely means the
     lookup itself failed for an unrelated reason."""
-    from webull.core.exception.exceptions import ClientException, ServerException
-
     for attempt in range(3):
         try:
             response = trade_client.order_v2.get_order_detail(account_id, client_order_id)
