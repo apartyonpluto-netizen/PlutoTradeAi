@@ -212,6 +212,10 @@ def test_that_position_then_closes_with_a_profit_when_the_target_fills_and_the_p
     assert len(closed) == 1
     assert closed[0]["exit_type"] == "target"
     assert closed[0]["net_realized_pnl"] > 0, "target fill above entry must record a WIN, not a loss"
+    # Regression: entry["strategy"] was never actually set anywhere, so
+    # every closed trade's strategy field was always None - found while
+    # building the Tier 1 performance report, which groups by this field.
+    assert closed[0]["strategy"] == "Trend Continuation"
 
     body = _get_trade_journal_html(registered_user_id)
     assert "Closed</td>" in body or ">Closed<" in body

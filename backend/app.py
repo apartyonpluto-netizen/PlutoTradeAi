@@ -107,6 +107,7 @@ if __package__:
         tracked_tickers as webull_tracked_tickers,
     )
     from .autonomy.closed_trades import get_closed_trade, list_closed_trades, record_closed_trade
+    from .autonomy.performance_report import build_performance_report
     from .fast_monitor_heartbeat import (
         get_heartbeat_status as get_fast_monitor_heartbeat_status,
         record_run_completed as record_fast_monitor_run_completed,
@@ -257,6 +258,7 @@ else:
         tracked_tickers as webull_tracked_tickers,
     )
     from autonomy.closed_trades import get_closed_trade, list_closed_trades, record_closed_trade
+    from autonomy.performance_report import build_performance_report
     from fast_monitor_heartbeat import (
         get_heartbeat_status as get_fast_monitor_heartbeat_status,
         record_run_completed as record_fast_monitor_run_completed,
@@ -2038,6 +2040,18 @@ def trade_journal_page() -> str:
         "open_count": len(webull_positions.get("positions", [])) if webull_positions.get("connected") else 0,
     }
     return render_template("trade_journal.html", **context)
+
+
+@app.route("/performance")
+def performance_page() -> str:
+    """Tier 1 of the "make autonomy learn" roadmap - human-readable
+    performance reporting only (see autonomy/performance_report.py's own
+    module docstring for why this is deliberately NOT automated behavior
+    change). include_opportunities=False since this page never needs
+    candidate/scan data, only the account's own closed-trade history."""
+    context = _build_page_context(include_opportunities=False)
+    context["performance_report"] = build_performance_report(_current_user_id())
+    return render_template("performance.html", **context)
 
 
 @app.route("/api/trade-journal/refresh-positions", methods=["POST"])
@@ -7410,6 +7424,13 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             "quantity": quantity,
             "limit_price": limit_price,
             "confidence": opp.get("confidence"),
+            # Was missing entirely until found while building the Tier 1
+            # performance report - every closed_trade record's "strategy"
+            # field (autonomy/closed_trades.py) reads entry.get("strategy"),
+            # which was always None for every trade ever closed since this
+            # key was never actually set here. Without it, breaking down
+            # realized performance by strategy is structurally impossible.
+            "strategy": opp.get("strategy"),
             "trade_quality": opp.get("trade_quality"),
             "trade_thesis": opp.get("trade_thesis"),
             "why_ai_likes_it": opp.get("why_ai_likes_it"),

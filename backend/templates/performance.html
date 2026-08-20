@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · Performance{% endblock %}
+{% block content %}
+{% set report = performance_report %}
+
+<section class="panel">
+    <div class="panel-head">
+        <h3>Performance Report</h3>
+        <span>{{ report.total_closed_trades }} closed trade{{ "s" if report.total_closed_trades != 1 else "" }}</span>
+    </div>
+    <p class="muted">
+        Real track record only &mdash; this page reports what actually happened, broken down by strategy, AI
+        confidence at entry, and the market regime (VIX) at the time. Nothing here changes how the autonomous
+        scan sizes, scores, or picks trades; it's meant to help you decide what to adjust yourself. A win rate
+        or average P&amp;L is flagged <strong>low sample</strong> below {{ report.min_sample_size_for_rates }}
+        trades with known P&amp;L &mdash; treat those as noise, not signal.
+        {% if report.incomplete_pnl_count %}
+        {{ report.incomplete_pnl_count }} closed trade{{ "s" if report.incomplete_pnl_count != 1 else "" }}
+        {{ "have" if report.incomplete_pnl_count != 1 else "has" }} incomplete fill-price data and
+        {{ "are" if report.incomplete_pnl_count != 1 else "is" }} excluded from every P&amp;L figure below
+        (still counted toward trade counts).
+        {% endif %}
+    </p>
+    <div class="account-summary-card" style="margin-top: 12px;">
+        <div class="account-summary-value">
+            {% if report.overall.total_pnl is not none %}
+            <span class="{{ 'tone-positive' if report.overall.total_pnl > 0 else 'tone-negative' if report.overall.total_pnl < 0 else '' }}">
+                {{ "+" if report.overall.total_pnl > 0 else "" }}${{ "%.2f"|format(report.overall.total_pnl) }}
+            </span>
+            {% else %}
+            &mdash;
+            {% endif %}
+        </div>
+        <div class="account-summary-pnl">
+            {% if report.overall.win_rate_percent is not none %}
+            {{ report.overall.win_rate_percent }}% win rate ({{ report.overall.wins }}W / {{ report.overall.losses }}L)
+            {% if not report.overall.sufficient_sample %}<span class="muted">&mdash; low sample</span>{% endif %}
+            {% else %}
+            No decided trades yet.
+            {% endif %}
+        </div>
+    </div>
+</section>
+
+{% macro breakdown_table(title, rows) %}
+<section class="panel">
+    <div class="panel-head">
+        <h3>{{ title }}</h3>
+        <span>{{ rows|length }} group{{ "s" if rows|length != 1 else "" }}</span>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>Group</th>
+                <th>Trades</th>
+                <th>W / L</th>
+                <th>Win Rate</th>
+                <th>Avg P&amp;L</th>
+                <th>Total P&amp;L</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in rows %}
+            <tr>
+                <td>{{ row.label }}{% if not row.sufficient_sample %} <span class="muted">(low sample)</span>{% endif %}</td>
+                <td>{{ row.count }}</td>
+                <td>{{ row.wins }} / {{ row.losses }}</td>
+                <td>{{ row.win_rate_percent ~ "%" if row.win_rate_percent is not none else "—" }}</td>
+                <td class="{{ 'tone-positive' if row.avg_pnl and row.avg_pnl > 0 else 'tone-negative' if row.avg_pnl and row.avg_pnl < 0 else '' }}">
+                    {{ "${:,.2f}".format(row.avg_pnl) if row.avg_pnl is not none else "—" }}
+                </td>
+                <td class="{{ 'tone-positive' if row.total_pnl and row.total_pnl > 0 else 'tone-negative' if row.total_pnl and row.total_pnl < 0 else '' }}">
+                    {{ "${:,.2f}".format(row.total_pnl) if row.total_pnl is not none else "—" }}
+                </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="6" class="muted">No closed trades in this breakdown yet.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endmacro %}
+
+{{ breakdown_table("By Strategy", report.by_strategy) }}
+{{ breakdown_table("By Confidence at Entry", report.by_confidence) }}
+{{ breakdown_table("By Market Regime (VIX)", report.by_regime) }}
+{% endblock %}
