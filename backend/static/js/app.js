@@ -1029,6 +1029,75 @@ const bindAccountHubPage = () => {
     });
   }
 
+  const stage3OrderResult = document.getElementById("stage3OrderResult");
+  const placeStage3OrderBtn = document.getElementById("placeStage3OrderButton");
+  if (placeStage3OrderBtn instanceof HTMLButtonElement) {
+    placeStage3OrderBtn.addEventListener("click", async () => {
+      const tickerInput = document.getElementById("stage3OrderTicker");
+      const stopInput = document.getElementById("stage3OrderStopPrice");
+      const targetInput = document.getElementById("stage3OrderTargetPrice");
+      const ticker = tickerInput instanceof HTMLInputElement ? tickerInput.value.trim().toUpperCase() : "";
+      const stopPrice = stopInput instanceof HTMLInputElement ? Number(stopInput.value) : NaN;
+      const targetPrice = targetInput instanceof HTMLInputElement ? Number(targetInput.value) : NaN;
+      if (!ticker || !stopPrice || !targetPrice) {
+        showToast("Enter a ticker, stop price, and target price.", "error");
+        return;
+      }
+      if (
+        !window.confirm(
+          `Place a REAL BUY order for 1 share of ${ticker} on your Webull sandbox, with a real stop-loss at ` +
+            `$${stopPrice} and take-profit at $${targetPrice}? The entry price is computed automatically, slightly ` +
+            `above the current market price so it can actually fill.`
+        )
+      ) {
+        return;
+      }
+      placeStage3OrderBtn.disabled = true;
+      const originalText = placeStage3OrderBtn.textContent;
+      placeStage3OrderBtn.textContent = "Placing...";
+      if (stage3OrderResult instanceof HTMLElement) {
+        stage3OrderResult.textContent = "Submitting, then polling for fill and protection - this can take up to a minute...";
+      }
+      try {
+        const result = await requestJson("/api/webull/place-stage3-order", {
+          method: "POST",
+          body: JSON.stringify({ ticker, stop_price: stopPrice, target_price: targetPrice }),
+        });
+        showToast(`Stage 3 order for ${ticker}: ${result.display_status || result.status}.`, "success");
+        window.location.reload();
+      } catch (error) {
+        if (stage3OrderResult instanceof HTMLElement) stage3OrderResult.textContent = error.message;
+        showToast(error.message, "error");
+      } finally {
+        placeStage3OrderBtn.disabled = false;
+        placeStage3OrderBtn.textContent = originalText;
+      }
+    });
+  }
+
+  const stage3OrdersTable = document.getElementById("stage3OrdersTable");
+  if (stage3OrdersTable instanceof HTMLElement) {
+    stage3OrdersTable.addEventListener("click", async (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement) || !target.classList.contains("close-webull-position")) return;
+      const ticker = target.dataset.ticker || "";
+      if (!ticker) return;
+      if (!window.confirm(`Close your entire ${ticker} position at the current market price? This places a real sandbox sell order.`)) return;
+      target.disabled = true;
+      try {
+        await requestJson("/api/trade-journal/close-position", {
+          method: "POST",
+          body: JSON.stringify({ ticker }),
+        });
+        showToast(`${ticker} close order placed.`, "success");
+        window.location.reload();
+      } catch (error) {
+        showToast(error.message, "error");
+        target.disabled = false;
+      }
+    });
+  }
+
   const modal = document.getElementById("setupModal");
   if (!(modal instanceof HTMLElement)) return;
   const closeModal = () => {

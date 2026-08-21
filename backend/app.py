@@ -2009,6 +2009,26 @@ def account_hub_page() -> str:
     context["manual_test_orders"] = [
         order for order in list_overnight_orders(user_id) if order.get("source") == "manual_test_order"
     ]
+    # Stage 3 panel - see api_webull_place_stage3_order's own docstring for
+    # what this tool is. display_status mirrors the Trade Journal's own
+    # Overnight Orders table (_overnight_order_display_status) so a Stage 3
+    # entry shows its real live lifecycle state, not a stale "placed" label.
+    stage3_orders = [order for order in list_overnight_orders(user_id) if order.get("source") == "stage3_test_order"]
+    for order in stage3_orders:
+        order["display_status"] = _overnight_order_display_status(order)
+        # Whether "Close Position" should be offered - any state with real
+        # shares filled and not yet CLOSED. A stale button (the position
+        # already closed by some other path) just fails safely with
+        # api_close_webull_position's own clear "no open position" error -
+        # simpler and more consistent with this app's other best-effort UI
+        # than re-fetching live broker positions just for this check.
+        order["stage3_closeable"] = order.get("lifecycle_state") in {
+            ol.ENTRY_FILLED,
+            ol.PROTECTION_PENDING,
+            ol.PROTECTION_CONFIRMED_ACTIVE,
+            ol.PROTECTION_FAILED,
+        }
+    context["stage3_orders"] = stage3_orders
     return render_template("account_hub.html", **context)
 
 
@@ -2374,6 +2394,169 @@ def api_webull_cancel_test_order():
         "zero_fill_confirmed": fill["filled_quantity"] == 0,
     }
     return _api_success(result, **result)
+
+
+# Stage 3 of the staged sandbox validation plan (see conversation history):
+# ONE real, genuinely fillable share, with REAL stop-loss/take-profit
+# protection placed and confirmed - the opposite of Stage 2 above, which
+# deliberately guarantees a NON-fill. Where Stage 2 proves placement/
+# cancellation works, Stage 3 proves the full entry -> fill -> protection
+# pipeline works against a real broker fill, using the EXACT SAME
+# _submit_and_protect_entry / _reconcile_entry_fill_and_protection path the
+# autonomous scan itself uses - not a simplified reimplementation that could
+# silently diverge from production behavior. This is a mechanics test, not a
+# strategy test: stop/target come from the caller, not the AI.
+STAGE3_ENTRY_QUANTITY = 1
+STAGE3_MARKETABLE_PREMIUM_ABOVE_MARKET = 0.005
+
+
+@app.route("/api/webull/place-stage3-order", methods=["POST"])
+@api_guard
+def api_webull_place_stage3_order():
+    """Places STAGE3_ENTRY_QUANTITY (1) real, genuinely fillable BUY share
+    against the caller's own real Webull sandbox account, then drives it
+    through real stop-loss/take-profit placement and confirmation.
+
+    Deliberately narrow, same spirit as api_webull_place_test_order (Stage
+    2) above:
+      - hardcoded side=BUY, hardcoded quantity=STAGE3_ENTRY_QUANTITY -
+        "one real share", literally, no caller override;
+      - the entry limit price is computed server-side from a fresh market
+        quote, STAGE3_MARKETABLE_PREMIUM_ABOVE_MARKET above the current
+        price so it's genuinely marketable - the opposite of Stage 2's
+        deliberate below-market discount - never trusted from the client;
+      - stop_price/target_price are supplied by the caller and required:
+        this is a CONTROLLED test of whether the mechanism correctly
+        protects whatever levels are given, not a strategy/sizing test,
+        so unlike Stage 2 (entry only, no protection at all) both legs are
+        mandatory here. Validated server-side for sane long-position
+        ordering (stop < entry < target);
+      - restricted to CORE trading hours for the same reason
+        _new_entries_allowed gates the autonomous scan: place_stop_loss_order
+        only accepts CORE, and this whole tool exists to prove real
+        protection lands, so running it when a real stop can't even be
+        placed would test the wrong thing;
+      - held under the same per-user scan lock (scan_lock.py) as the
+        autonomous scan, so this can't race a concurrent autonomous entry
+        or a double-click of this same button - ScanAlreadyRunningError
+        surfaces as a clean 409 via api_guard, same as the manual "Run
+        Scan" button;
+      - reuses _submit_and_protect_entry unmodified - the exact same
+        placement, fill-polling, protection-sizing, and
+        protection-confirmation path production trading uses;
+      - recorded via record_overnight_order with source="stage3_test_order"
+        (distinct from Stage 2's "manual_test_order"), visible in Account
+        Hub's own Stage 3 panel and the regular Trade Journal;
+      - "controlled exit" deliberately reuses the EXISTING, already-generic
+        api_close_webull_position endpoint above rather than a new one -
+        it already looks up the real broker position by ticker, cancels
+        resting protective legs via pop_exit_orders (which
+        _reconcile_protective_leg_quantity already records both legs into
+        via record_exit_order), and sells at the current price. No new
+        exit code path needed, and no risk of it silently diverging from
+        the exit path every other position in this app already uses."""
+    payload = request.get_json(silent=True) or {}
+    ticker = str(payload.get("ticker", "")).strip().upper()
+    if not ticker:
+        raise ValidationError("Ticker is required.")
+    try:
+        stop_price = float(payload.get("stop_price"))
+    except (TypeError, ValueError):
+        raise ValidationError("Stop price must be a number.")
+    try:
+        target_price = float(payload.get("target_price"))
+    except (TypeError, ValueError):
+        raise ValidationError("Target price must be a number.")
+    if stop_price <= 0 or target_price <= 0:
+        raise ValidationError(
+            "Stop price and target price must both be positive - Stage 3 proves REAL protection, so both legs "
+            "are required, unlike Stage 2's entry-only test."
+        )
+
+    if not _new_entries_allowed(_current_webull_trading_session()):
+        raise ValidationError(
+            "Stage 3 requires CORE trading hours - place_stop_loss_order only accepts CORE, and this tool exists "
+            "to prove real protection actually lands, so it refuses to run when that couldn't happen anyway."
+        )
+
+    user_id = _current_user_id()
+    creds = get_webull_credentials(user_id)
+    if not is_webull_configured(user_id):
+        raise ValidationError("Enter your Webull App Key and App Secret in Account Hub first.")
+
+    quote_rows, _quote_errors, _last_updated = scan_market(tickers=[ticker])
+    quote_row = quote_rows[0] if quote_rows else None
+    if not quote_row or not quote_row.get("price"):
+        raise ValidationError(
+            f"Could not fetch a current market price for {ticker} - refusing to place a Stage 3 order without one."
+        )
+    market_price = float(quote_row["price"])
+    limit_price = round(market_price * (1 + STAGE3_MARKETABLE_PREMIUM_ABOVE_MARKET), 2)
+
+    if not (stop_price < limit_price < target_price):
+        raise ValidationError(
+            f"Stop price (${stop_price:,.2f}) must be below the entry price (${limit_price:,.2f}, computed "
+            f"{STAGE3_MARKETABLE_PREMIUM_ABOVE_MARKET * 100:g}% above the current market price of "
+            f"${market_price:,.2f}), which must be below the target price (${target_price:,.2f})."
+        )
+
+    sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
+    cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
+    if not cash_account:
+        raise ValidationError("No Webull sandbox account found for these credentials.")
+    account_id = cash_account["account_id"]
+
+    trading_day = _trading_day_key()
+    entry: Dict[str, object] = {
+        "ticker": ticker,
+        "side": "BUY",
+        "quantity": STAGE3_ENTRY_QUANTITY,
+        "limit_price": limit_price,
+        "stop": stop_price,
+        "target": target_price,
+        "market_price_at_placement": market_price,
+        "account_id": account_id,
+        "status": "pending",
+        "source": "stage3_test_order",
+        "trading_day": trading_day,
+    }
+
+    with user_scan_lock(user_id):
+        _submit_and_protect_entry(
+            user_id=user_id,
+            creds=creds,
+            account_id=account_id,
+            ticker=ticker,
+            requested_quantity=STAGE3_ENTRY_QUANTITY,
+            limit_price=limit_price,
+            stop_price=stop_price,
+            target_price=target_price,
+            trading_day=trading_day,
+            entry=entry,
+        )
+
+    # Same three-way status derivation _run_autonomous_trade_scan_locked
+    # uses after calling _submit_and_protect_entry - see its own comment
+    # for why UNKNOWN_SUBMISSION_STATE is a deliberately distinct outcome
+    # from both "placed" and "failed".
+    lifecycle_state = entry.get("lifecycle_state")
+    if lifecycle_state == ol.UNKNOWN_SUBMISSION_STATE:
+        entry["status"] = "unknown_submission_state"
+        entry["error"] = entry.get("error", "order submission result could not be confirmed (ambiguous broker response)")
+    else:
+        entry["status"] = "failed" if lifecycle_state == ol.ENTRY_FAILED else "placed"
+        if entry["status"] == "failed":
+            entry["error"] = entry.get("error", "entry order failed")
+
+    record_overnight_order(user_id, entry)
+    POSITIONS_CACHE.pop(user_id, None)
+    BALANCE_CACHE.pop(user_id, None)
+
+    if entry["status"] == "failed":
+        raise ValidationError(f"Stage 3 entry for {ticker} failed: {entry.get('error')}")
+
+    entry["display_status"] = _overnight_order_display_status(entry)
+    return _api_success(entry, **entry)
 
 
 @app.route("/candle-brain")
