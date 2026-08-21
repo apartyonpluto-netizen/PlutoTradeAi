@@ -1029,6 +1029,72 @@ const bindAccountHubPage = () => {
     });
   }
 
+  const stage3Suggestions = document.getElementById("stage3Suggestions");
+  const suggestStage3Btn = document.getElementById("suggestStage3SetupButton");
+  if (suggestStage3Btn instanceof HTMLButtonElement && stage3Suggestions instanceof HTMLElement) {
+    const fillStage3Form = (candidate) => {
+      const tickerInput = document.getElementById("stage3OrderTicker");
+      const stopInput = document.getElementById("stage3OrderStopPrice");
+      const targetInput = document.getElementById("stage3OrderTargetPrice");
+      if (tickerInput instanceof HTMLInputElement) tickerInput.value = candidate.ticker || "";
+      if (stopInput instanceof HTMLInputElement) stopInput.value = candidate.stop_price ?? "";
+      if (targetInput instanceof HTMLInputElement) targetInput.value = candidate.target_price ?? "";
+      showToast(`Filled in ${candidate.ticker} - review it, then Place Stage 3 Order yourself when ready.`, "success");
+    };
+
+    const renderSuggestion = (candidate) => {
+      const item = document.createElement("li");
+      item.className = "preview-scan-candidate placed";
+      const heading = document.createElement("strong");
+      heading.textContent = `${candidate.ticker} — confidence ${candidate.confidence}`;
+      item.appendChild(heading);
+      const detail = document.createElement("p");
+      detail.className = "muted";
+      detail.textContent =
+        `Stop $${candidate.stop_price}, target $${candidate.target_price}.` +
+        (candidate.why_ai_likes_it ? ` ${candidate.why_ai_likes_it}` : "");
+      item.appendChild(detail);
+      const useButton = document.createElement("button");
+      useButton.type = "button";
+      useButton.className = "ghost-button";
+      useButton.textContent = "Use This Setup";
+      useButton.addEventListener("click", () => fillStage3Form(candidate));
+      item.appendChild(useButton);
+      return item;
+    };
+
+    suggestStage3Btn.addEventListener("click", async () => {
+      suggestStage3Btn.disabled = true;
+      const originalText = suggestStage3Btn.textContent;
+      suggestStage3Btn.textContent = "Scanning...";
+      stage3Suggestions.replaceChildren();
+      try {
+        const result = await requestJson("/api/autonomy/preview-scan", { method: "POST" });
+        const candidates = (result.placed || []).slice().sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+        if (!candidates.length) {
+          const empty = document.createElement("p");
+          empty.className = "muted";
+          empty.textContent = "No qualifying setups found this scan - try again in a few minutes.";
+          stage3Suggestions.appendChild(empty);
+        } else {
+          const list = document.createElement("ul");
+          list.className = "preview-scan-list";
+          candidates.forEach((candidate) => list.appendChild(renderSuggestion(candidate)));
+          stage3Suggestions.appendChild(list);
+        }
+      } catch (error) {
+        showToast(error.message, "error");
+        const errorText = document.createElement("p");
+        errorText.className = "muted";
+        errorText.textContent = error.message;
+        stage3Suggestions.appendChild(errorText);
+      } finally {
+        suggestStage3Btn.disabled = false;
+        suggestStage3Btn.textContent = originalText;
+      }
+    });
+  }
+
   const stage3OrderResult = document.getElementById("stage3OrderResult");
   const placeStage3OrderBtn = document.getElementById("placeStage3OrderButton");
   if (placeStage3OrderBtn instanceof HTMLButtonElement) {

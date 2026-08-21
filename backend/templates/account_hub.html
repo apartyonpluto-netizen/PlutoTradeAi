@@ -177,6 +177,13 @@
         Requires CORE trading hours, since stop-loss orders only work then. Use "Close Position" below for a
         controlled exit whenever you're done testing.
     </p>
+    <button type="button" class="ghost-button" id="suggestStage3SetupButton">Suggest Setups</button>
+    <p class="muted">
+        Pulls real candidates from the same Preview Scan research (real market data, real strategy/chart analysis)
+        &mdash; pick one to fill in the ticker, stop, and target below. Still just a suggestion: review it, edit it
+        if you want, and you still have to click Place and confirm yourself.
+    </p>
+    <div id="stage3Suggestions" class="preview-scan-result"></div>
     <div class="grid-form" style="margin-top: 12px;">
         <input type="text" id="stage3OrderTicker" placeholder="Ticker (e.g. AAPL)">
         <input type="number" id="stage3OrderStopPrice" placeholder="Stop price ($)" step="0.01">
