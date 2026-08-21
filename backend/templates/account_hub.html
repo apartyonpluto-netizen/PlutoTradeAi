@@ -309,11 +309,12 @@
         <li><b>AUTONOMOUS</b> &mdash; the only mode that submits sandbox orders automatically and unattended, on the external scheduler's own cadence. See Scan Run History below to confirm it is actually running for this account before relying on it.</li>
     </ul>
     <p class="muted tone-caution">
-        Do not switch to AUTONOMOUS yet: the scheduler currently driving this (a GitHub Actions cron job, not a
-        dedicated Render worker) has an observed real-world cadence of roughly once per hour rather than every 5
-        minutes, and the continuous 5&ndash;10 second order-safety monitor this app was built to require before
-        unattended trading is not yet deployed. Existing-position monitoring (protecting anything already open) is
-        independent of mode and unaffected by this.
+        Heads-up on cadence: the continuous order-safety monitor (protecting and exiting anything already open) is
+        deployed and running independent of mode &mdash; check Scan Run History's Monitor Healthy column to confirm
+        it's ticking for this account. New-entry scanning is different: it's driven by a GitHub Actions cron job, not
+        a dedicated Render worker, with an observed real-world cadence of roughly once per hour rather than every 5
+        minutes &mdash; so in AUTONOMOUS mode, a qualifying setup can sit unactioned for a while before a scan
+        actually reaches it.
     </p>
     <p class="muted">Sandbox only &mdash; live real-money execution stays locked regardless of mode.</p>
 </section>

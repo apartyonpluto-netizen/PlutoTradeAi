@@ -7587,22 +7587,32 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
     for opp in opportunities:
         if opp in candidates:
             continue
-        if not entries_allowed and opp in qualifying:
+        opp_was_qualifying = opp in qualifying
+        # Only the max-positions/no-slots branch needs surfacing per-ticker
+        # in the scan-run reason text (see the sizing-rejection skip's own
+        # comment, above, in the main candidate loop) - the blocked-entries
+        # branch is already covered once, globally, via
+        # new_entries_blocked_reason in the top-level summary, so tagging it
+        # too would just duplicate the same reason for every candidate.
+        surface_in_summary = False
+        if not entries_allowed and opp_was_qualifying:
             reason = new_entries_blocked_reason
-        elif opp in qualifying:
+        elif opp_was_qualifying:
             reason = f"max_positions limit reached ({open_position_count}/{max_positions} open)" if max_positions > 0 else "no position slots available"
+            surface_in_summary = True
         elif str(opp.get("recommendation", "")).upper() == "CALL":
             reason = f"confidence {opp.get('confidence')} below {OVERNIGHT_MIN_CONFIDENCE} threshold"
         else:
             reason = f"recommendation is {opp.get('recommendation')}, only CALL/bullish setups auto-order tonight"
-        skipped.append(
-            {
-                "ticker": opp.get("ticker"),
-                "recommendation": opp.get("recommendation"),
-                "confidence": opp.get("confidence"),
-                "reason_skipped": reason,
-            }
-        )
+        skip_record = {
+            "ticker": opp.get("ticker"),
+            "recommendation": opp.get("recommendation"),
+            "confidence": opp.get("confidence"),
+            "reason_skipped": reason,
+        }
+        if surface_in_summary:
+            skip_record["was_qualifying"] = True
+        skipped.append(skip_record)
         _log_research_decision(
             ticker=opp.get("ticker"), recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
             raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=reason,
@@ -7657,6 +7667,15 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                     "reason_skipped": sizing["reason"],
                     "sizing_constraints": sizing["constraints"],
                     "binding_constraints": sizing["binding_constraints"],
+                    # Marks this as a candidate that passed confidence AND
+                    # made it into this run's capped candidate slice, not
+                    # merely "didn't qualify" - see
+                    # _summarize_scan_result_for_run_log, which surfaces
+                    # exactly these in the persisted scan-run reason text.
+                    # Before this, a qualifying candidate silently sized to
+                    # zero shares showed up as "N qualifying, 0 placed" with
+                    # no trace of why anywhere a human could see it.
+                    "was_qualifying": True,
                 }
             )
             _log_research_decision(
@@ -7735,6 +7754,9 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             if veto_reason:
                 entry["status"] = "skipped"
                 entry["reason_skipped"] = veto_reason
+                # See the sizing-rejection skip's own comment above - same
+                # "surface it in the scan-run reason text" reasoning.
+                entry["was_qualifying"] = True
                 skipped.append(entry)
                 if not dry_run:
                     record_overnight_order(user_id, entry)
@@ -8023,6 +8045,24 @@ def _summarize_scan_result_for_run_log(scan_result: Dict[str, object]) -> Dict[s
                      f"{outcomes['placed']} placed, {outcomes['failed']} failed, {outcomes['unknown_submission_state']} ambiguous"]
     if not scan_result.get("entries_allowed", True) and scan_result.get("new_entries_blocked_reason"):
         reason_parts.append(f"new entries blocked this tick: {scan_result['new_entries_blocked_reason']}")
+
+    # A candidate that passed confidence and was never blocked by the
+    # global entries_allowed gate could still be dropped before ever
+    # reaching submission - sized down to 0 shares, LLM-vetoed, or crowded
+    # out by max_positions/no open slots. None of that shows up in the
+    # placed/failed/ambiguous counts above (none of them ever call
+    # _submit_and_protect_entry), so a run could previously read "2
+    # qualifying, 0 placed, 0 failed, 0 ambiguous" with zero trace anywhere
+    # a human could see of what actually happened to those 2 candidates.
+    # was_qualifying=True (set at each of the three skip sites above) is
+    # what marks these specifically, as opposed to a candidate that simply
+    # never qualified in the first place (below-threshold confidence, or a
+    # non-CALL recommendation) - reporting every one of those individually
+    # here would bury the signal in noise on any normal scan.
+    silently_skipped = [e for e in skipped if isinstance(e, dict) and e.get("was_qualifying") and e.get("reason_skipped")]
+    if silently_skipped:
+        details = "; ".join(f"{e.get('ticker', '?')} ({e['reason_skipped']})" for e in silently_skipped)
+        reason_parts.append(f"not submitted - {details}")
 
     return {
         "candidates_found": candidates_found,
