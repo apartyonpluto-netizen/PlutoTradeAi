@@ -10,7 +10,7 @@ import sys
 import time
 import tracemalloc
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, wait as futures_wait
 from functools import wraps
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -965,6 +965,36 @@ def _ticker_key(tickers: List[str]) -> Tuple[str, ...]:
     return tuple(sorted({ticker.strip().upper() for ticker in tickers if ticker}))
 
 
+# Overridable in tests so a "stuck" fetch can be simulated with a short
+# sleep instead of a real multi-second one. See test_hard_deadline_degradation.py.
+SCAN_MARKET_DEADLINE_SECONDS = 20
+TICKER_INTELLIGENCE_DEADLINE_SECONDS = 30
+OPTIONS_FETCH_DEADLINE_SECONDS = 30
+
+
+def _run_with_hard_deadline(func, args=(), kwargs=None, deadline_seconds=20, default=None):
+    # Bounds a whole yfinance-backed call chain with an outer deadline,
+    # because per-call timeout= kwargs alone can't bound it: yfinance's own
+    # retry-on-429 logic (venv yfinance/data.py's _make_request) does an
+    # UNCONDITIONAL cookie/crumb refetch plus one more request attempt on
+    # any 4xx response including a rate limit, each a full network
+    # round-trip up to that timeout - under sustained Yahoo rate limiting a
+    # single logical call can cost ~3x its nominal timeout. Found live
+    # 2026-08-21: gunicorn's own worker timeout (already raised to 90s)
+    # still fired during a rate-limit storm despite tightened per-call
+    # timeouts. If func hasn't returned within deadline_seconds it's
+    # abandoned - its thread keeps running in the background since Python
+    # can't forcibly kill a thread, but the caller stops waiting on it.
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(func, *args, **(kwargs or {}))
+        return future.result(timeout=deadline_seconds)
+    except FuturesTimeoutError:
+        return default
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
 MACRO_TICKER_LABELS = {
     "SPY": "SPY",
     "QQQ": "QQQ",
@@ -1000,7 +1030,12 @@ def get_market_data(force_refresh: bool = False) -> Tuple[List[Dict[str, object]
 
     watchlist_tickers = get_watchlist_tickers(_current_user_id())
     scan_universe = list(CORE_SCAN_UNIVERSE)
-    rows, errors, last_updated = scan_market(tickers=scan_universe, watchlist_tickers=watchlist_tickers)
+    rows, errors, last_updated = _run_with_hard_deadline(
+        scan_market,
+        kwargs={"tickers": scan_universe, "watchlist_tickers": watchlist_tickers},
+        deadline_seconds=SCAN_MARKET_DEADLINE_SECONDS,
+        default=([], ["Scanner timed out - Yahoo Finance is rate limiting."], _now_utc().isoformat()),
+    )
     if not rows and MARKET_CACHE.get("rows"):
         stale_errors = list(MARKET_CACHE.get("errors", [])) + errors
         MARKET_CACHE.update(
@@ -1528,11 +1563,32 @@ def _build_page_context(
     strategy_map: Dict[str, Dict[str, object]] = {}
     chart_levels_map: Dict[str, Dict[str, object]] = {}
     if intelligence_tickers:
-        with ThreadPoolExecutor(max_workers=len(intelligence_tickers)) as executor:
-            for ticker, extended_hours, strategy, chart in executor.map(_fetch_ticker_intelligence, intelligence_tickers):
+        # Each ticker's thread chains up to 6 sequential yf.download() calls
+        # (this file's extended_hours + strategy + chart, 2 calls each).
+        # executor.map() has no way to give up on a straggler without
+        # blocking every ticker after it in iteration order, so a single
+        # ticker stuck in yfinance's own 429-retry cascade (see
+        # _run_with_hard_deadline's comment) could hang this whole stage
+        # well past gunicorn's worker timeout. futures_wait() with an
+        # overall deadline instead keeps whatever tickers finished in time
+        # and abandons the rest - a page with fewer analyzed tickers beats
+        # a killed worker.
+        executor = ThreadPoolExecutor(max_workers=len(intelligence_tickers))
+        try:
+            future_to_ticker = {
+                executor.submit(_fetch_ticker_intelligence, ticker): ticker for ticker in intelligence_tickers
+            }
+            done, _not_done = futures_wait(future_to_ticker, timeout=TICKER_INTELLIGENCE_DEADLINE_SECONDS)
+            for future in done:
+                try:
+                    ticker, extended_hours, strategy, chart = future.result()
+                except Exception:
+                    continue
                 extended_hours_map[ticker] = extended_hours
                 strategy_map[ticker] = strategy
                 chart_levels_map[ticker] = chart
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         # Options data alone fires several Yahoo requests per ticker (expiration
         # list + one option_chain() call per expiration) - the heaviest,
@@ -1548,13 +1604,22 @@ def _build_page_context(
         # full concurrency stacks those into a burst large enough to trip
         # Yahoo's rate limiting, so this pool is capped well below the others.
         if include_options:
-            with ThreadPoolExecutor(max_workers=min(3, len(intelligence_tickers))) as executor:
-                options_map = dict(
-                    zip(
-                        intelligence_tickers,
-                        executor.map(lambda t: get_options_data_for_ticker(t, force_refresh=force_refresh), intelligence_tickers),
-                    )
-                )
+            options_map = {}
+            options_executor = ThreadPoolExecutor(max_workers=min(3, len(intelligence_tickers)))
+            try:
+                options_future_to_ticker = {
+                    options_executor.submit(get_options_data_for_ticker, t, force_refresh=force_refresh): t
+                    for t in intelligence_tickers
+                }
+                options_done, _options_not_done = futures_wait(options_future_to_ticker, timeout=OPTIONS_FETCH_DEADLINE_SECONDS)
+                for future in options_done:
+                    ticker = options_future_to_ticker[future]
+                    try:
+                        options_map[ticker] = future.result()
+                    except Exception:
+                        continue
+            finally:
+                options_executor.shutdown(wait=False, cancel_futures=True)
         else:
             options_map = {}
     else:
