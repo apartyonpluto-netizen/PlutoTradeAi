@@ -79,12 +79,14 @@ def _fetch_ohlcv(ticker: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     normalized = ticker.strip().upper()
     if not normalized:
         raise ValueError("Ticker is required.")
-    # timeout=8 - see market_scanner.py's own comment on the identical fix
-    # for the full incident writeup. Up to 6 of these sequential yf.download()
-    # calls can happen in a single per-ticker thread (this file, plus
-    # extended_hours_brain.py and charting_brain.py, 2 calls each) - an
-    # unbounded hang on even one of them can starve gunicorn's whole
-    # 2-worker pool of capacity for every other page, not just this one.
+    # timeout=5 - tightened from 8s on 2026-08-21: see market_scanner.py's
+    # own comment for the full incident writeup. Up to 6 of these sequential
+    # yf.download() calls can happen in a single per-ticker thread (this
+    # file, plus extended_hours_brain.py and charting_brain.py, 2 calls
+    # each), and their worst-case totals stack additively within one
+    # request alongside market_scanner's own scan - even bounded per-call
+    # timeouts can sum past gunicorn's worker timeout under real rate
+    # limiting, which is what happened at 8s/call.
     daily = yf.download(
         tickers=normalized,
         period="9mo",
@@ -92,7 +94,7 @@ def _fetch_ohlcv(ticker: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
         auto_adjust=False,
         progress=False,
         threads=False,
-        timeout=8,
+        timeout=5,
     )
     intraday = yf.download(
         tickers=normalized,
@@ -102,7 +104,7 @@ def _fetch_ohlcv(ticker: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
         progress=False,
         threads=False,
         prepost=True,
-        timeout=8,
+        timeout=5,
     )
     return daily, intraday
 

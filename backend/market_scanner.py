@@ -56,16 +56,18 @@ def scan_market(
     results: List[Dict[str, str]] = []
 
     try:
-        # timeout=15 - found live in production (2026-08-20, market open):
-        # with no timeout at all, a Yahoo rate-limit response
-        # (YFRateLimitError) can leave yfinance retrying/hanging well past
-        # gunicorn's own 60s worker timeout instead of failing fast into
-        # the except below. With only 2 gunicorn workers, one request stuck
-        # this long can starve every other request (including unrelated
-        # pages) of a worker to run on at all, surfacing as a 502 that never
-        # even reaches this app's own request logging. 15s (not 8s, like
-        # the single-ticker brains below) since this one call covers the
-        # WHOLE scan universe (~48 tickers) at once, not just one.
+        # timeout=8 - tightened from 15s on 2026-08-21: even with an
+        # explicit per-call timeout, live production logs (Standard plan,
+        # 4 workers) still showed gunicorn's own 60s WORKER TIMEOUT firing
+        # and SIGKILLing workers during a sustained YFRateLimitError burst.
+        # Root cause: this call is sequential with the per-ticker brain
+        # chain below (up to 6 more yf.download() calls per ticker, see
+        # strategy_brain.py's _fetch_ohlcv), so worst-case totals stack
+        # ADDITIVELY within one request. At 15s+8s×6=63s the old numbers
+        # could exceed even a healthy 60s worker timeout on their own,
+        # before any actual rate-limiting. Tightened here and in the brains
+        # to 8s+5s×6=38s, and gunicorn's --timeout raised to 90s (Procfile,
+        # render.yaml) for defense in depth on the new 4-worker/2GB plan.
         daily = yf.download(
             tickers=" ".join(scan_tickers),
             period="1mo",
@@ -74,7 +76,7 @@ def scan_market(
             progress=False,
             threads=True,
             group_by="ticker",
-            timeout=15,
+            timeout=8,
         )
         intraday = yf.download(
             tickers=" ".join(scan_tickers),
@@ -84,7 +86,7 @@ def scan_market(
             progress=False,
             threads=True,
             group_by="ticker",
-            timeout=15,
+            timeout=8,
         )
     except Exception as error:
         return [], [f"Scanner fetch failed: {error}"], now_stamp

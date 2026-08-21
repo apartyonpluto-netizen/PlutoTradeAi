@@ -47,10 +47,11 @@ def build_extended_hours_intelligence(ticker: str) -> Dict[str, object]:
         raise ValueError("Ticker is required.")
 
     try:
-        # timeout=8 - see market_scanner.py's own comment on the identical
-        # fix for the full incident writeup (production 502s at market
-        # open, traced to an unbounded yfinance hang under Yahoo rate
-        # limiting starving gunicorn's whole worker pool).
+        # timeout=5 - tightened from 8s on 2026-08-21: see market_scanner.py's
+        # own comment for the full incident writeup (production 502s/worker
+        # kills at market open, traced to per-call timeouts still stacking
+        # additively past gunicorn's own worker timeout under Yahoo rate
+        # limiting).
         intraday = yf.download(
             tickers=normalized,
             period="2d",
@@ -59,7 +60,7 @@ def build_extended_hours_intelligence(ticker: str) -> Dict[str, object]:
             progress=False,
             threads=False,
             prepost=True,
-            timeout=8,
+            timeout=5,
         )
         daily = yf.download(
             tickers=normalized,
@@ -68,7 +69,7 @@ def build_extended_hours_intelligence(ticker: str) -> Dict[str, object]:
             auto_adjust=False,
             progress=False,
             threads=False,
-            timeout=8,
+            timeout=5,
         )
     except Exception as error:
         return _insufficient_payload(normalized, f"Market data fetch failed: {error}")
