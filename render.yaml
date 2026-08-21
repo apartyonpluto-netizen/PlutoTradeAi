@@ -2,9 +2,9 @@ services:
   - type: web
     name: plutotradeai
     runtime: python
-    plan: starter
+    plan: standard
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --chdir backend app:app --workers 2 --timeout 60 --preload
+    startCommand: gunicorn --chdir backend app:app --workers 4 --timeout 60 --preload
     healthCheckPath: /healthz
     envVars:
       - key: FLASK_SECRET_KEY
