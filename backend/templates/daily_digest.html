@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · Daily Digest{% endblock %}
+{% block content %}
+{% set digest = daily_digest %}
+
+<section class="panel">
+    <div class="panel-head">
+        <h3>Daily Digest</h3>
+        <span>Last {{ digest.window_hours }}h</span>
+    </div>
+    <p class="muted">
+        A read-only summary of what happened and what needs your attention &mdash; pulled from Scan Run History,
+        Trade Journal, and Performance, all of which still have the full detail. Nothing here places, changes, or
+        influences any order.
+    </p>
+    <div class="account-summary-card {{ 'tone-caution' if digest.attention_items else '' }}" style="margin-top: 12px;">
+        <div class="account-summary-value">
+            {% if digest.attention_items %}⚠{% else %}✓{% endif %}
+        </div>
+        <div class="account-summary-pnl">{{ digest.headline }}</div>
+    </div>
+    {% if digest.attention_items|length > 1 %}
+    <ul class="mode-explainer" style="margin-top: 12px;">
+        {% for item in digest.attention_items[1:] %}
+        <li class="{{ 'tone-negative' if item.severity == 'critical' else 'tone-caution' }}">{{ item.message }}</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+</section>
+
+<section class="panel">
+    <div class="panel-head">
+        <h3>Scan Activity</h3>
+        <span>{{ digest.scan_activity.total_scans }} run{{ "s" if digest.scan_activity.total_scans != 1 else "" }}</span>
+    </div>
+    <div class="price-map-grid">
+        <div><small>Candidates Found</small><b>{{ digest.scan_activity.candidates_found }}</b></div>
+        <div><small>Qualifying</small><b>{{ digest.scan_activity.candidates_qualifying }}</b></div>
+        <div><small>Orders Placed</small><b>{{ digest.scan_activity.orders_placed }}</b></div>
+        <div><small>Failed Runs</small><b class="{{ 'tone-negative' if digest.scan_activity.failed_scans else '' }}">{{ digest.scan_activity.failed_scans }}</b></div>
+    </div>
+</section>
+
+<section class="panel panel-table">
+    <div class="panel-head">
+        <h3>Open Positions</h3>
+        <span>{{ digest.open_positions|length }} open</span>
+    </div>
+    <table>
+        <thead><tr><th>Ticker</th><th>Qty</th><th>Status</th></tr></thead>
+        <tbody>
+        {% for position in digest.open_positions %}
+        <tr>
+            <td>{{ position.ticker }}</td>
+            <td>{{ position.quantity or "—" }}</td>
+            <td>{{ position.display_status or position.lifecycle_state }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="3" class="muted">No open autonomous positions right now.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<section class="panel panel-table">
+    <div class="panel-head">
+        <h3>Closed in Last {{ digest.window_hours }}h</h3>
+        <span>
+            {% if digest.closed_trades.total_pnl is not none %}
+            <span class="{{ 'tone-positive' if digest.closed_trades.total_pnl > 0 else 'tone-negative' if digest.closed_trades.total_pnl < 0 else '' }}">
+                {{ "+" if digest.closed_trades.total_pnl > 0 else "" }}${{ "%.2f"|format(digest.closed_trades.total_pnl) }}
+            </span>
+            ({{ digest.closed_trades.wins }}W / {{ digest.closed_trades.losses }}L)
+            {% else %}
+            No closed trades
+            {% endif %}
+        </span>
+    </div>
+    <table>
+        <thead><tr><th>Ticker</th><th>Exit</th><th>P&amp;L</th><th>Closed</th></tr></thead>
+        <tbody>
+        {% for trade in digest.closed_trades.recent %}
+        <tr>
+            <td>{{ trade.ticker }}</td>
+            <td>{{ trade.exit_type|upper if trade.exit_type else "—" }}</td>
+            <td class="{{ 'tone-positive' if trade.net_realized_pnl and trade.net_realized_pnl > 0 else 'tone-negative' if trade.net_realized_pnl and trade.net_realized_pnl < 0 else '' }}">
+                {{ "${:,.2f}".format(trade.net_realized_pnl) if trade.net_realized_pnl is not none else "—" }}
+            </td>
+            <td class="alert-time" data-timestamp="{{ trade.exit_timestamp or '' }}">--</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="muted">No trades closed in this window.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endblock %}

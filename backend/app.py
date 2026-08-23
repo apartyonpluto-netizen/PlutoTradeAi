@@ -108,6 +108,7 @@ if __package__:
     )
     from .autonomy.closed_trades import get_closed_trade, list_closed_trades, record_closed_trade
     from .autonomy.performance_report import build_performance_report
+    from .autonomy.daily_digest import build_daily_digest
     from .fast_monitor_heartbeat import (
         get_heartbeat_status as get_fast_monitor_heartbeat_status,
         record_run_completed as record_fast_monitor_run_completed,
@@ -259,6 +260,7 @@ else:
     )
     from autonomy.closed_trades import get_closed_trade, list_closed_trades, record_closed_trade
     from autonomy.performance_report import build_performance_report
+    from autonomy.daily_digest import build_daily_digest
     from fast_monitor_heartbeat import (
         get_heartbeat_status as get_fast_monitor_heartbeat_status,
         record_run_completed as record_fast_monitor_run_completed,
@@ -2137,6 +2139,20 @@ def performance_page() -> str:
     context = _build_page_context(include_opportunities=False)
     context["performance_report"] = build_performance_report(_current_user_id())
     return render_template("performance.html", **context)
+
+
+@app.route("/daily-digest")
+def daily_digest_page() -> str:
+    """A single "what happened, what needs me" summary - the legitimate
+    version of a "Chief of Staff" triage layer: read-only, pulled from data
+    this app already records (scan_run_log.py, overnight_orders.py,
+    closed_trades.py). See autonomy/daily_digest.py's own module docstring.
+    include_opportunities=False for the same reason performance_page uses
+    it - this page never needs candidate/scan data, only the account's own
+    recorded history."""
+    context = _build_page_context(include_opportunities=False)
+    context["daily_digest"] = build_daily_digest(_current_user_id(), monitor_heartbeat=_monitor_heartbeat_snapshot_for_scan_run())
+    return render_template("daily_digest.html", **context)
 
 
 @app.route("/api/trade-journal/refresh-positions", methods=["POST"])
