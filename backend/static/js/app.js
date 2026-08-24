@@ -808,6 +808,17 @@ const bindAccountHubPage = () => {
       const button = event.target instanceof HTMLElement ? event.target.closest("button") : null;
       if (!(button instanceof HTMLButtonElement)) return;
       if (button.id === "saveWebullCredentialsButton") return;
+      if (button.classList.contains("account-disconnect")) {
+        // Found live: this fired on a single unguarded click, unlike every
+        // other consequential action in this app (Stage 2/3, close-position,
+        // autonomy mode changes) - it wiped a real, connected account
+        // (status, balances, last-sync) with no way to tell afterward
+        // whether it was intentional. Same window.confirm() pattern as
+        // those, not a new one.
+        if (!window.confirm(`Disconnect ${platform.toUpperCase()}? This clears the saved connection status and balances, and blocks autonomous scanning for this account until you reconnect.`)) {
+          return;
+        }
+      }
       button.disabled = true;
       const originalText = button.textContent;
       button.textContent = "Working...";
