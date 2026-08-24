@@ -130,7 +130,52 @@ def _ensure_accounts_file(user_id: str) -> Path:
     return accounts_file
 
 
+def _looks_like_an_established_user_dir(user_dir: Path, accounts_file: Path) -> bool:
+    """True if this user's own data directory already has OTHER persisted
+    files even though accounts.json specifically is missing.
+
+    Found investigating a real incident: a live, Webull-connected account
+    (real balance, real last-sync) was found reset to fully disconnected
+    (status, balances, last-sync all blanked) with zero trace anywhere of
+    what caused it - specifically, zero calls to the one code path
+    (disconnect_account, below) that's supposed to be the only way this
+    happens, confirmed against 7 days of real production logs. It happened
+    the same day as a Render plan upgrade, which involves an instance
+    migration - exactly the kind of event that can leave a brief window
+    where the persistent disk isn't yet mounted when a request lands.
+    _load_accounts's old behavior treated "accounts.json doesn't exist" as
+    unconditionally meaning "brand new user" and silently wrote AND
+    PERSISTED fresh defaults - indistinguishable, from this file's own
+    perspective, from "the disk isn't actually available right now."
+    webull_credentials.json survived the real incident untouched (a
+    separate file, read differently - see that module's own _read, which
+    just returns {} on a missing file rather than fabricating and writing
+    one) while this file's own auto-recreate-and-persist habit is what
+    actually destroyed the real connection state once the disk caught up
+    to whatever got written in the meantime.
+
+    A user directory that already holds OTHER data but not accounts.json
+    specifically is a strong corruption signal, not a genuinely new
+    account - a real brand-new user has no directory (or an empty one) at
+    all yet."""
+    if not user_dir.is_dir():
+        return False
+    return any(path.is_file() and path != accounts_file for path in user_dir.iterdir())
+
+
 def _load_accounts(user_id: str) -> List[Dict[str, Any]]:
+    accounts_file = _accounts_file(user_id)
+    user_dir = accounts_file.parent
+    user_dir.mkdir(parents=True, exist_ok=True)
+
+    if not accounts_file.exists() and _looks_like_an_established_user_dir(user_dir, accounts_file):
+        # Deliberately NOT persisted - see _looks_like_an_established_user_dir's
+        # own docstring for the incident this prevents. Returning fresh
+        # defaults for THIS request's display only means a later request,
+        # once the real file is actually readable again, is not
+        # permanently locked out by an overwrite that already happened.
+        return _default_accounts()
+
     accounts_file = _ensure_accounts_file(user_id)
     try:
         payload = json.loads(accounts_file.read_text(encoding="utf-8"))
