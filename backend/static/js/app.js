@@ -1934,7 +1934,21 @@ const bindAnalysisSectionPage = () => {
     if (capNote) capNote.textContent = atCap ? `Limit reached (${maxTickers} tickers) - remove one to add another.` : "";
   };
 
+  let loadInFlight = false;
   const load = async () => {
+    // Found live: the backend call this hits (get_market_data + a
+    // per-ticker ThreadPoolExecutor fetch) can genuinely take longer than
+    // the 8s poll interval below during real Yahoo rate-limiting - without
+    // this guard, setInterval keeps firing a new overlapping request every
+    // 8s regardless, and they pile up (confirmed live: 3 concurrent
+    // requests to the same endpoint, all still pending after 8+ seconds).
+    // Each one independently re-triggers the same real yfinance calls,
+    // multiplying load on exactly the kind of endpoint already prone to
+    // worker exhaustion elsewhere in this app. Skipping a tick while the
+    // previous one is still in flight is strictly safe - the next tick 8s
+    // later picks up wherever the skipped one would have left off.
+    if (loadInFlight) return;
+    loadInFlight = true;
     try {
       const qs = firstLoad && focusTicker ? `?focus=${encodeURIComponent(focusTicker)}` : "";
       firstLoad = false;
@@ -1942,6 +1956,8 @@ const bindAnalysisSectionPage = () => {
       render(payload);
     } catch (error) {
       showToast(error.message, "error");
+    } finally {
+      loadInFlight = false;
     }
   };
 
