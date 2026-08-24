@@ -680,7 +680,13 @@ def _require_admin():
 def admin_page():
     if not is_admin(_current_user_id()):
         return redirect(url_for("dashboard_page"))
-    context = _build_page_context()
+    # include_market_scan=False, include_opportunities=False - admin.html
+    # doesn't render scanner_rows/upcoming_opportunities/mission_queue, so
+    # this page was paying the full market-scan + per-ticker
+    # strategy/chart/options pipeline (confirmed unused by grepping the
+    # template) for nothing. Same pattern as the /daily-digest and
+    # /performance fix.
+    context = _build_page_context(include_market_scan=False, include_opportunities=False)
     context["pending_users"] = list_pending_users()
     context["all_users"] = list_all_users()
     context["current_user_id"] = _current_user_id()
@@ -710,7 +716,10 @@ def admin_user_activity_page(user_id: str):
         return redirect(url_for("admin_page"))
     # Base chrome (sidebar/topbar) reflects the admin's own session as usual;
     # only the page body below shows the target user's data.
-    context = _build_page_context()
+    # include_market_scan=False, include_opportunities=False - same reason
+    # as admin_page: admin_user_activity.html never renders scanner_rows or
+    # opportunities data.
+    context = _build_page_context(include_market_scan=False, include_opportunities=False)
     context.update(
         {
             "target_user": public_user(target_user),
@@ -1994,12 +2003,26 @@ def news_intelligence_page() -> str:
 
 @app.route("/settings")
 def settings_page() -> str:
-    return render_template("settings.html", **_build_page_context(include_trusted_accounts=True))
+    # include_market_scan=False, include_opportunities=False - settings.html
+    # never renders scanner_rows/opportunities data (confirmed by grepping
+    # the template); this page was paying the full market-scan pipeline for
+    # nothing every time someone opened Settings.
+    return render_template(
+        "settings.html",
+        **_build_page_context(include_trusted_accounts=True, include_market_scan=False, include_opportunities=False),
+    )
 
 
 @app.route("/account-hub")
 def account_hub_page() -> str:
-    context = _build_page_context()
+    # include_market_scan=False, include_opportunities=False - Account Hub
+    # is entirely account/order data (accounts, scan runs, test orders,
+    # Stage 3, mode selector); it never renders scanner_rows or
+    # opportunities data (confirmed by grepping the template). Almost
+    # certainly the most-visited page in the app, so this was the biggest
+    # real-world instance of the same unnecessary market-scan tax fixed on
+    # /daily-digest and /performance.
+    context = _build_page_context(include_market_scan=False, include_opportunities=False)
     user_id = _current_user_id()
     context["accounts"] = get_accounts(user_id)
     context["webull_configured"] = is_webull_configured(user_id)
@@ -2040,7 +2063,17 @@ def account_hub_page() -> str:
 
 @app.route("/notifications")
 def notifications_page() -> str:
-    return render_template("notifications.html", **_build_page_context(include_suggestions=True, include_news=True))
+    # notifications.html only renders `alerts` (always computed regardless
+    # of these flags) - it never reads suggestions or news_rows, so both of
+    # those True flags were dead weight, and the market-scan/opportunities
+    # pipeline (on by default) was pure unused cost on top of that. alerts
+    # itself is ephemeral per-request (not persisted/accumulated - see
+    # get_alerts_snapshot), so skipping scanner-derived alert types here
+    # only affects this one page's badge count, not what mission-control
+    # (which still computes the full pipeline) shows.
+    return render_template(
+        "notifications.html", **_build_page_context(include_market_scan=False, include_opportunities=False)
+    )
 
 
 # The Overnight Orders table used to render order["status"] directly - a
@@ -2095,7 +2128,14 @@ def _overnight_order_display_status(order: Dict[str, object]) -> str:
 
 @app.route("/trade-journal")
 def trade_journal_page() -> str:
-    context = _build_page_context(include_reversal=True, include_trend=True)
+    # trade_journal.html never renders reversal_rows/trend_rows/
+    # scanner_rows/opportunities data (confirmed by grepping the template) -
+    # this page's own content is entirely paper_trades/overnight_orders/
+    # closed_trades/webull_positions, all fetched below. Almost certainly
+    # one of the most-visited pages in the app, so include_reversal/
+    # include_trend here were pure unused cost, on top of the
+    # market-scan/opportunities pipeline that's on by default.
+    context = _build_page_context(include_market_scan=False, include_opportunities=False)
     user_id = _current_user_id()
     context["paper_trades"] = list_paper_trades(user_id)
     context["paper_trade_summary"] = get_paper_trade_summary(user_id)
@@ -2594,7 +2634,11 @@ def api_webull_place_stage3_order():
 @app.route("/candle-brain")
 def candle_brain_page() -> str:
     focus_ticker = request.args.get("ticker", "").strip().upper()
-    context = _build_page_context(focus_ticker=focus_ticker)
+    # include_market_scan=False, include_opportunities=False - candle_brain.html
+    # renders no server-side candle_rows/pattern_rows/scanner_rows/
+    # opportunities data at all (it's fetched client-side by ticker); this
+    # page was paying the full market-scan pipeline for nothing.
+    context = _build_page_context(focus_ticker=focus_ticker, include_market_scan=False, include_opportunities=False)
     context["analysis_section"] = "candle_brain"
     return render_template("candle_brain.html", **context)
 
@@ -2602,19 +2646,30 @@ def candle_brain_page() -> str:
 @app.route("/pattern-brain")
 def pattern_brain_page() -> str:
     focus_ticker = request.args.get("ticker", "").strip().upper()
-    context = _build_page_context(focus_ticker=focus_ticker)
+    # include_market_scan=False, include_opportunities=False - same reason
+    # as candle_brain_page: this page renders no server-side scanner/
+    # opportunities data.
+    context = _build_page_context(focus_ticker=focus_ticker, include_market_scan=False, include_opportunities=False)
     context["analysis_section"] = "pattern_brain"
     return render_template("pattern_brain.html", **context)
 
 
 @app.route("/neural-engine")
 def neural_engine_page() -> str:
-    return render_template("neural_engine.html", **_build_page_context())
+    # neural_engine.html only reads status_summary (always computed
+    # regardless of these flags, and already degrades safely to
+    # "Monitoring"/"Healthy" on empty scanner data) - it never renders
+    # scanner_rows/opportunities directly.
+    return render_template(
+        "neural_engine.html", **_build_page_context(include_market_scan=False, include_opportunities=False)
+    )
 
 
 @app.route("/backtest")
 def backtest_page() -> str:
-    return render_template("backtest.html", **_build_page_context())
+    # backtest.html is fully client-side/JS-driven - it renders no
+    # server-side scanner/opportunities context at all.
+    return render_template("backtest.html", **_build_page_context(include_market_scan=False, include_opportunities=False))
 
 
 @app.route("/api/backtest/run", methods=["POST"])
