@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import Mock, patch
 
 import auth
 import app as pluto_app
@@ -174,6 +175,24 @@ def test_daily_digest_page_renders(user_id):
     assert "Daily Digest" in body
     assert "NVDA" in body
     assert "AMD" in body
+
+
+def test_daily_digest_page_never_triggers_the_market_scan(user_id):
+    """Found live in production: this page took ~21s to load because
+    get_market_data() (the CORE_SCAN_UNIVERSE yfinance fetch, up to its
+    own 20s hard deadline) ran unconditionally regardless of
+    include_opportunities, for scanner_rows this page never reads -
+    exactly the kind of cost that has caused real 502s under load
+    elsewhere in this app. Proves the fix actually skips the call."""
+    registered_user_id = _registered_user(user_id[:8] + "scan")
+    mock_scan = Mock(return_value=([], [], ""))
+    with pluto_app.app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["user_id"] = registered_user_id
+        with patch.object(pluto_app, "get_market_data", mock_scan):
+            response = client.get("/daily-digest")
+    assert response.status_code == 200
+    mock_scan.assert_not_called()
 
 
 def test_daily_digest_link_appears_in_nav(user_id):

@@ -1445,6 +1445,7 @@ def _build_page_context(
     include_patterns: bool = False,
     include_opportunities: bool = True,
     include_options: bool = True,
+    include_market_scan: bool = True,
     force_refresh: bool = False,
     focus_ticker: str = "",
 ) -> Dict[str, object]:
@@ -1453,7 +1454,10 @@ def _build_page_context(
     settings_payload = get_settings(user_id)
     watchlist = get_watchlist(user_id)
     watchlist_tickers = [row["ticker"] for row in watchlist]
-    scanner_rows, scanner_errors, scanner_last_updated = get_market_data(force_refresh=force_refresh)
+    if include_market_scan:
+        scanner_rows, scanner_errors, scanner_last_updated = get_market_data(force_refresh=force_refresh)
+    else:
+        scanner_rows, scanner_errors, scanner_last_updated = [], [], ""
     suggestions = (
         build_watchlist_suggestions(
             scanner_rows=scanner_rows,
@@ -2135,8 +2139,15 @@ def performance_page() -> str:
     performance reporting only (see autonomy/performance_report.py's own
     module docstring for why this is deliberately NOT automated behavior
     change). include_opportunities=False since this page never needs
-    candidate/scan data, only the account's own closed-trade history."""
-    context = _build_page_context(include_opportunities=False)
+    candidate/scan data, only the account's own closed-trade history.
+    include_market_scan=False too - the CORE_SCAN_UNIVERSE fetch inside
+    get_market_data was still running unconditionally even with every
+    other include_* flag off, up to its own 20s hard deadline, entirely
+    for scanner_rows this page never reads. Only the shared top-nav
+    status widget is derived from it, which already degrades safely to
+    "Monitoring"/"Healthy" on an empty scanner_rows list - the same state
+    a real rate-limited scan already produces today."""
+    context = _build_page_context(include_opportunities=False, include_market_scan=False)
     context["performance_report"] = build_performance_report(_current_user_id())
     return render_template("performance.html", **context)
 
@@ -2149,8 +2160,13 @@ def daily_digest_page() -> str:
     closed_trades.py). See autonomy/daily_digest.py's own module docstring.
     include_opportunities=False for the same reason performance_page uses
     it - this page never needs candidate/scan data, only the account's own
-    recorded history."""
-    context = _build_page_context(include_opportunities=False)
+    recorded history. include_market_scan=False for the same reason it was
+    just added to performance_page: get_market_data ran unconditionally
+    regardless of include_opportunities, paying up to its own 20s hard
+    deadline for scanner_rows this page never reads - confirmed live, a
+    real request to this page took ~21s for exactly that reason before
+    this fix."""
+    context = _build_page_context(include_opportunities=False, include_market_scan=False)
     context["daily_digest"] = build_daily_digest(_current_user_id(), monitor_heartbeat=_monitor_heartbeat_snapshot_for_scan_run())
     return render_template("daily_digest.html", **context)
 

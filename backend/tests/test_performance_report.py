@@ -1,4 +1,5 @@
 from __future__ import annotations
+from unittest.mock import Mock, patch
 
 import auth
 import app as pluto_app
@@ -192,3 +193,22 @@ def test_performance_page_renders_a_real_breakdown_row(user_id):
         body = client.get("/performance").data.decode("utf-8")
     assert "Momentum" in body
     assert "42.50" in body
+
+
+def test_performance_page_never_triggers_the_market_scan(user_id):
+    """Found live: this page took ~21s to load in production because
+    get_market_data() (the CORE_SCAN_UNIVERSE yfinance fetch, up to its
+    own 20s hard deadline) ran unconditionally regardless of
+    include_opportunities - for scanner_rows this page never reads.
+    Proves the fix actually skips the call rather than just documenting
+    the intent."""
+    user = auth.register_user(f"perfscan-{user_id[:8]}", "TestPassword123!")
+    auth.approve_user(user["id"])
+    mock_scan = Mock(return_value=([], [], ""))
+    with pluto_app.app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["user_id"] = user["id"]
+        with patch.object(pluto_app, "get_market_data", mock_scan):
+            response = client.get("/performance")
+    assert response.status_code == 200
+    mock_scan.assert_not_called()
