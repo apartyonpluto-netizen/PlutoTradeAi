@@ -982,6 +982,30 @@ SCAN_MARKET_DEADLINE_SECONDS = 20
 TICKER_INTELLIGENCE_DEADLINE_SECONDS = 30
 OPTIONS_FETCH_DEADLINE_SECONDS = 30
 
+# Shared, FIXED-size pool for every yfinance-backed background fetch that
+# might get abandoned via a hard deadline (scan_market, per-ticker
+# strategy/chart/extended-hours, options). Found live 2026-08-25: repeated
+# OOM crashes (>2GB) whose timing tracked real scan-activity bursts, not
+# any specific code change - traced to _run_with_hard_deadline (and the
+# ticker-intelligence/options blocks using the same pattern) each creating
+# a BRAND NEW ThreadPoolExecutor per call and abandoning it with
+# shutdown(wait=False, cancel_futures=True) on timeout. cancel_futures
+# only cancels work that hasn't STARTED yet - Python cannot forcibly kill
+# an already-running thread, so under sustained Yahoo rate limiting
+# (already known to make individual calls run ~3x their nominal timeout,
+# see the comment below) every abandoned call left an orphaned thread
+# running in the background indefinitely, with nothing bounding how many
+# accumulated across overlapping requests over a gunicorn sync worker's
+# entire lifetime. A single shared, bounded pool instead means an
+# abandoned task keeps occupying one of a fixed number of slots rather
+# than spawning an unbounded number of new OS threads - new work queues
+# behind it instead of piling on more. Sized for one request's own worst
+# case (6 intelligence tickers + 3 options + 1 spare for a bare
+# _run_with_hard_deadline caller like scan_market) so normal traffic isn't
+# artificially slowed; the bound only bites once zombies from earlier
+# requests are actually occupying slots.
+_BACKGROUND_FETCH_EXECUTOR = ThreadPoolExecutor(max_workers=10, thread_name_prefix="bg-fetch")
+
 
 def _run_with_hard_deadline(func, args=(), kwargs=None, deadline_seconds=20, default=None):
     # Bounds a whole yfinance-backed call chain with an outer deadline,
@@ -996,14 +1020,16 @@ def _run_with_hard_deadline(func, args=(), kwargs=None, deadline_seconds=20, def
     # timeouts. If func hasn't returned within deadline_seconds it's
     # abandoned - its thread keeps running in the background since Python
     # can't forcibly kill a thread, but the caller stops waiting on it.
-    executor = ThreadPoolExecutor(max_workers=1)
+    # Submits to the shared _BACKGROUND_FETCH_EXECUTOR (see its own
+    # docstring) rather than a fresh per-call executor, so an abandoned
+    # call occupies one of a bounded number of slots instead of leaking an
+    # unbounded new thread every time this fires under sustained rate
+    # limiting.
+    future = _BACKGROUND_FETCH_EXECUTOR.submit(func, *args, **(kwargs or {}))
     try:
-        future = executor.submit(func, *args, **(kwargs or {}))
         return future.result(timeout=deadline_seconds)
     except FuturesTimeoutError:
         return default
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
 
 
 MACRO_TICKER_LABELS = {
@@ -1587,23 +1613,23 @@ def _build_page_context(
         # well past gunicorn's worker timeout. futures_wait() with an
         # overall deadline instead keeps whatever tickers finished in time
         # and abandons the rest - a page with fewer analyzed tickers beats
-        # a killed worker.
-        executor = ThreadPoolExecutor(max_workers=len(intelligence_tickers))
-        try:
-            future_to_ticker = {
-                executor.submit(_fetch_ticker_intelligence, ticker): ticker for ticker in intelligence_tickers
-            }
-            done, _not_done = futures_wait(future_to_ticker, timeout=TICKER_INTELLIGENCE_DEADLINE_SECONDS)
-            for future in done:
-                try:
-                    ticker, extended_hours, strategy, chart = future.result()
-                except Exception:
-                    continue
-                extended_hours_map[ticker] = extended_hours
-                strategy_map[ticker] = strategy
-                chart_levels_map[ticker] = chart
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+        # a killed worker. Submits to the shared _BACKGROUND_FETCH_EXECUTOR
+        # (see its docstring) rather than a fresh per-call executor - an
+        # abandoned ticker occupies one of a bounded number of slots
+        # instead of leaking an unbounded new thread every time this
+        # deadline fires under sustained rate limiting.
+        future_to_ticker = {
+            _BACKGROUND_FETCH_EXECUTOR.submit(_fetch_ticker_intelligence, ticker): ticker for ticker in intelligence_tickers
+        }
+        done, _not_done = futures_wait(future_to_ticker, timeout=TICKER_INTELLIGENCE_DEADLINE_SECONDS)
+        for future in done:
+            try:
+                ticker, extended_hours, strategy, chart = future.result()
+            except Exception:
+                continue
+            extended_hours_map[ticker] = extended_hours
+            strategy_map[ticker] = strategy
+            chart_levels_map[ticker] = chart
 
         # Options data alone fires several Yahoo requests per ticker (expiration
         # list + one option_chain() call per expiration) - the heaviest,
@@ -1620,21 +1646,20 @@ def _build_page_context(
         # Yahoo's rate limiting, so this pool is capped well below the others.
         if include_options:
             options_map = {}
-            options_executor = ThreadPoolExecutor(max_workers=min(3, len(intelligence_tickers)))
-            try:
-                options_future_to_ticker = {
-                    options_executor.submit(get_options_data_for_ticker, t, force_refresh=force_refresh): t
-                    for t in intelligence_tickers
-                }
-                options_done, _options_not_done = futures_wait(options_future_to_ticker, timeout=OPTIONS_FETCH_DEADLINE_SECONDS)
-                for future in options_done:
-                    ticker = options_future_to_ticker[future]
-                    try:
-                        options_map[ticker] = future.result()
-                    except Exception:
-                        continue
-            finally:
-                options_executor.shutdown(wait=False, cancel_futures=True)
+            # Shared _BACKGROUND_FETCH_EXECUTOR again (see its docstring) -
+            # same abandoned-thread-leak reasoning as the intelligence pool
+            # above, this time for the options fetch specifically.
+            options_future_to_ticker = {
+                _BACKGROUND_FETCH_EXECUTOR.submit(get_options_data_for_ticker, t, force_refresh=force_refresh): t
+                for t in intelligence_tickers
+            }
+            options_done, _options_not_done = futures_wait(options_future_to_ticker, timeout=OPTIONS_FETCH_DEADLINE_SECONDS)
+            for future in options_done:
+                ticker = options_future_to_ticker[future]
+                try:
+                    options_map[ticker] = future.result()
+                except Exception:
+                    continue
         else:
             options_map = {}
     else:

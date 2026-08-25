@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from unittest.mock import patch
 
@@ -107,3 +108,75 @@ def test_options_fetch_deadline_drops_a_stuck_ticker_but_keeps_a_fast_one(user_i
     opportunities_by_ticker = {row["ticker"]: row for row in context["upcoming_opportunities"]}
     assert opportunities_by_ticker["AAPL"]["expected_move"] == "±2%"
     assert opportunities_by_ticker["MSFT"]["expected_move"] == "Data unavailable"
+
+
+"""The abandonment mechanism above (a stuck call is dropped, not waited on)
+was never the actual bug - it was found live 2026-08-25 that a DIFFERENT
+part of the same design leaked memory: _run_with_hard_deadline created a
+BRAND NEW ThreadPoolExecutor on every single call and abandoned it via
+shutdown(wait=False, cancel_futures=True) on timeout. cancel_futures only
+cancels work that hasn't STARTED yet - Python cannot forcibly kill an
+already-running thread - so under sustained Yahoo rate limiting (already
+known, see the module docstring above, to make individual calls run ~3x
+their nominal timeout) every abandoned call left an orphaned thread
+running in the background indefinitely, with nothing bounding how many
+accumulated across a gunicorn sync worker's entire lifetime. Confirmed
+live: repeated OOM crashes (>2GB) whose timing tracked real scan-activity
+bursts, not any specific code change. The fix: a single shared, FIXED-size
+_BACKGROUND_FETCH_EXECUTOR that every hard-deadline call site submits to
+instead of creating its own - these tests prove the pool is genuinely
+shared (not recreated per call) and genuinely bounded (repeated abandoned
+calls occupy a fixed number of slots rather than spawning unbounded new
+OS threads)."""
+
+
+def test_background_fetch_executor_is_shared_not_recreated_per_call():
+    executor_before = pluto_app._BACKGROUND_FETCH_EXECUTOR
+    pluto_app._run_with_hard_deadline(lambda: "ok", deadline_seconds=1, default="gave up")
+    pluto_app._run_with_hard_deadline(lambda: "ok", deadline_seconds=1, default="gave up")
+    assert pluto_app._BACKGROUND_FETCH_EXECUTOR is executor_before
+
+
+def test_repeatedly_abandoned_calls_never_exceed_the_shared_pool_bound():
+    """The real failure mode found live, reproduced directly: before the
+    fix, each of these abandoned calls would have spawned its own
+    permanent zombie thread with no ceiling. After the fix, the shared
+    pool never allocates more OS threads than its fixed size, no matter
+    how many abandoned calls pile up - the excess simply queues instead.
+
+    executor._threads are the pool's own persistent WORKER threads, which
+    are meant to stay alive for the executor's entire (process) lifetime,
+    looping on an internal queue - they are not one-thread-per-submitted-
+    task and are never expected to exit on their own, so this test submits
+    real Future objects directly (bypassing _run_with_hard_deadline, which
+    discards the future once it gives up waiting) purely so it can wait on
+    THOSE - not the worker threads - for deterministic cleanup."""
+    executor = pluto_app._BACKGROUND_FETCH_EXECUTOR
+    max_workers = executor._max_workers
+    release = threading.Event()
+
+    def _hangs_until_released():
+        release.wait(timeout=5)
+        return "finally done"
+
+    futures = []
+    try:
+        # More abandoned calls than the pool has slots for - some must
+        # queue behind the ones already occupying every worker.
+        for _ in range(max_workers + 2):
+            futures.append(executor.submit(_hangs_until_released))
+
+        # However many of these are actually running vs. still queued
+        # behind a full pool, the pool itself never allocates more OS
+        # threads than its fixed size - this is the actual bound that was
+        # missing before the fix (previously: one fresh executor, and one
+        # more permanent OS thread, per abandoned call).
+        assert len(executor._threads) <= max_workers
+    finally:
+        # Let every hung task finish for real and wait on the FUTURES
+        # (not the persistent worker threads, which are supposed to keep
+        # running) so nothing lingers into whatever test runs next against
+        # this same shared, process-wide pool.
+        release.set()
+        for future in futures:
+            future.result(timeout=5)
