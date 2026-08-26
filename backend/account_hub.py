@@ -302,13 +302,25 @@ def _extract_token(webhook_url: str) -> str:
     return (query.get("token") or [""])[0]
 
 
-def _sync_webull_account(user_id: str, account: Dict[str, Any]) -> None:
-    """Connect/refresh a webull account record against the real Webull OpenAPI
+def _sync_webull_account(user_id: str) -> Dict[str, Any]:
+    """Connect/refresh a webull account against the real Webull OpenAPI
     paper-trading sandbox, using THIS user's own stored app key/secret - never
     a shared/global credential, so one user can never see another user's
     sandbox account. Raises ValueError (surfaced to the UI) if credentials
     aren't configured or the API call fails - never leaves the account
-    silently marked as connected without a verified round trip."""
+    silently marked as connected without a verified round trip.
+
+    Returns the fields to merge into the stored account record. Takes NO
+    account dict and touches accounts.json/its lock not at all - found live
+    2026-08-26 (two real HTTP-health-check-timeout instance failures
+    within minutes of this lock's own deploy going live) that a caller
+    holding _accounts_file_lock across this function's real network round
+    trip blocks every OTHER request touching this user's accounts.json -
+    nearly every page view - for the full duration of a slow broker call,
+    which under real load can starve out enough gunicorn sync workers to
+    fail Render's own health check. Callers must do this call BEFORE
+    acquiring the lock, then merge the result into an account dict they
+    read/write while actually holding it."""
     creds = get_webull_credentials(user_id)
     if not is_webull_configured(user_id):
         raise ValueError("Enter your own Webull App Key and App Secret below before connecting.")
@@ -324,15 +336,17 @@ def _sync_webull_account(user_id: str, account: Dict[str, Any]) -> None:
     except Exception as error:  # noqa: BLE001 - the Webull SDK raises its own exception types, not ValueError
         raise ValueError(f"Webull rejected these credentials: {error}") from error
 
-    account["status"] = "Connected"
-    account["paper_mode"] = True
-    account["risk_simulation_enabled"] = True
-    account["trading_enabled"] = False
-    account["account_number"] = cash_account.get("account_number", "")
-    account["cash_balance"] = balance.get("total_cash_balance", "")
-    account["buying_power"] = (balance.get("account_currency_assets") or [{}])[0].get("buying_power", "")
-    account["net_liquidation_value"] = balance.get("total_net_liquidation_value", "")
     record_seed_balance_if_unset(user_id, float(balance.get("total_net_liquidation_value", 0) or 0))
+    return {
+        "status": "Connected",
+        "paper_mode": True,
+        "risk_simulation_enabled": True,
+        "trading_enabled": False,
+        "account_number": cash_account.get("account_number", ""),
+        "cash_balance": balance.get("total_cash_balance", ""),
+        "buying_power": (balance.get("account_currency_assets") or [{}])[0].get("buying_power", ""),
+        "net_liquidation_value": balance.get("total_net_liquidation_value", ""),
+    }
 
 
 def verify_tradingview_token(user_id: str, token: str) -> bool:
@@ -354,6 +368,12 @@ def get_accounts(user_id: str) -> List[Dict[str, Any]]:
 
 def connect_account(user_id: str, platform: str) -> Dict[str, Any]:
     normalized_platform = _normalize_platform(platform)
+    # The real Webull network round trip happens here, BEFORE the lock is
+    # acquired - see _sync_webull_account's docstring: holding
+    # _accounts_file_lock across a slow broker call blocks every other
+    # request touching this user's accounts.json and caused real
+    # production health-check timeouts.
+    webull_sync_fields = _sync_webull_account(user_id) if normalized_platform == "webull" else None
     # Holds ONE lock across the whole read-modify-write sequence (see
     # _accounts_file_lock's docstring) - uses the _unlocked read so this
     # doesn't try to acquire the same per-user lock twice from within one
@@ -367,7 +387,7 @@ def connect_account(user_id: str, platform: str) -> Dict[str, Any]:
             account["approval_mode"] = True
             account["trading_enabled"] = False
         elif normalized_platform == "webull":
-            _sync_webull_account(user_id, account)
+            account.update(webull_sync_fields)
         elif normalized_platform == "tradingview":
             account["status"] = "Webhook Ready"
             if not account.get("webhook_url"):
@@ -409,6 +429,26 @@ def disconnect_account(user_id: str, platform: str) -> Dict[str, Any]:
 
 def test_account(user_id: str, platform: str) -> Dict[str, Any]:
     normalized_platform = _normalize_platform(platform)
+
+    # Fail fast under the lock before doing any real network I/O - avoids
+    # a pointless Webull round trip for an account that isn't even
+    # connected yet.
+    with _accounts_file_lock(user_id):
+        accounts = _load_accounts_unlocked(user_id)
+        account, _ = _find_account(accounts, normalized_platform)
+        if account.get("status") == STATUS_NOT_CONNECTED:
+            raise ValueError("Connect this account before testing.")
+
+    # The real Webull network round trip happens here, with NO lock held -
+    # see _sync_webull_account's docstring: holding _accounts_file_lock
+    # across a slow broker call blocks every other request touching this
+    # user's accounts.json and caused real production health-check
+    # timeouts.
+    webull_sync_fields = _sync_webull_account(user_id) if normalized_platform == "webull" else None
+
+    # Re-acquire the lock and re-check the precondition - the account may
+    # have been disconnected by a concurrent request while the network
+    # call above was in flight.
     with _accounts_file_lock(user_id):
         accounts = _load_accounts_unlocked(user_id)
         account, index = _find_account(accounts, normalized_platform)
@@ -420,7 +460,7 @@ def test_account(user_id: str, platform: str) -> Dict[str, Any]:
         if normalized_platform == "etrade":
             account["status"] = "Connected"
         if normalized_platform == "webull":
-            _sync_webull_account(user_id, account)
+            account.update(webull_sync_fields)
         if normalized_platform == "tradingview":
             account["alert_status"] = "Webhook Ready"
 
