@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import fcntl
 import hmac
 import json
 import os
 import secrets
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterator, List, Tuple
 from urllib.parse import parse_qs, urlparse
 
 if __package__:
@@ -157,13 +159,81 @@ def _looks_like_an_established_user_dir(user_dir: Path, accounts_file: Path) -> 
     A user directory that already holds OTHER data but not accounts.json
     specifically is a strong corruption signal, not a genuinely new
     account - a real brand-new user has no directory (or an empty one) at
-    all yet."""
+    all yet.
+
+    Excludes dotfiles (specifically .accounts.lock, added later alongside
+    _accounts_file_lock): the lock's own open(lock_path, "w") creates that
+    file - and the directory it lives in - as a side effect of simply
+    ATTEMPTING to read accounts, before this check even runs. Without the
+    exclusion, every brand-new user would incorrectly look "established"
+    by nothing more than the lock file this very read created moments
+    earlier, and would wrongly hit the non-persisting branch below."""
     if not user_dir.is_dir():
         return False
-    return any(path.is_file() and path != accounts_file for path in user_dir.iterdir())
+    return any(
+        path.is_file() and path != accounts_file and not path.name.startswith(".")
+        for path in user_dir.iterdir()
+    )
+
+
+@contextmanager
+def _accounts_file_lock(user_id: str) -> Iterator[None]:
+    """OS-level, BLOCKING file lock (fcntl.flock) - not an in-process
+    threading.Lock, which would not stop a second gunicorn WORKER PROCESS
+    from touching the same file at the same time (see scan_lock.py's own
+    docstring for why in-process locks don't help here).
+
+    get_accounts/_load_accounts is called on nearly every request - every
+    page view, every scan, every admin view - and _hydrate_missing_accounts
+    unconditionally rewrites accounts.json on EVERY one of those calls, not
+    only when something actually changed. With no lock, two requests
+    landing close together (e.g. a real page view at the same moment the
+    hourly autonomous-scan cron tick fires) could race: one process's
+    write can land while another is mid-read, producing a torn/incomplete
+    file that fails to parse. The JSONDecodeError fallback below used to
+    unconditionally treat that as "start over" and persist fresh (all Not
+    Connected) defaults over the real data - structurally the SAME
+    incident _looks_like_an_established_user_dir already fixed for a
+    missing file, just reached via corruption from a write race instead.
+    Found live 2026-08-26: Webull kept dropping to Not Connected for many
+    hours with zero Render crashes/restarts in that window, ruling out
+    the disk-mount-race explanation and pointing at ordinary concurrent
+    request traffic instead.
+
+    BLOCKING (unlike user_scan_lock's non-blocking style) because a
+    reader/writer here should just wait its turn for a well-formed file,
+    not fail outright - this is routine data access, not "is a scan
+    already running for this user right now."""
+    if not user_id:
+        raise ValueError("user_id is required.")
+    lock_dir = USER_DATA_ROOT / user_id
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / ".accounts.lock"
+
+    fd = open(lock_path, "w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        fd.close()
 
 
 def _load_accounts(user_id: str) -> List[Dict[str, Any]]:
+    with _accounts_file_lock(user_id):
+        return _load_accounts_unlocked(user_id)
+
+
+def _load_accounts_unlocked(user_id: str) -> List[Dict[str, Any]]:
+    """The real read-merge-write logic - ONLY safe to call while already
+    holding _accounts_file_lock(user_id). Exists separately from
+    _load_accounts so connect_account/disconnect_account/test_account can
+    hold ONE lock across their own entire read-modify-write sequence
+    (including the initial read) rather than nesting a second lock
+    acquisition inside the first, which fcntl.flock does not guarantee is
+    safe to do from the same process."""
     accounts_file = _accounts_file(user_id)
     user_dir = accounts_file.parent
     user_dir.mkdir(parents=True, exist_ok=True)
@@ -284,72 +354,79 @@ def get_accounts(user_id: str) -> List[Dict[str, Any]]:
 
 def connect_account(user_id: str, platform: str) -> Dict[str, Any]:
     normalized_platform = _normalize_platform(platform)
-    accounts = _load_accounts(user_id)
-    account, index = _find_account(accounts, normalized_platform)
+    # Holds ONE lock across the whole read-modify-write sequence (see
+    # _accounts_file_lock's docstring) - uses the _unlocked read so this
+    # doesn't try to acquire the same per-user lock twice from within one
+    # process.
+    with _accounts_file_lock(user_id):
+        accounts = _load_accounts_unlocked(user_id)
+        account, index = _find_account(accounts, normalized_platform)
 
-    if normalized_platform == "etrade":
-        account["status"] = "Sandbox"
-        account["approval_mode"] = True
-        account["trading_enabled"] = False
-    elif normalized_platform == "webull":
-        _sync_webull_account(user_id, account)
-    elif normalized_platform == "tradingview":
-        account["status"] = "Webhook Ready"
-        if not account.get("webhook_url"):
-            account["webhook_url"] = _generate_webhook_url()
-        account["alert_status"] = "Listening"
-        account["trading_enabled"] = False
+        if normalized_platform == "etrade":
+            account["status"] = "Sandbox"
+            account["approval_mode"] = True
+            account["trading_enabled"] = False
+        elif normalized_platform == "webull":
+            _sync_webull_account(user_id, account)
+        elif normalized_platform == "tradingview":
+            account["status"] = "Webhook Ready"
+            if not account.get("webhook_url"):
+                account["webhook_url"] = _generate_webhook_url()
+            account["alert_status"] = "Listening"
+            account["trading_enabled"] = False
 
-    account["last_sync"] = _now_iso()
-    accounts[index] = account
-    _save_accounts(user_id, accounts)
-    return account
+        account["last_sync"] = _now_iso()
+        accounts[index] = account
+        _save_accounts(user_id, accounts)
+        return account
 
 
 def disconnect_account(user_id: str, platform: str) -> Dict[str, Any]:
     normalized_platform = _normalize_platform(platform)
-    accounts = _load_accounts(user_id)
-    account, index = _find_account(accounts, normalized_platform)
-    account["status"] = STATUS_NOT_CONNECTED
-    account["trading_enabled"] = False
-    account["last_sync"] = ""
+    with _accounts_file_lock(user_id):
+        accounts = _load_accounts_unlocked(user_id)
+        account, index = _find_account(accounts, normalized_platform)
+        account["status"] = STATUS_NOT_CONNECTED
+        account["trading_enabled"] = False
+        account["last_sync"] = ""
 
-    if normalized_platform == "webull":
-        account["paper_mode"] = True
-        account["risk_simulation_enabled"] = True
-        account["account_number"] = ""
-        account["cash_balance"] = ""
-        account["buying_power"] = ""
-        account["net_liquidation_value"] = ""
-    if normalized_platform == "tradingview":
-        account["webhook_url"] = ""
-        account["alert_status"] = "Idle"
-        account["last_signal_received"] = ""
+        if normalized_platform == "webull":
+            account["paper_mode"] = True
+            account["risk_simulation_enabled"] = True
+            account["account_number"] = ""
+            account["cash_balance"] = ""
+            account["buying_power"] = ""
+            account["net_liquidation_value"] = ""
+        if normalized_platform == "tradingview":
+            account["webhook_url"] = ""
+            account["alert_status"] = "Idle"
+            account["last_signal_received"] = ""
 
-    accounts[index] = account
-    _save_accounts(user_id, accounts)
-    return account
+        accounts[index] = account
+        _save_accounts(user_id, accounts)
+        return account
 
 
 def test_account(user_id: str, platform: str) -> Dict[str, Any]:
     normalized_platform = _normalize_platform(platform)
-    accounts = _load_accounts(user_id)
-    account, index = _find_account(accounts, normalized_platform)
+    with _accounts_file_lock(user_id):
+        accounts = _load_accounts_unlocked(user_id)
+        account, index = _find_account(accounts, normalized_platform)
 
-    if account.get("status") == STATUS_NOT_CONNECTED:
-        raise ValueError("Connect this account before testing.")
+        if account.get("status") == STATUS_NOT_CONNECTED:
+            raise ValueError("Connect this account before testing.")
 
-    account["last_sync"] = _now_iso()
-    if normalized_platform == "etrade":
-        account["status"] = "Connected"
-    if normalized_platform == "webull":
-        _sync_webull_account(user_id, account)
-    if normalized_platform == "tradingview":
-        account["alert_status"] = "Webhook Ready"
+        account["last_sync"] = _now_iso()
+        if normalized_platform == "etrade":
+            account["status"] = "Connected"
+        if normalized_platform == "webull":
+            _sync_webull_account(user_id, account)
+        if normalized_platform == "tradingview":
+            account["alert_status"] = "Webhook Ready"
 
-    accounts[index] = account
-    _save_accounts(user_id, accounts)
-    return account
+        accounts[index] = account
+        _save_accounts(user_id, accounts)
+        return account
 
 
 def update_trading_enabled(user_id: str, platform: str, trading_enabled: bool) -> Dict[str, Any]:
@@ -357,18 +434,19 @@ def update_trading_enabled(user_id: str, platform: str, trading_enabled: bool) -
     if normalized_platform != "etrade":
         raise ValueError("Trading enabled toggle is only available for E*TRADE.")
 
-    accounts = _load_accounts(user_id)
-    account, index = _find_account(accounts, normalized_platform)
-    if account.get("status") != "Connected":
-        account["trading_enabled"] = False
-        raise ValueError("E*TRADE live trading requires Connected status and approval mode.")
+    with _accounts_file_lock(user_id):
+        accounts = _load_accounts_unlocked(user_id)
+        account, index = _find_account(accounts, normalized_platform)
+        if account.get("status") != "Connected":
+            account["trading_enabled"] = False
+            raise ValueError("E*TRADE live trading requires Connected status and approval mode.")
 
-    account["approval_mode"] = True
-    account["trading_enabled"] = bool(trading_enabled)
-    account["last_sync"] = _now_iso()
-    accounts[index] = account
-    _save_accounts(user_id, accounts)
-    return account
+        account["approval_mode"] = True
+        account["trading_enabled"] = bool(trading_enabled)
+        account["last_sync"] = _now_iso()
+        accounts[index] = account
+        _save_accounts(user_id, accounts)
+        return account
 
 
 def ensure_tradingview_webhook(user_id: str, platform: str) -> Dict[str, Any]:
@@ -376,31 +454,37 @@ def ensure_tradingview_webhook(user_id: str, platform: str) -> Dict[str, Any]:
     if normalized_platform != "tradingview":
         raise ValueError("Webhook URL can only be generated for TradingView.")
 
-    accounts = _load_accounts(user_id)
-    account, index = _find_account(accounts, normalized_platform)
-    if not account.get("webhook_url"):
-        account["webhook_url"] = _generate_webhook_url()
-    account["status"] = "Webhook Ready"
-    account["alert_status"] = "Listening"
-    account["last_sync"] = _now_iso()
-    accounts[index] = account
-    _save_accounts(user_id, accounts)
-    return account
+    with _accounts_file_lock(user_id):
+        accounts = _load_accounts_unlocked(user_id)
+        account, index = _find_account(accounts, normalized_platform)
+        if not account.get("webhook_url"):
+            account["webhook_url"] = _generate_webhook_url()
+        account["status"] = "Webhook Ready"
+        account["alert_status"] = "Listening"
+        account["last_sync"] = _now_iso()
+        accounts[index] = account
+        _save_accounts(user_id, accounts)
+        return account
 
 
 def record_tradingview_signal(user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    accounts = _load_accounts(user_id)
-    account, index = _find_account(accounts, "tradingview")
-    account["status"] = account.get("status", "Webhook Ready")
-    if account["status"] == STATUS_NOT_CONNECTED:
-        account["status"] = "Webhook Ready"
-    if not account.get("webhook_url"):
-        account["webhook_url"] = _generate_webhook_url()
-    account["alert_status"] = "Signal Received"
-    account["last_signal_received"] = _now_iso()
-    account["last_sync"] = _now_iso()
-    accounts[index] = account
-    _save_accounts(user_id, accounts)
+    # Triggered by an external TradingView webhook call, at unpredictable
+    # times - real concurrency risk with ordinary page traffic touching
+    # the same file, so this needs the same lock as every other
+    # read-modify-write site here.
+    with _accounts_file_lock(user_id):
+        accounts = _load_accounts_unlocked(user_id)
+        account, index = _find_account(accounts, "tradingview")
+        account["status"] = account.get("status", "Webhook Ready")
+        if account["status"] == STATUS_NOT_CONNECTED:
+            account["status"] = "Webhook Ready"
+        if not account.get("webhook_url"):
+            account["webhook_url"] = _generate_webhook_url()
+        account["alert_status"] = "Signal Received"
+        account["last_signal_received"] = _now_iso()
+        account["last_sync"] = _now_iso()
+        accounts[index] = account
+        _save_accounts(user_id, accounts)
     return {
         "ok": True,
         "signal_received": True,
