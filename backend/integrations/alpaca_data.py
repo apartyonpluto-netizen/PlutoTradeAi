@@ -197,27 +197,7 @@ def get_bars(symbols: Sequence[str], period: str, interval: str) -> Dict[str, pd
             lambda p=request_params: requests.get(_DATA_BASE_URL + _STOCK_BARS_PATH, headers=headers, params=p, timeout=10),
         )
         if response.status_code != 200:
-            # TEMPORARY diagnostic (2026-08-28) - a 401 here was confirmed
-            # NOT a credentials problem (the same key/secret round-tripped
-            # correctly against Alpaca's own interactive API tester, which
-            # got past auth and returned a normal param-validation error,
-            # not the generic 401 page this app was still seeing) - so the
-            # discrepancy is somewhere between Render's stored env var and
-            # what this process actually reads. key_id is safe to echo
-            # (Alpaca shows it in plaintext in their own dashboard, same
-            # trust level as a username) - the secret's LENGTH only, never
-            # its value, so a truncation/whitespace/invisible-character
-            # corruption is visible without exposing the secret itself.
-            # Remove once the 401 is resolved.
-            diagnostic = ""
-            if response.status_code == 401:
-                key_id_value = headers.get("APCA-API-KEY-ID", "")
-                secret_value = headers.get("APCA-API-SECRET-KEY", "")
-                diagnostic = (
-                    f" [diagnostic: key_id={key_id_value!r} (len={len(key_id_value)}), "
-                    f"secret_len={len(secret_value)}]"
-                )
-            raise ValueError(f"Alpaca API error (bars): HTTP {response.status_code} - {response.text[:300]}{diagnostic}")
+            raise ValueError(f"Alpaca API error (bars): HTTP {response.status_code} - {response.text[:300]}")
         payload = response.json()
         for symbol, symbol_bars in (payload.get("bars") or {}).items():
             bars_by_symbol.setdefault(symbol, []).extend(symbol_bars or [])
