@@ -421,16 +421,53 @@ def _maybe_log_memory_profile_snapshot() -> None:
         logger.warning("MEMORY_PROFILE: snapshot failed: %s", error)
 # --- end temporary memory-leak diagnostic instrumentation ------------------
 
-# Curated, liquid Nasdaq-heavy scan universe (mostly Nasdaq-100 constituents
-# plus SPY/QQQ). scan_market() fetches this in two batched yf.download() calls
-# regardless of list size, so this can grow without a per-ticker request cost -
-# see market_scanner.py.
+# Curated, liquid scan universe. scan_market() fetches this via
+# alpaca_data.get_bars' multi-symbol batched endpoint (two calls total -
+# daily + intraday - regardless of list size, see market_scanner.py), and
+# only the top-6-by-scanner-score names ever reach a deep LLM analysis
+# call (see _resolve_analysis_tickers) - so growing this list widens
+# top-of-funnel screening at zero added LLM cost and a fixed 2-request
+# market-data cost.
+#
+# Expanded 2026-08-28 from the original 48-ticker Nasdaq-100-heavy list
+# (found live: the app was structurally only ever going to find Nasdaq-100
+# tech names, e.g. WDAY, regardless of what was actually moving elsewhere
+# in the market that day) to add real sector breadth - financials,
+# energy, industrials, healthcare/pharma, consumer, and communications
+# names with none of that Nasdaq-100 overlap - plus a set of
+# high-liquidity, high-beta momentum names and two broad-index ETFs
+# (IWM, DIA) alongside the existing SPY/QQQ. Every addition is a
+# large-cap, high-average-volume name capable of a reliable broker-side
+# stop/limit fill - the same liquidity bar the original list was curated
+# to, not a loosening of it. This trades the underlying equity long/short
+# with a real stop-loss (CALL/PUT here is a directional-bias label, not a
+# literal options contract - see the "only CALL/bullish setups auto-order"
+# skip reason elsewhere in this file), so no options-chain liquidity is
+# needed for any of these.
 CORE_SCAN_UNIVERSE = [
+    # Original Nasdaq-100-heavy core + SPY/QQQ (unchanged)
     "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "AVGO", "COST", "NFLX",
     "AMD", "PEP", "ADBE", "CSCO", "TMUS", "INTC", "QCOM", "TXN", "AMAT", "INTU",
     "ISRG", "BKNG", "VRTX", "REGN", "GILD", "MU", "LRCX", "KLAC", "PANW", "ADI",
     "MDLZ", "PYPL", "SNPS", "CDNS", "CRWD", "MRVL", "ABNB", "DXCM", "ORLY", "MNST",
     "CTAS", "PDD", "MELI", "WDAY", "ROP", "PLTR", "SPY", "QQQ",
+    # Financials - zero prior representation
+    "JPM", "BAC", "WFC", "GS", "MS", "SCHW", "V", "MA", "AXP",
+    # Healthcare / pharma outside the Nasdaq-100 names already above
+    "UNH", "LLY", "JNJ", "PFE", "MRK", "ABBV", "TMO",
+    # Energy - zero prior representation
+    "XOM", "CVX", "COP", "SLB",
+    # Industrials - zero prior representation
+    "BA", "CAT", "GE", "HON", "UPS", "LMT", "DE",
+    # Consumer discretionary / staples
+    "WMT", "HD", "DIS", "NKE", "SBUX", "MCD", "PG", "KO", "TGT",
+    # Communications
+    "CMCSA", "T", "VZ",
+    # High-liquidity, high-beta momentum names - the retail/day-trading
+    # volume this scanner's RVOL and day-move signals are built to catch
+    "COIN", "MSTR", "SMCI", "ARM", "DKNG", "RIVN", "SOFI", "SNOW", "UBER", "ROKU", "SHOP", "AFRM",
+    # Broad-index ETFs beyond SPY/QQQ
+    "IWM", "DIA",
 ]
 MARKET_CACHE: Dict[str, object] = {"rows": [], "errors": [], "last_updated": "", "expires_at": None}
 ANALYTICS_CACHE: Dict[str, object] = {
