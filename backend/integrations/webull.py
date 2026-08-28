@@ -290,6 +290,30 @@ _AMBIGUOUS_HTTP_STATUSES = {401, 403, 429, 500, 502, 503, 504}
 # code is a safe rejection) is not.
 _CONFIRMED_DEFINITE_REJECTION_ERROR_CODES: frozenset = frozenset()
 
+# Empirically confirmed live 2026-08-28 against the real Webull sandbox: a
+# get_order_detail lookup for a client_order_id that was rejected at
+# PLACEMENT time (never actually accepted/created - in the specific
+# incident that found this, a 417 OPENAPI_ORDER_RISK_RULE_PRICE_AGGRESSIVE
+# at placement) comes back HTTP 417, error_code OPENAPI_PARAM_ERR, message
+# "Parameter error, Order not present." - an explicit, unambiguous "no
+# such order" from the broker's own detail-lookup endpoint, not a vague
+# parameter complaint. Deliberately handled ONLY in _fetch_order_detail
+# below, NOT added to _CONFIRMED_DEFINITE_REJECTION_ERROR_CODES above
+# (which _place_order_with_retry also reads) - OPENAPI_PARAM_ERR is a
+# generic "parameter error" code that could mean something else entirely,
+# and NOT a safe rejection signal, during order PLACEMENT, where a
+# malformed param doesn't prove the order will never exist the way "not
+# present" does for a LOOKUP. Matched on the exact message text, not the
+# code alone, since the code alone is too generic to trust here - a
+# future OPENAPI_PARAM_ERR with a different message must NOT be treated
+# as this same "confirmed not present" case. Found live while resolving a
+# real frozen admin-panel entry: Release refused with the underlying error
+# unsurfaced (see app.py's ambiguous-resolution ValidationError message,
+# fixed alongside this to actually show admins the check's real error
+# text) until this exact message was captured via a direct API call.
+_ORDER_DETAIL_NOT_PRESENT_ERROR_CODE = "OPENAPI_PARAM_ERR"
+_ORDER_DETAIL_NOT_PRESENT_MESSAGE_FRAGMENT = "Order not present"
+
 
 def _classify_server_exception(error: "ServerException", action_label: str) -> Exception:  # noqa: F821 - ServerException imported by callers
     """Turns a raised ServerException into either DefiniteOrderRejection or
@@ -373,7 +397,13 @@ def _fetch_order_detail(trade_client, account_id: str, client_order_id: str) -> 
     Callers reconciling an ambiguous entry (see _reconcile_unknown_submission
     in app.py) rely on this distinction to know whether a failed lookup
     conclusively proves the order was never created, or merely means the
-    lookup itself failed for an unrelated reason."""
+    lookup itself failed for an unrelated reason.
+
+    One case is classified HERE, before falling through to the shared
+    _classify_server_exception/_CONFIRMED_DEFINITE_REJECTION_ERROR_CODES
+    path - see _ORDER_DETAIL_NOT_PRESENT_ERROR_CODE's own comment for why
+    this is deliberately scoped to this lookup-only call site, not the
+    shared placement-and-lookup allowlist."""
     for attempt in range(3):
         try:
             response = trade_client.order_v2.get_order_detail(account_id, client_order_id)
@@ -381,6 +411,11 @@ def _fetch_order_detail(trade_client, account_id: str, client_order_id: str) -> 
             if error.get_http_status() == 429 and attempt < 2:
                 time.sleep(1.5 * (attempt + 1))
                 continue
+            if (
+                error.get_error_code() == _ORDER_DETAIL_NOT_PRESENT_ERROR_CODE
+                and _ORDER_DETAIL_NOT_PRESENT_MESSAGE_FRAGMENT in (error.get_error_msg() or "")
+            ):
+                raise DefiniteOrderRejection(f"Webull API error (order detail): {error}") from error
             raise _classify_server_exception(error, "order detail") from error
         except ClientException as error:
             raise AmbiguousOrderSubmission(f"Webull API error (order detail): {error}") from error

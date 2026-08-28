@@ -245,6 +245,49 @@ def test_get_order_detail_confirmed_rejection_code_is_definite(monkeypatch):
             webull_api.get_order_detail("key", "secret", "acct1", "missing-id")
 
 
+def test_get_order_detail_order_not_present_is_definite_rejection():
+    # Empirically confirmed live 2026-08-28 (see _ORDER_DETAIL_NOT_PRESENT_ERROR_CODE's
+    # own comment): a lookup for a client_order_id that was rejected at
+    # PLACEMENT time (never actually created) returns exactly this shape -
+    # HTTP 417, OPENAPI_PARAM_ERR, "Parameter error, Order not present." -
+    # an unambiguous "no such order" from the broker's own lookup endpoint.
+    rejection = ServerException(
+        "OPENAPI_PARAM_ERR", "Parameter error, Order not present.", http_status=417, request_id="r8"
+    )
+    client = MagicMock()
+    client.order_v2.get_order_detail.side_effect = rejection
+    with patch.object(webull_api, "_get_trade_client", return_value=client):
+        with pytest.raises(webull_api.DefiniteOrderRejection, match="Order not present"):
+            webull_api.get_order_detail("key", "secret", "acct1", "missing-id")
+
+
+def test_get_order_detail_param_err_with_a_different_message_stays_ambiguous():
+    # The code alone (OPENAPI_PARAM_ERR) is deliberately NOT trusted as a
+    # blanket "confirmed rejection" signal - only this exact, empirically
+    # verified message. A different parameter complaint under the same
+    # generic code must not be misread as "order not present".
+    error = ServerException("OPENAPI_PARAM_ERR", "Parameter error, invalid account_id.", http_status=417, request_id="r9")
+    client = MagicMock()
+    client.order_v2.get_order_detail.side_effect = error
+    with patch.object(webull_api, "_get_trade_client", return_value=client):
+        with pytest.raises(webull_api.AmbiguousOrderSubmission, match="invalid account_id"):
+            webull_api.get_order_detail("key", "secret", "acct1", "missing-id")
+
+
+def test_get_order_detail_order_not_present_does_not_leak_into_order_placement():
+    # The critical scoping guarantee: this classification lives ONLY in
+    # _fetch_order_detail, not in the shared _CONFIRMED_DEFINITE_REJECTION_ERROR_CODES
+    # allowlist _place_order_with_retry also reads - the exact same
+    # OPENAPI_PARAM_ERR/"Order not present" response during PLACEMENT
+    # (a different, not-yet-verified scenario) must still be ambiguous.
+    error = ServerException("OPENAPI_PARAM_ERR", "Parameter error, Order not present.", http_status=417, request_id="r10")
+    client = MagicMock()
+    client.order_v2.place_order.side_effect = error
+    with patch.object(webull_api, "_get_trade_client", return_value=client):
+        with pytest.raises(webull_api.AmbiguousOrderSubmission):
+            webull_api._place_order_with_retry(client, "acct1", {"client_order_id": "cid-1"}, "entry")
+
+
 @pytest.mark.parametrize("http_status", [401, 403, 429, 500, 503])
 def test_get_order_detail_ambiguous_http_status_stays_ambiguous(http_status):
     error = ServerException("SOME_CODE", "trouble", http_status=http_status, request_id="r7")
