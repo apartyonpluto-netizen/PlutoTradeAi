@@ -336,7 +336,15 @@ def test_resolve_release_refused_when_any_check_failed_even_if_others_are_clean(
          patch.object(pluto_app.webull_api, "get_paper_accounts", return_value=[{"account_id": ACCOUNT_ID}]), \
          patch.object(pluto_app.webull_api, "find_individual_cash_account", return_value={"account_id": ACCOUNT_ID}), \
          mocks["get_order_detail"], mocks["get_open_orders"], mocks["get_account_positions"], mocks["get_order_history"]:
-        with pytest.raises(pluto_app.ValidationError, match="inconclusive"):
+        # Found live 2026-08-28: this message used to name only WHICH
+        # check(s) failed ("order_detail"), never why - an admin staring
+        # at that had no way to distinguish a benign, expected "not
+        # found" from a genuine bug worth investigating, without
+        # reproducing the failure themselves. Now asserts the actual
+        # underlying error text ("broker flaky") is included, not just
+        # the check name - a broker response string, not a credential,
+        # safe to show an admin who already has platform-wide visibility.
+        with pytest.raises(pluto_app.ValidationError, match="inconclusive") as excinfo:
             pluto_app._resolve_ambiguous_submission(
                 target_user_id=user_id,
                 admin_user_id=ADMIN_ID,
@@ -345,6 +353,8 @@ def test_resolve_release_refused_when_any_check_failed_even_if_others_are_clean(
                 reason="Attempting release despite a flaky check.",
                 confirmation="AAPL",
             )
+    assert "order_history" in str(excinfo.value)
+    assert "broker flaky" in str(excinfo.value)
     assert list_overnight_orders(user_id)[0]["lifecycle_state"] == ol.UNKNOWN_SUBMISSION_STATE
 
 

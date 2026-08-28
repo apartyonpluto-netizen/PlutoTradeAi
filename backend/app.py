@@ -7253,10 +7253,27 @@ def _resolve_ambiguous_submission(
 
     if action == AMBIGUOUS_RESOLUTION_RELEASE:
         if evidence["errors"]:
-            failed_checks = ", ".join(sorted(evidence["errors"].keys()))
+            # Found live 2026-08-28: this message previously named only
+            # WHICH check(s) failed, never why - an admin staring at
+            # "order_detail failed" has no way to tell "a broker error
+            # message that just means 'order not found' (this app's own
+            # empty _CONFIRMED_DEFINITE_REJECTION_ERROR_CODES allowlist -
+            # see integrations/webull.py - means that case still lands
+            # here as 'inconclusive' rather than a clean not-found, until
+            # that specific error code is empirically verified and added)"
+            # apart from "a genuine timeout worth just retrying" apart
+            # from "a real bug" - forcing exactly the kind of blind,
+            # multi-step live debugging that took to even learn this much
+            # about ONE stuck entry. The underlying error text is a broker
+            # response string, not a credential or secret - safe to show
+            # an admin who already has the platform-wide visibility this
+            # whole panel requires.
+            failed_check_details = "; ".join(
+                f"{check}: {message}" for check, message in sorted(evidence["errors"].items())
+            )
             raise ValidationError(
                 f"Cannot release - {len(evidence['errors'])} of the mandatory fresh checks failed and are "
-                f"inconclusive, not confirmed-clean ({failed_checks}). Resolve the underlying failure and try again."
+                f"inconclusive, not confirmed-clean ({failed_check_details}). Resolve the underlying failure and try again."
             )
         if evidence["found"]:
             raise ValidationError(
