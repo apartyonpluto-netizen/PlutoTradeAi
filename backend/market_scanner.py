@@ -4,7 +4,11 @@ from datetime import datetime, timezone
 from typing import Dict, List, Sequence, Tuple
 
 import pandas as pd
-import yfinance as yf
+
+if __package__:
+    from .integrations import alpaca_data
+else:
+    from integrations import alpaca_data
 
 DEFAULT_SCAN_UNIVERSE = [
     "AAPL",
@@ -19,20 +23,15 @@ DEFAULT_SCAN_UNIVERSE = [
 ]
 
 
-def _extract_ticker_frame(dataframe: pd.DataFrame, ticker: str, field_name: str) -> pd.Series:
-    if dataframe.empty:
+def _extract_ticker_frame(bars_by_ticker: Dict[str, pd.DataFrame], ticker: str, field_name: str) -> pd.Series:
+    """ticker-scoped lookup into the {ticker: flat_dataframe} shape
+    alpaca_data.get_bars returns (see that module's docstring) - a ticker
+    Alpaca had no bars for is simply absent from the dict, same as it
+    would be all-NaN/missing from yfinance's old batch frame."""
+    frame = bars_by_ticker.get(ticker)
+    if frame is None or frame.empty or field_name not in frame.columns:
         return pd.Series(dtype=float)
-
-    if isinstance(dataframe.columns, pd.MultiIndex):
-        if (ticker, field_name) in dataframe.columns:
-            return dataframe[(ticker, field_name)].dropna()
-        if (field_name, ticker) in dataframe.columns:
-            return dataframe[(field_name, ticker)].dropna()
-        return pd.Series(dtype=float)
-
-    if field_name in dataframe.columns:
-        return dataframe[field_name].dropna()
-    return pd.Series(dtype=float)
+    return frame[field_name].dropna()
 
 
 def _compute_scanner_score(percent_change: float, relative_volume: float) -> int:
@@ -56,56 +55,24 @@ def scan_market(
     results: List[Dict[str, str]] = []
 
     try:
-        # timeout=8 - tightened from 15s on 2026-08-21: even with an
-        # explicit per-call timeout, live production logs (Standard plan,
-        # 4 workers) still showed gunicorn's own 60s WORKER TIMEOUT firing
-        # and SIGKILLing workers during a sustained YFRateLimitError burst.
-        # Root cause: this call is sequential with the per-ticker brain
-        # chain below (up to 6 more yf.download() calls per ticker, see
-        # strategy_brain.py's _fetch_ohlcv), so worst-case totals stack
-        # ADDITIVELY within one request. At 15s+8s×6=63s the old numbers
-        # could exceed even a healthy 60s worker timeout on their own,
-        # before any actual rate-limiting. Tightened here and in the brains
-        # to 8s+5s×6=38s, and gunicorn's --timeout raised to 90s (Procfile,
-        # render.yaml) for defense in depth on the new 4-worker/2GB plan.
-        # threads=8, not True - True hands yfinance's OWN internal
-        # multitasking-based thread pool one thread per ticker (up to 48
-        # here), entirely separate from and beneath this app's own outer
-        # _run_with_hard_deadline wrapping around this whole function. If
-        # that outer deadline gives up on a slow/rate-limited batch (which
-        # this file's own comments already document happening under
-        # sustained Yahoo rate limiting), every one of yfinance's OWN
-        # inner threads is abandoned too - Python can't forcibly kill
-        # them, same reasoning as _run_with_hard_deadline's own docstring,
-        # just one layer deeper and previously unbounded. Found live
-        # 2026-08-25 via the module's own MEMORY_PROFILE diagnostic
-        # logging: peewee.py and multitasking/__init__.py (both yfinance
-        # internals, not this app's own code) were the two allocation
-        # sites growing fastest across repeated snapshots. Bounding this
-        # caps the worst case at 8 orphaned inner threads per abandoned
-        # call instead of up to 48 - backtest_engine.py already made the
-        # same call more conservatively (threads=False) for its own,
-        # less-frequent yf.download().
-        daily = yf.download(
-            tickers=" ".join(scan_tickers),
-            period="1mo",
-            interval="1d",
-            auto_adjust=False,
-            progress=False,
-            threads=8,
-            group_by="ticker",
-            timeout=8,
-        )
-        intraday = yf.download(
-            tickers=" ".join(scan_tickers),
-            period="1d",
-            interval="5m",
-            auto_adjust=False,
-            progress=False,
-            threads=8,
-            group_by="ticker",
-            timeout=8,
-        )
+        # Alpaca Market Data API, not yfinance - found live 2026-08-28 that
+        # Yahoo Finance was actively rate-limiting every single request from
+        # this app's Render deployment ("Scanner timed out - Yahoo Finance
+        # is rate limiting.", 0 rows, every scan), which is the direct
+        # cause of candidates_found being 0 on every autonomous scan: an
+        # empty scan here plus an empty watchlist means the per-ticker
+        # intelligence loop downstream (_build_page_context) never even
+        # runs. This is a real, external vendor block on Yahoo's public
+        # (unofficial) endpoint, not something any amount of retry/backoff/
+        # thread-bounding on THIS app's side could fix - see this file's
+        # git history for the session-long sequence of yfinance rate-limit
+        # workarounds that all treated the symptom, not the cause. See
+        # integrations/alpaca_data.py's own module docstring for exactly
+        # what's covered by this migration and what's deliberately still
+        # on yfinance (VIX shadow-mode data, options chains, other
+        # lower-traffic dashboard pages).
+        daily = alpaca_data.get_bars(scan_tickers, period="1mo", interval="1d")
+        intraday = alpaca_data.get_bars(scan_tickers, period="1d", interval="5m")
     except Exception as error:
         return [], [f"Scanner fetch failed: {error}"], now_stamp
 

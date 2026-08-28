@@ -5,7 +5,8 @@ from typing import Dict, List, Sequence
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-import yfinance as yf
+
+from integrations import alpaca_data
 
 
 def _now_iso() -> str:
@@ -113,30 +114,12 @@ def build_chart_levels(ticker: str, extended_hours: Dict[str, object] | None = N
     extended_hours = extended_hours or {}
 
     try:
-        # timeout=5 - tightened from 8s on 2026-08-21: see market_scanner.py's
-        # own comment for the full incident writeup (production 502s/worker
-        # kills at market open, traced to per-call timeouts still stacking
-        # additively past gunicorn's own worker timeout under Yahoo rate
-        # limiting).
-        daily = yf.download(
-            tickers=normalized,
-            period="9mo",
-            interval="1d",
-            auto_adjust=False,
-            progress=False,
-            threads=False,
-            timeout=5,
-        )
-        intraday = yf.download(
-            tickers=normalized,
-            period="5d",
-            interval="5m",
-            auto_adjust=False,
-            progress=False,
-            threads=False,
-            prepost=True,
-            timeout=5,
-        )
+        # Alpaca Market Data API, not yfinance - see
+        # integrations/alpaca_data.py's own module docstring for why (Yahoo
+        # Finance actively rate-limiting this app's requests, found live
+        # 2026-08-28) and exactly what this migration covers.
+        daily = alpaca_data.get_bars_single(normalized, period="9mo", interval="1d")
+        intraday = alpaca_data.get_bars_single(normalized, period="5d", interval="5m")
     except Exception as error:
         return _insufficient_payload(normalized, f"Market data fetch failed: {error}")
     daily = _normalize_ohlcv(daily, normalized)
