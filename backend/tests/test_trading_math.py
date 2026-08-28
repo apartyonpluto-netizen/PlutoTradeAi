@@ -850,6 +850,35 @@ def test_snapshot_fails_closed_when_positions_are_malformed():
     assert result is None
 
 
+def test_snapshot_logs_the_actual_exception_instead_of_failing_silently(monkeypatch):
+    """Found live 2026-08-28: a candidate reached _compute_position_quantity
+    with available_buying_power=None and skipped with "available buying
+    power could not be determined" - zero trace anywhere of WHY, the exact
+    same silent-degradation shape that caused candidates_found=0 for days
+    earlier this session (a ticker-intelligence timeout defaulting to
+    confidence=0 with no log line either). _build_capital_snapshot must
+    still fail closed (return None) on any exception, but it must also log
+    what the exception actually was, so a real cause is visible on the next
+    occurrence instead of needing a fresh diagnostic add-and-redeploy cycle
+    every time."""
+    logged = []
+    monkeypatch.setattr(pluto_app.logger, "warning", lambda *args, **kwargs: logged.append((args, kwargs)))
+
+    def _raise():
+        raise ConnectionError("broker unreachable")
+
+    result = pluto_app._build_capital_snapshot(
+        fetch_open_orders=_raise, real_open_positions=[], tracked_tickers=["AAPL"], total_equity=2000.0
+    )
+
+    assert result is None
+    assert len(logged) == 1
+    logged_args = logged[0][0]
+    assert any("broker unreachable" in str(arg) for arg in logged_args), (
+        f"expected the real exception message to be logged, got {logged_args!r}"
+    )
+
+
 # --- real broker buying power extraction ------------------------------------
 
 

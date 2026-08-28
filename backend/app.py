@@ -4075,7 +4075,19 @@ def _build_capital_snapshot(
         real_open_orders = fetch_open_orders()
         committed_capital = _compute_committed_virtual_capital(real_open_positions, real_open_orders, tracked_tickers)
         return _compute_available_buying_power(total_equity, committed_capital)
-    except Exception:  # noqa: BLE001 - intentionally broad, see docstring
+    except Exception as error:  # noqa: BLE001 - intentionally broad, see docstring
+        # Logged, not silent - found live 2026-08-28 that a candidate could
+        # reach _compute_position_quantity with available_buying_power=None
+        # and skip with "available buying power could not be determined",
+        # zero trace of WHY anywhere a human could see it - the exact same
+        # silent-degradation shape as the ticker-intelligence timeout that
+        # caused candidates_found=0 for days earlier this session (see
+        # _fetch_ticker_intelligence's own comment). Still fails closed
+        # (returns None either way - a caught exception here must never
+        # size a trade against partial/wrong data) but now leaves a real
+        # trace of the actual cause instead of forcing a re-diagnosis from
+        # scratch next time.
+        logger.warning("_build_capital_snapshot failed, sizing this scan will fail closed: %s", error)
         return None
 
 
