@@ -326,14 +326,57 @@ def test_get_open_orders_non_dict_row_fails_closed():
             webull_api.get_open_orders("key", "secret", "acct1")
 
 
-def test_get_open_orders_non_dict_payload_fails_closed():
+def test_get_open_orders_bare_list_is_a_legitimate_response_shape():
+    # Found live 2026-08-28: a real, freshly-connected paper account
+    # returned a bare list, not {"orders": [...]}, for its order history -
+    # both are real Webull response shapes, not just the object-wrapped
+    # one this used to be the only shape accepted.
+    open_response = MagicMock()
+    open_response.status_code = 200
+    open_response.json.return_value = [{"order_id": "1", "client_order_id": "a"}, {"order_id": "2", "client_order_id": "b"}]
+    client = MagicMock()
+    client.order_v2.get_order_open.return_value = open_response
+    with patch.object(webull_api, "_get_trade_client", return_value=client):
+        result = webull_api.get_open_orders("key", "secret", "acct1")
+    assert len(result) == 2
+
+
+def test_get_open_orders_bare_empty_list_is_a_legitimate_zero_orders_response():
+    # The exact real shape found live 2026-08-28 for a freshly-connected
+    # account with zero orders - a bare `[]`, not {"orders": []}.
+    open_response = MagicMock()
+    open_response.status_code = 200
+    open_response.json.return_value = []
+    client = MagicMock()
+    client.order_v2.get_order_open.return_value = open_response
+    with patch.object(webull_api, "_get_trade_client", return_value=client):
+        result = webull_api.get_open_orders("key", "secret", "acct1")
+    assert result == []
+
+
+def test_get_open_orders_bare_list_of_garbage_rows_still_fails_closed():
+    # A bare list is now a legitimate top-level shape, but the per-row
+    # validation (dict shape, stable order_id) still applies identically -
+    # this is not a loosening of the fail-closed guarantee, just a second
+    # accepted wire format for the same data.
     open_response = MagicMock()
     open_response.status_code = 200
     open_response.json.return_value = ["not", "a", "dict"]
     client = MagicMock()
     client.order_v2.get_order_open.return_value = open_response
     with patch.object(webull_api, "_get_trade_client", return_value=client):
-        with pytest.raises(ValueError, match="expected a JSON object"):
+        with pytest.raises(ValueError, match="not a JSON object"):
+            webull_api.get_open_orders("key", "secret", "acct1")
+
+
+def test_get_open_orders_payload_that_is_neither_object_nor_list_fails_closed():
+    open_response = MagicMock()
+    open_response.status_code = 200
+    open_response.json.return_value = "not-an-object-or-a-list"
+    client = MagicMock()
+    client.order_v2.get_order_open.return_value = open_response
+    with patch.object(webull_api, "_get_trade_client", return_value=client):
+        with pytest.raises(ValueError, match="expected a JSON object or list"):
             webull_api.get_open_orders("key", "secret", "acct1")
 
 
@@ -534,3 +577,18 @@ def test_get_order_history_empty_orders_returns_empty_list():
     with patch.object(webull_api, "_get_trade_client", return_value=client):
         result = webull_api.get_order_history("key", "secret", "acct1")
     assert result == []
+
+
+def test_get_order_history_bare_list_is_a_legitimate_response_shape():
+    # get_order_history shares _extract_orders_page with get_open_orders
+    # (see that module's docstring for the full incident writeup) - this
+    # confirms this second call site's wiring to it, not just the shared
+    # helper's own logic in isolation.
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = [{"order_id": "1", "client_order_id": "a"}]
+    client = MagicMock()
+    client.order_v2.get_order_history.return_value = response
+    with patch.object(webull_api, "_get_trade_client", return_value=client):
+        result = webull_api.get_order_history("key", "secret", "acct1")
+    assert len(result) == 1

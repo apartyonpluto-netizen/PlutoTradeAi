@@ -160,6 +160,46 @@ def _call_with_429_retry(action_label: str, call):
     raise ValueError(f"Webull API error ({action_label}): exhausted retries with no response received")
 
 
+def _extract_orders_page(payload: Any, action_label: str) -> List[Dict[str, Any]]:
+    """Shared strict-validation shape check for get_open_orders and
+    get_order_history's per-page response - see get_open_orders' own
+    docstring for why every one of these checks raises instead of guessing
+    (this function feeds a capital calculation that decides how much money
+    is safe to commit; a malformed/truncated response silently normalized
+    to "zero orders" would UNDER-count committed capital and OVERSTATE
+    available buying power, the dangerous direction).
+
+    Accepts TWO real, confirmed response shapes, not one: a JSON object
+    with an "orders" key ({"orders": [...]}, previously the only shape
+    this accepted), or a bare JSON list. Found live 2026-08-28: a real,
+    freshly-connected paper account with zero orders in its history
+    returned a bare `[]`, not `{"orders": []}` - the object-wrapper
+    shape this function's docstring had previously described as "the one
+    real confirmed empty-account shape" turned out not to be the only
+    one Webull actually sends. Both shapes carry identical information
+    (a list of order rows), so accepting either is not a loosening of
+    the fail-closed guarantee above - it's recognizing a second real
+    wire format for the same data. The per-row validation below (dict
+    shape, stable order_id) is applied identically regardless of which
+    shape it came from - a bare list of garbage is rejected exactly as
+    strictly as an object-wrapped list of garbage would be."""
+    if isinstance(payload, list):
+        raw_orders: Any = payload
+    elif isinstance(payload, dict):
+        if "orders" not in payload:
+            raise ValueError(f"Webull API error ({action_label}): response is missing the 'orders' field")
+        raw_orders = payload["orders"]
+    else:
+        raise ValueError(f"Webull API error ({action_label}): expected a JSON object or list response, got {type(payload).__name__}")
+    if not isinstance(raw_orders, list):
+        raise ValueError(f"Webull API error ({action_label}): 'orders' field is not a list ({type(raw_orders).__name__})")
+    if not all(isinstance(order, dict) for order in raw_orders):
+        raise ValueError(f"Webull API error ({action_label}): one or more order rows is not a JSON object")
+    if not all(order.get("order_id") for order in raw_orders):
+        raise ValueError(f"Webull API error ({action_label}): one or more order rows is missing a stable order_id")
+    return raw_orders
+
+
 def get_paper_accounts(app_key: str, app_secret: str) -> List[Dict[str, Any]]:
     trade_client = _get_trade_client(app_key, app_secret)
     response = _call_with_429_retry("accounts", lambda: trade_client.account_v2.get_account_list())
@@ -393,13 +433,15 @@ def get_open_orders(app_key: str, app_secret: str, account_id: str) -> List[Dict
     silently normalized to "zero open orders" (or a silently TRUNCATED
     result) would instead UNDER-count committed capital and OVERSTATE
     available buying power - the dangerous direction - so this raises
-    rather than guesses, in every one of these cases:
-      - the payload itself must be a JSON object (not a bare list, string,
-        number, or null);
-      - it must contain an "orders" key - a MISSING key is not treated as
-        "zero orders" (the one real confirmed empty-account shape is
-        {"orders": []}, an explicit empty list, not an absent key);
-      - "orders" must be a list, and every row in it must be a JSON object;
+    rather than guesses, in every one of these cases (see
+    _extract_orders_page, shared with get_order_history):
+      - the payload must be a JSON object with an "orders" key, OR a bare
+        JSON list - both are real, confirmed shapes (found live
+        2026-08-28: a freshly-connected paper account with zero order
+        history returned a bare `[]`, not `{"orders": []}`) - anything
+        else (a string, number, null, or a dict missing "orders") raises;
+      - "orders" (or the bare list itself) must be a list, and every row
+        in it must be a JSON object;
       - every row must carry a stable, truthy order_id - without this, a
         row with a missing/falsy id would collide with every OTHER such
         row when deduplicating by id (None == None), and be silently
@@ -425,19 +467,7 @@ def get_open_orders(app_key: str, app_secret: str, account_id: str) -> List[Dict
         ))
         if response.status_code != 200:
             raise ValueError(f"Webull API error (open orders): HTTP {response.status_code}")
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise ValueError(f"Webull API error (open orders): expected a JSON object response, got {type(payload).__name__}")
-        if "orders" not in payload:
-            raise ValueError("Webull API error (open orders): response is missing the 'orders' field")
-        raw_orders = payload["orders"]
-        if not isinstance(raw_orders, list):
-            raise ValueError(f"Webull API error (open orders): 'orders' field is not a list ({type(raw_orders).__name__})")
-        if not all(isinstance(order, dict) for order in raw_orders):
-            raise ValueError("Webull API error (open orders): one or more order rows is not a JSON object")
-        if not all(order.get("order_id") for order in raw_orders):
-            raise ValueError("Webull API error (open orders): one or more order rows is missing a stable order_id")
-        page_orders = raw_orders
+        page_orders = _extract_orders_page(response.json(), "open orders")
         if not page_orders:
             break
 
@@ -536,18 +566,7 @@ def get_order_history(app_key: str, app_secret: str, account_id: str, days_back:
         ))
         if response.status_code != 200:
             raise ValueError(f"Webull API error (order history): HTTP {response.status_code}")
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise ValueError(f"Webull API error (order history): expected a JSON object response, got {type(payload).__name__}")
-        if "orders" not in payload:
-            raise ValueError("Webull API error (order history): response is missing the 'orders' field")
-        page_orders = payload["orders"]
-        if not isinstance(page_orders, list):
-            raise ValueError(f"Webull API error (order history): 'orders' field is not a list ({type(page_orders).__name__})")
-        if not all(isinstance(order, dict) for order in page_orders):
-            raise ValueError("Webull API error (order history): one or more order rows is not a JSON object")
-        if not all(order.get("order_id") for order in page_orders):
-            raise ValueError("Webull API error (order history): one or more order rows is missing a stable order_id")
+        page_orders = _extract_orders_page(response.json(), "order history")
         if not page_orders:
             break
 
