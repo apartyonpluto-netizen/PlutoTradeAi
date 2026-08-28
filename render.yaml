@@ -4,7 +4,34 @@ services:
     runtime: python
     plan: standard
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --chdir backend app:app --workers 4 --timeout 90 --preload
+    # --worker-class gthread --threads 3 (added 2026-08-28, was plain sync):
+    # found live that a Preview Scan (20-40s of blocking work - market scan
+    # plus per-ticker intelligence - inside a single request) could tie up
+    # a whole gunicorn sync worker process for that entire span. With only
+    # 4 sync workers total, that's real exposure - if the other 3 happen to
+    # be busy with anything else at the same moment (another user's page
+    # load, the continuous-monitor-tick poller that hits this same service
+    # every ~10s), Render's own /healthz check has nowhere to land and can
+    # time out, which is exactly what happened: a genuine "Instance failed:
+    # HTTP health check failed" + restart landed seconds after a Preview
+    # Scan run, confirmed via Render's own Events/logs. gthread gives each
+    # of the 4 WORKER PROCESSES its own small pool of THREADS, so a slow
+    # scan occupying one thread no longer blocks /healthz (or any other
+    # quick request) from being served by another thread in that same
+    # process. Kept to 3 threads/worker (12 total slots, up from 4) rather
+    # than something larger - this plan is 1 CPU, so threads buy real
+    # concurrency here only because the slow paths are I/O-bound (network
+    # calls, future.result() waits, both of which release the GIL), not
+    # CPU parallelism, and a small multiplier avoids materially raising the
+    # worst-case concurrent-scan memory footprint after the 2026-08-25 OOM
+    # history on this same 2GB plan. Verified this doesn't reintroduce a
+    # concurrency bug: the shared mutable state actually touched under
+    # request handling (per-user accounts.json via _accounts_file_lock,
+    # webull.py's _trade_client_cache) is already either OS-level
+    # fcntl.flock'd (correct across threads AND processes, not just
+    # processes) or protected by its own threading.Lock - see those
+    # modules' own docstrings.
+    startCommand: gunicorn --chdir backend app:app --workers 4 --worker-class gthread --threads 3 --timeout 90 --preload
     healthCheckPath: /healthz
     envVars:
       - key: FLASK_SECRET_KEY
