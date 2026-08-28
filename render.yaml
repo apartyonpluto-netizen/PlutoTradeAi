@@ -85,3 +85,36 @@ services:
         sync: false
       - key: MONITOR_INTERVAL_SECONDS
         value: "10"
+
+  # Replaces .github/workflows/autonomous-scan-scheduler.yml as the
+  # PRIMARY trigger for the full 5-minute scan that places new autonomous
+  # entries - found live 2026-08-28 that GitHub's scheduled-workflow
+  # mechanism is best-effort and unreliable at this cadence: real GitHub
+  # Actions run history showed runs landing hours apart instead of every
+  # 5 minutes, then stopping entirely for 22+ hours (confirmed NOT a
+  # billing/quota issue - GitHub's own Actions minutes usage showed
+  # 0/2000 consumed for the period). This is exactly what
+  # api_autonomy_cron_trigger's own docstring in app.py already
+  # anticipated - "Called on a timer by a Render Cron Job (or,
+  # currently, a GitHub Actions schedule...)" - a Render Cron Job is a
+  # first-party scheduled-invocation primitive on the SAME
+  # infrastructure as the web service itself, not a cross-platform
+  # best-effort trigger. The GitHub Actions workflow is deliberately
+  # left in place as a redundant fallback layer, not deleted - same
+  # defense-in-depth precedent already established for
+  # fast-monitor-scheduler.yml. Overlapping triggers from both are safe:
+  # cron-trigger's own per-user user_scan_lock treats a concurrent call
+  # as an ordinary ScanAlreadyRunningError skip, not an error - see
+  # backend/trigger_autonomous_scan.py's own module docstring.
+  - type: cron
+    name: plutotradeai-autonomous-scan-trigger
+    runtime: python
+    plan: starter
+    schedule: "*/5 13-21 * * 1-5"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python backend/trigger_autonomous_scan.py
+    envVars:
+      - key: CRON_TRIGGER_URL
+        value: https://plutotradeai-tqsl.onrender.com/api/autonomy/cron-trigger
+      - key: CRON_SECRET
+        sync: false
