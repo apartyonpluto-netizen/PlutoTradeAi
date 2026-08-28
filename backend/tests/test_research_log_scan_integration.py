@@ -75,6 +75,19 @@ def _run_scan_and_capture(user_id, opportunities):
         stack.enter_context(patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]))
         stack.enter_context(patch.object(pluto_app.webull_api, "get_open_orders", return_value=[]))
         stack.enter_context(patch.object(pluto_app.webull_api, "get_order_history", return_value=[]))
+        # Matches each candidate's own ideal_entry so the new pre-submission
+        # freshness check (see app.py's _price_has_drifted_too_far) never
+        # trips for tickers this test's assertions expect to actually
+        # reach submission - only AAPL genuinely gets that far (the others
+        # are filtered by confidence/direction/sizing/LLM veto before this
+        # would even matter), but mapping every ticker keeps this correct
+        # regardless of which ones reach it.
+        stack.enter_context(patch.object(
+            pluto_app.alpaca_data, "get_latest_trade_price",
+            side_effect=lambda ticker: {
+                "AAPL": 100.0, "SLOW": 50.0, "BEAR": 50.0, "HUGE": ZERO_QTY_SENTINEL_PRICE, "VETO": 60.0,
+            }.get(ticker, 100.0),
+        ))
         stack.enter_context(
             patch.object(
                 pluto_app.webull_api, "get_account_balance",

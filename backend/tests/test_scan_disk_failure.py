@@ -39,6 +39,10 @@ def _run_scan_with_mocks(user_id, opportunities, record_overnight_order_mock):
          patch.object(pluto_app.webull_api, "get_open_orders", return_value=[]), \
          patch.object(pluto_app.webull_api, "get_order_history", return_value=[]), \
          patch.object(
+             pluto_app.alpaca_data, "get_latest_trade_price",
+             side_effect=lambda ticker: {"AAPL": 100.0, "MSFT": 200.0}.get(ticker, 100.0),
+         ), \
+         patch.object(
              pluto_app.webull_api,
              "get_account_balance",
              return_value={
@@ -102,6 +106,10 @@ def test_deployment_kill_switch_blocks_new_entries_but_reconciliation_still_ran(
          patch.object(pluto_app.webull_api, "get_open_orders", return_value=[]), \
          patch.object(pluto_app.webull_api, "get_order_history", return_value=[]), \
          patch.object(
+             pluto_app.alpaca_data, "get_latest_trade_price",
+             side_effect=lambda ticker: {"AAPL": 100.0, "MSFT": 200.0}.get(ticker, 100.0),
+         ), \
+         patch.object(
              pluto_app.webull_api, "get_account_balance",
              return_value={"total_net_liquidation_value": 100000.0, "total_day_profit_loss": 0.0, "account_currency_assets": [{"buying_power": "1000000"}]},
          ), \
@@ -162,6 +170,10 @@ def test_disk_write_failure_recording_an_entry_halts_the_rest_of_the_scan(user_i
          patch.object(pluto_app.webull_api, "get_open_orders", return_value=[]), \
          patch.object(pluto_app.webull_api, "get_order_history", return_value=[]), \
          patch.object(
+             pluto_app.alpaca_data, "get_latest_trade_price",
+             side_effect=lambda ticker: {"AAPL": 100.0, "MSFT": 200.0}.get(ticker, 100.0),
+         ), \
+         patch.object(
              pluto_app.webull_api,
              "get_account_balance",
              return_value={
@@ -211,6 +223,10 @@ def test_ambiguous_submission_circuit_breaker_halts_the_scan(user_id):
          patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
          patch.object(pluto_app.webull_api, "get_open_orders", return_value=[]), \
          patch.object(pluto_app.webull_api, "get_order_history", return_value=[]), \
+         patch.object(
+             pluto_app.alpaca_data, "get_latest_trade_price",
+             side_effect=lambda ticker: {"AAPL": 100.0, "MSFT": 200.0}.get(ticker, 100.0),
+         ), \
          patch.object(
              pluto_app.webull_api,
              "get_account_balance",
@@ -264,6 +280,10 @@ def test_persistent_ambiguity_blocks_new_entries_on_a_later_scan(user_id):
             patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"),
             patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]),  # no resulting position either
             patch.object(pluto_app.webull_api, "get_open_orders", return_value=[]),  # not resting as an open order either
+            patch.object(
+                pluto_app.alpaca_data, "get_latest_trade_price",
+                side_effect=lambda ticker: {"AAPL": 100.0, "MSFT": 200.0}.get(ticker, 100.0),
+            ),
             patch.object(
                 pluto_app.webull_api,
                 "get_account_balance",

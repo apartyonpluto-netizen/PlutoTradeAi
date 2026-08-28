@@ -50,6 +50,7 @@ def _patch_common_scan_environment(stack: ExitStack, opportunities) -> None:
     stack.enter_context(patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]))
     stack.enter_context(patch.object(pluto_app.webull_api, "get_open_orders", return_value=[]))
     stack.enter_context(patch.object(pluto_app.webull_api, "get_order_history", return_value=[]))
+    stack.enter_context(patch.object(pluto_app.alpaca_data, "get_latest_trade_price", return_value=100.0))
     stack.enter_context(patch.object(pluto_app.webull_api, "get_account_balance", return_value={
         "total_net_liquidation_value": 100000.0, "total_day_profit_loss": 0.0,
         "account_currency_assets": [{"buying_power": "1000000"}],

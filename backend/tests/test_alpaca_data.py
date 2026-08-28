@@ -181,3 +181,68 @@ def test_unsupported_interval_raises_immediately_not_a_bad_request_to_alpaca(mon
         with pytest.raises(ValueError, match="Unsupported interval"):
             alpaca_data.get_bars(["AAPL"], period="1mo", interval="1h")
     mock_get.assert_not_called()
+
+
+# --- get_latest_trade_price -------------------------------------------------
+
+"""Found live 2026-08-28: an entry's ideal_entry/limit_price is computed
+from get_bars' up-to-15-minutes-stale chart data at scan time, but the
+order can be submitted to Webull minutes later - for a fast-moving
+momentum candidate, that gap was enough real price drift to trip Webull's
+own OPENAPI_ORDER_RISK_RULE_PRICE_AGGRESSIVE ("the order price is too
+deviated") rejection. get_latest_trade_price exists to catch this BEFORE
+submission with a genuinely real-time price (feed=iex is real-time, NOT
+the same 15-min-embargoed data get_bars returns)."""
+
+
+def test_get_latest_trade_price_returns_the_price(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY_ID", "key123")
+    monkeypatch.setenv("ALPACA_API_SECRET_KEY", "secret456")
+    payload = {"symbol": "AAPL", "trade": {"t": "2026-08-28T17:00:00Z", "p": 191.42, "s": 100}}
+    with patch.object(alpaca_data.requests, "get", return_value=_fake_response(200, payload)) as mock_get:
+        price = alpaca_data.get_latest_trade_price("aapl")
+
+    assert price == 191.42
+    called = mock_get.call_args
+    assert called.args[0] == "https://data.alpaca.markets/v2/stocks/AAPL/trades/latest"
+    assert called.kwargs["params"] == {"feed": "iex"}
+    assert called.kwargs["headers"]["APCA-API-KEY-ID"] == "key123"
+
+
+def test_get_latest_trade_price_returns_none_on_a_non_200_response(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY_ID", "key123")
+    monkeypatch.setenv("ALPACA_API_SECRET_KEY", "secret456")
+    with patch.object(alpaca_data.requests, "get", return_value=_fake_response(429, {})):
+        assert alpaca_data.get_latest_trade_price("AAPL") is None
+
+
+def test_get_latest_trade_price_returns_none_on_a_malformed_response(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY_ID", "key123")
+    monkeypatch.setenv("ALPACA_API_SECRET_KEY", "secret456")
+    with patch.object(alpaca_data.requests, "get", return_value=_fake_response(200, {"symbol": "AAPL"})):
+        assert alpaca_data.get_latest_trade_price("AAPL") is None
+
+
+def test_get_latest_trade_price_returns_none_on_a_request_exception(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY_ID", "key123")
+    monkeypatch.setenv("ALPACA_API_SECRET_KEY", "secret456")
+    with patch.object(alpaca_data.requests, "get", side_effect=alpaca_data.requests.exceptions.ConnectionError("refused")):
+        assert alpaca_data.get_latest_trade_price("AAPL") is None
+
+
+def test_get_latest_trade_price_returns_none_without_credentials_configured(monkeypatch):
+    monkeypatch.delenv("ALPACA_API_KEY_ID", raising=False)
+    monkeypatch.delenv("ALPACA_API_SECRET_KEY", raising=False)
+    # Unlike get_bars (which raises so a scan's own error list surfaces the
+    # cause), this fails closed silently by design - a caller here is about
+    # to size/submit a real order and must treat "couldn't confirm" as
+    # "skip," not crash the whole entry-submission loop over one ticker.
+    assert alpaca_data.get_latest_trade_price("AAPL") is None
+
+
+def test_get_latest_trade_price_returns_none_for_an_empty_symbol(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY_ID", "key123")
+    monkeypatch.setenv("ALPACA_API_SECRET_KEY", "secret456")
+    with patch.object(alpaca_data.requests, "get") as mock_get:
+        assert alpaca_data.get_latest_trade_price("") is None
+    mock_get.assert_not_called()

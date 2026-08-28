@@ -219,3 +219,55 @@ def get_bars_single(symbol: str, period: str, interval: str) -> pd.DataFrame:
     if not normalized:
         return pd.DataFrame(columns=_REQUIRED_COLUMNS)
     return get_bars([normalized], period=period, interval=interval).get(normalized, pd.DataFrame(columns=_REQUIRED_COLUMNS))
+
+
+_LATEST_TRADE_PATH_TEMPLATE = "/v2/stocks/{symbol}/trades/latest"
+
+
+def get_latest_trade_price(symbol: str) -> Optional[float]:
+    """The single most recent trade price for `symbol`, genuinely real-time
+    on the free/IEX feed - NOT the same 15-minutes-embargoed data get_bars/
+    get_bars_single return. Verified against Alpaca's own published API
+    reference (docs.alpaca.markets/reference/stocklatesttradesingle-1)
+    2026-08-28: GET https://data.alpaca.markets/v2/stocks/{symbol}/trades/latest,
+    feed= accepts "iex" as a genuinely real-time option distinct from
+    "delayed_sip" (their own explicitly-15-min-delayed option) - unlike
+    get_bars' historical-bars endpoint, where the free tier's real-time
+    access ends 15 minutes before "now" by Alpaca's own default. Response
+    shape: {"symbol": "...", "trade": {"t": "...", "p": <price>, ...}}.
+
+    Exists specifically to catch a real, live failure mode found
+    2026-08-28: an entry's ideal_entry/limit_price is computed from
+    get_bars' up-to-15-minutes-stale chart data at scan time, but the
+    order is submitted to Webull possibly minutes later - for a fast-
+    moving momentum candidate (by definition the kind this strategy looks
+    for), that gap is enough real price drift to trip Webull's own
+    OPENAPI_ORDER_RISK_RULE_PRICE_AGGRESSIVE ("the order price is too
+    deviated") rejection, which this app's own ambiguous-submission
+    handling then has to freeze and reconcile after the fact. Checking a
+    genuinely fresh price immediately before submission (see
+    _price_has_drifted_too_far in app.py) catches this BEFORE submitting,
+    not after.
+
+    Returns None (not an exception) if the request fails or the response
+    is missing the expected shape - callers must treat None as "freshness
+    could not be confirmed" and fail closed (skip the entry), the same
+    "don't guess" discipline every other broker-adjacent check in this
+    app already follows, not attempt the order anyway on a stale price."""
+    normalized = (symbol or "").strip().upper()
+    if not normalized:
+        return None
+    try:
+        headers = _credential_headers()
+        response = requests.get(
+            _DATA_BASE_URL + _LATEST_TRADE_PATH_TEMPLATE.format(symbol=normalized),
+            headers=headers,
+            params={"feed": _feed()},
+            timeout=10,
+        )
+        if response.status_code != 200:
+            return None
+        price = (response.json().get("trade") or {}).get("p")
+        return float(price) if price is not None else None
+    except (ValueError, requests.exceptions.RequestException, TypeError):
+        return None

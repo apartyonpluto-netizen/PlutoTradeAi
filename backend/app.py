@@ -91,6 +91,7 @@ if __package__:
     from .regime import compute_shadow_adjustment, get_vix_snapshot
     from .integrations.tradingview import get_tradingview_status, save_alert
     from .integrations import webull as webull_api
+    from .integrations import alpaca_data
     from .webull_credentials import (
         get_webull_credentials,
         is_webull_configured,
@@ -243,6 +244,7 @@ else:
     from regime import compute_shadow_adjustment, get_vix_snapshot
     from integrations.tradingview import get_tradingview_status, save_alert
     from integrations import webull as webull_api
+    from integrations import alpaca_data
     from webull_credentials import (
         get_webull_credentials,
         is_webull_configured,
@@ -4008,6 +4010,39 @@ def _compute_available_buying_power(total_equity: float, committed_capital: floa
     available buying power - it doesn't subtract capital already tied up in
     open positions or reserved by pending orders. This does."""
     return max(0.0, float(_to_decimal(total_equity) - _to_decimal(committed_capital)))
+
+
+# Found live 2026-08-28: an entry's limit_price is computed from get_bars'
+# up-to-15-minutes-stale chart data at scan time (see
+# integrations/alpaca_data.py's own module docstring), but the order can
+# be submitted to Webull minutes later - for a fast-moving momentum
+# candidate (by definition the kind this strategy looks for), that gap
+# was enough real price drift to trip Webull's own
+# OPENAPI_ORDER_RISK_RULE_PRICE_AGGRESSIVE ("the order price is too
+# deviated") rejection, which then had to be frozen and reconciled after
+# the fact via the ambiguous-submission workflow. 2.0% is deliberately
+# tight - momentum candidates by nature move fast, so this is meant to
+# catch genuine multi-minute drift on a live mover, not every normal tick
+# of noise; if this proves too tight or too loose in practice against
+# real Webull rejections, tune the constant, not the comparison logic.
+_MAX_ENTRY_PRICE_DRIFT_PERCENT = 2.0
+
+
+def _price_has_drifted_too_far(
+    scan_time_price: float, fresh_price: float, max_deviation_percent: float = _MAX_ENTRY_PRICE_DRIFT_PERCENT
+) -> bool:
+    """True if fresh_price has moved more than max_deviation_percent away
+    from scan_time_price - the actual entry-price submission gate (see
+    the caller in the entry-submission loop). scan_time_price <= 0 can't
+    produce a meaningful percent deviation (division by a non-positive
+    reference) and is deliberately NOT treated as "drifted" here - the
+    caller's own `limit_price <= 0` check already fails that case closed
+    for an entirely different, more specific reason before this is ever
+    reached."""
+    if scan_time_price <= 0:
+        return False
+    deviation_percent = abs(fresh_price - scan_time_price) / scan_time_price * 100
+    return deviation_percent > max_deviation_percent
 
 
 def _compute_available_buying_power_with_reservations(
@@ -7911,6 +7946,52 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 placed.append(entry)
                 local_reservations += _reservation_notional(quantity, limit_price)
                 continue
+
+            # A fresh, genuinely real-time price check immediately before
+            # submission - not the same up-to-15-minutes-stale data
+            # limit_price was computed from (see
+            # integrations/alpaca_data.py's own module docstring). Found
+            # live 2026-08-28: this gap was enough real price drift on a
+            # fast-moving momentum candidate to trip Webull's own
+            # OPENAPI_ORDER_RISK_RULE_PRICE_AGGRESSIVE rejection, which
+            # then had to be frozen and manually reconciled via the
+            # ambiguous-submission workflow after the fact - catching it
+            # HERE avoids that entirely, for the (structurally identical)
+            # cost of one extra read-only market-data call per candidate,
+            # not a broker/order call. get_latest_trade_price returning
+            # None (request failed, or credentials unavailable) is treated
+            # the SAME as a confirmed large drift - "couldn't confirm
+            # freshness" fails closed exactly like "confirmed stale" does,
+            # never "assume it's still fine and submit anyway."
+            fresh_price = alpaca_data.get_latest_trade_price(ticker)
+            drift_reason = ""
+            if fresh_price is None:
+                drift_reason = (
+                    f"could not confirm a fresh, real-time price for {ticker} immediately before submission - "
+                    "refusing to submit against a possibly-stale scan-time price"
+                )
+            elif _price_has_drifted_too_far(limit_price, fresh_price):
+                drift_pct = abs(fresh_price - limit_price) / limit_price * 100
+                drift_reason = (
+                    f"price drifted {drift_pct:.1f}% since the scan computed this entry "
+                    f"(scan-time limit ${limit_price:.2f}, real-time price ${fresh_price:.2f}) - "
+                    "submitting now risks a broker rejection (Webull's own \"price too aggressive/deviated\" "
+                    "risk rule) or an unintentionally bad fill; skipping rather than risking either"
+                )
+            if drift_reason:
+                entry["status"] = "skipped"
+                entry["reason_skipped"] = drift_reason
+                entry["was_qualifying"] = True
+                skipped.append(entry)
+                record_overnight_order(user_id, entry)
+                _log_research_decision(
+                    ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
+                    raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=drift_reason,
+                    quantity=quantity, entry_client_order_id=entry.get("entry_client_order_id"),
+                    regime_shadow=entry.get("regime_shadow"),
+                )
+                continue
+
             _submit_and_protect_entry(
                 user_id=user_id,
                 creds=creds,

@@ -75,6 +75,7 @@ def _run_scan(
         stack.enter_context(patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]))
         stack.enter_context(patch.object(pluto_app.webull_api, "get_open_orders", return_value=[]))
         stack.enter_context(patch.object(pluto_app.webull_api, "get_order_history", return_value=[]))
+        stack.enter_context(patch.object(pluto_app.alpaca_data, "get_latest_trade_price", return_value=100.0))
         stack.enter_context(
             patch.object(
                 pluto_app.webull_api,
@@ -140,6 +141,7 @@ def test_regime_shadow_fetch_raising_does_not_block_the_real_scan(user_id):
          patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
          patch.object(pluto_app.webull_api, "get_open_orders", return_value=[]), \
          patch.object(pluto_app.webull_api, "get_order_history", return_value=[]), \
+         patch.object(pluto_app.alpaca_data, "get_latest_trade_price", return_value=100.0), \
          patch.object(
              pluto_app.webull_api, "get_account_balance",
              return_value={"total_net_liquidation_value": 100000.0, "total_day_profit_loss": 0.0, "account_currency_assets": [{"buying_power": "1000000"}]},
@@ -174,6 +176,7 @@ def test_regime_shadow_per_candidate_block_raising_does_not_block_the_real_scan(
          patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
          patch.object(pluto_app.webull_api, "get_open_orders", return_value=[]), \
          patch.object(pluto_app.webull_api, "get_order_history", return_value=[]), \
+         patch.object(pluto_app.alpaca_data, "get_latest_trade_price", return_value=100.0), \
          patch.object(
              pluto_app.webull_api, "get_account_balance",
              return_value={"total_net_liquidation_value": 100000.0, "total_day_profit_loss": 0.0, "account_currency_assets": [{"buying_power": "1000000"}]},
@@ -351,6 +354,7 @@ def test_vix_is_fetched_once_per_scan_tick_not_once_per_candidate(user_id):
          patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
          patch.object(pluto_app.webull_api, "get_open_orders", return_value=[]), \
          patch.object(pluto_app.webull_api, "get_order_history", return_value=[]), \
+         patch.object(pluto_app.alpaca_data, "get_latest_trade_price", return_value=100.0), \
          patch.object(
              pluto_app.webull_api, "get_account_balance",
              return_value={"total_net_liquidation_value": 100000.0, "total_day_profit_loss": 0.0, "account_currency_assets": [{"buying_power": "1000000"}]},
@@ -377,6 +381,7 @@ def test_vix_is_fetched_even_when_no_candidates_qualify(user_id):
          patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
          patch.object(pluto_app.webull_api, "get_open_orders", return_value=[]), \
          patch.object(pluto_app.webull_api, "get_order_history", return_value=[]), \
+         patch.object(pluto_app.alpaca_data, "get_latest_trade_price", return_value=100.0), \
          patch.object(
              pluto_app.webull_api, "get_account_balance",
              return_value={"total_net_liquidation_value": 100000.0, "total_day_profit_loss": 0.0, "account_currency_assets": [{"buying_power": "1000000"}]},
