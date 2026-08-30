@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import threading
 from typing import Any, Dict, List
 
 from news.news_service import fetch_news_bundle
+
+try:
+    import anthropic
+except ImportError:  # pragma: no cover - exercised only when the optional dependency isn't installed
+    anthropic = None  # type: ignore[assignment]
 
 MODEL = "claude-sonnet-5"
 MAX_NEWS_HEADLINES = 3
@@ -69,6 +75,41 @@ Recent headlines for {candidate.get('ticker')}:
 
 Review this candidate and submit your verdict."""
 
+# get_llm_verdict runs once per qualifying candidate per scan - a handful of
+# times every 5-minute scan, all day, every trading day - and was building a
+# brand-new anthropic.Anthropic(api_key=...) client on EVERY call, never
+# closed or reused. That client wraps a fresh httpx.Client (connection pool,
+# TLS context) and triggers the SDK's own pydantic-based request/response
+# schema resolution on every instantiation. A live tracemalloc snapshot on
+# the deployed service, taken in the minutes before a real OOM crash on
+# 2026-08-28, showed exactly this signature - typing_extensions.py,
+# annotationlib.py, pydantic/fields.py, pydantic/_internal/_mock_val_ser.py -
+# as the single largest still-growing allocation site, recurring and
+# enlarging on every scan. Same root shape as the Webull trade-client leak
+# already fixed in integrations/webull.py's _get_trade_client (see its own
+# extensive comment, and _trade_client_cache) - an API key is static per
+# account, so it's safe to build the client once per key and reuse it. This
+# does not change auth/network behavior, only avoids rebuilding the same
+# object graph on every call.
+_client_cache: Dict[str, Any] = {}
+_client_cache_lock = threading.Lock()
+
+
+def _get_client(api_key: str) -> Any:
+    cached_client = _client_cache.get(api_key)
+    if cached_client is not None:
+        return cached_client
+
+    with _client_cache_lock:
+        # Re-check inside the lock - another thread may have built and
+        # cached this exact key's client while we were waiting.
+        cached_client = _client_cache.get(api_key)
+        if cached_client is not None:
+            return cached_client
+        client = anthropic.Anthropic(api_key=api_key)
+        _client_cache[api_key] = client
+        return client
+
 
 def get_llm_verdict(candidate: Dict[str, Any], api_key: str) -> Dict[str, Any]:
     """Calls Claude to review an already quant-selected trade candidate,
@@ -78,10 +119,7 @@ def get_llm_verdict(candidate: Dict[str, Any], api_key: str) -> Dict[str, Any]:
     rather than blocking a scan over a flaky LLM call."""
     if not api_key:
         return {"available": False, "reason": "No Anthropic API key configured."}
-
-    try:
-        import anthropic
-    except ImportError:
+    if anthropic is None:
         return {"available": False, "reason": "anthropic package not installed."}
 
     ticker = str(candidate.get("ticker", "")).upper()
@@ -94,7 +132,7 @@ def get_llm_verdict(candidate: Dict[str, Any], api_key: str) -> Dict[str, Any]:
         headlines = []
 
     try:
-        client = anthropic.Anthropic(api_key=api_key)
+        client = _get_client(api_key)
         response = client.messages.create(
             model=MODEL,
             max_tokens=500,
