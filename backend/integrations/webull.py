@@ -794,6 +794,68 @@ def place_take_profit_order(
     return _place_order_with_retry(trade_client, account_id, order, "place take-profit order")
 
 
+# --- TEMPORARY diagnostic: verify a real STOP_LOSS_PROFIT combo order (2026-08-31) -----
+# Found live: place_stop_loss_order and place_take_profit_order are placed as
+# two fully INDEPENDENT orders (see place_take_profit_order's own docstring -
+# a deliberate choice, since Webull's combo-order wire format has never been
+# empirically verified against this sandbox account). A real SLB entry hit
+# the cost of that gap today: after the stop leg placed and rested, the
+# take-profit leg was REJECTED outright - HTTP 417,
+# OPENAPI_ORDER_NOT_SUPPORT_REVERSE_OPTION, "this order cannot be entered
+# because it will reverse an existing position" - because Webull's risk
+# engine reads two independent full-quantity SELL orders against one long
+# position as an attempt to go net short. preview_order is a genuine dry-run
+# (validates the request shape and rejects/accepts exactly like a real
+# placement would, but never actually executes an order or touches capital -
+# same trust level as the STOP_LOSS order_type quirk that was verified this
+# same way before being wired into live placement) - safe to call against
+# the real, currently-stuck SLB position without risking it further.
+# Remove once STOP_LOSS_PROFIT combo orders are either adopted for real or
+# ruled out.
+def preview_stop_and_target_combo(
+    app_key: str,
+    app_secret: str,
+    account_id: str,
+    symbol: str,
+    quantity: float,
+    stop_price: float,
+    target_price: float,
+) -> Dict[str, Any]:
+    trade_client = _get_trade_client(app_key, app_secret)
+    combo_order_id = uuid.uuid4().hex
+    stop_leg = {
+        "combo_type": "STOP_LOSS_PROFIT",
+        "client_order_id": uuid.uuid4().hex,
+        "symbol": symbol,
+        "instrument_type": "EQUITY",
+        "market": "US",
+        "order_type": "STOP_LOSS",
+        "stop_price": str(stop_price),
+        "quantity": str(quantity),
+        "support_trading_session": "CORE",
+        "side": "SELL",
+        "time_in_force": "DAY",
+        "entrust_type": "QTY",
+    }
+    target_leg = {
+        "combo_type": "STOP_LOSS_PROFIT",
+        "client_order_id": uuid.uuid4().hex,
+        "symbol": symbol,
+        "instrument_type": "EQUITY",
+        "market": "US",
+        "order_type": "LIMIT",
+        "limit_price": str(target_price),
+        "quantity": str(quantity),
+        "support_trading_session": "CORE",
+        "side": "SELL",
+        "time_in_force": "DAY",
+        "entrust_type": "QTY",
+    }
+    response = trade_client.order_v2.preview_order(account_id, [stop_leg, target_leg], client_combo_order_id=combo_order_id)
+    return response.json()
+# --- end temporary STOP_LOSS_PROFIT combo diagnostic ------------------------
+
+
 def cancel_order(app_key: str, app_secret: str, account_id: str, client_order_id: str) -> Dict[str, Any]:
     trade_client = _get_trade_client(app_key, app_secret)
     response = trade_client.order_v2.cancel_order(account_id, client_order_id)
