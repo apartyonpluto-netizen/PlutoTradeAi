@@ -5002,6 +5002,7 @@ def _confirm_and_finalize_protection(
     target_client_order_id = entry.get("target_client_order_id")
 
     stop_confirmed = False
+    stop_confirmed_dead = False  # a real, successful lookup that came back CANCELLED/FAILED - not a mere unconfirmed timeout
     # target_confirmed is unconditionally satisfied unless this is a
     # legacy entry that genuinely has a target_client_order_id from before
     # 2026-08-31 (see _reconcile_protective_leg_quantity's own comment) -
@@ -5015,7 +5016,9 @@ def _confirm_and_finalize_protection(
         if stop_client_order_id and not stop_confirmed and entry.get("stop_leg_quantity") == filled_quantity:
             try:
                 stop_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, stop_client_order_id)
-                stop_confirmed = _protective_leg_is_active(ol.summarize_fill(stop_detail)["status"])
+                stop_status = ol.summarize_fill(stop_detail)["status"]
+                stop_confirmed = _protective_leg_is_active(stop_status)
+                stop_confirmed_dead = stop_status in ("CANCELLED", "FAILED")
             except Exception:  # noqa: BLE001 - transient lookup failure, try again next attempt
                 pass
         if target_client_order_id and not target_confirmed and entry.get("target_leg_quantity") == filled_quantity:
@@ -5037,6 +5040,26 @@ def _confirm_and_finalize_protection(
     if target_confirmed:
         entry["target_protection_gap"] = None
 
+    stop_leg_needs_replacement = False
+    if not stop_confirmed and stop_confirmed_dead:
+        # Found live 2026-08-31: a real stop leg ended up CANCELLED at the
+        # broker (by some means outside this app's own resize/exit paths -
+        # the exact cause was never confirmed, only the resulting state)
+        # while its tracked quantity never changed. _reconcile_protective_leg_quantity's
+        # own "already correctly sized" short-circuit compares quantity
+        # only, never broker status, so nothing was ever re-placing it -
+        # this entry polled the same dead order every single monitor pass
+        # (203+ attempts, 4+ hours) without ever attempting a replacement.
+        # Clearing stop_leg_quantity here (NOT stop_client_order_id - the
+        # old, now-confirmed-dead id is still needed so the next resize's
+        # own cancel-confirm-replace sequence can look it up and correctly
+        # skip straight to replacing it) makes the quantity no longer
+        # "already correct" on the NEXT pass, which is exactly what's
+        # needed to make _reconcile_protective_leg_quantity actually place
+        # a fresh stop instead of silently polling a dead one forever.
+        entry["stop_leg_quantity"] = None
+        stop_leg_needs_replacement = True
+
     if stop_confirmed and target_confirmed:
         ol.transition(entry, ol.PROTECTION_CONFIRMED_ACTIVE, protection_confirmed_at=_now_utc().isoformat())
     else:
@@ -5046,6 +5069,7 @@ def _confirm_and_finalize_protection(
             error=(
                 f"could not confirm protection active within {PROTECTION_CONFIRM_POLL_ATTEMPTS} attempts "
                 f"(stop_confirmed={stop_confirmed}, target_confirmed={target_confirmed})"
+                + (" - stop leg found CANCELLED/FAILED at the broker; will place a fresh one next pass" if stop_leg_needs_replacement else "")
             ),
         )
         try:
