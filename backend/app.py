@@ -969,6 +969,17 @@ def api_admin_list_stuck_monitor_entries():
                     "monitor_attempt_count": order.get("monitor_attempt_count", 0),
                     "monitor_last_error": order.get("monitor_last_error"),
                     "monitor_last_attempt_at": order.get("monitor_last_attempt_at"),
+                    # order["error"] is a DIFFERENT field than monitor_last_error -
+                    # stamped by ol.transition itself (see e.g.
+                    # _confirm_and_finalize_protection's own PROTECTION_FAILED
+                    # transition), which can fail silently from
+                    # monitor_last_error's perspective (no exception raised,
+                    # just an internal poll that never confirmed) while still
+                    # leaving a real, useful description here.
+                    "lifecycle_error": order.get("error"),
+                    "stop_client_order_id": order.get("stop_client_order_id"),
+                    "stop_leg_quantity": order.get("stop_leg_quantity"),
+                    "filled_quantity": order.get("filled_quantity"),
                 }
             )
     return _api_success({"stuck": stuck}, ok=True, stuck=stuck)

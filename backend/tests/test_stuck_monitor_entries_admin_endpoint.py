@@ -92,6 +92,41 @@ def test_route_returns_a_stuck_entry_with_its_real_error_text(user_id):
     assert match["is_causing_freeze"] is True  # 2000s > MONITOR_STUCK_FREEZE_SECONDS (1800)
 
 
+def test_route_surfaces_the_lifecycle_error_and_stop_leg_fields():
+    # Found live 2026-08-31: a real entry stayed stuck with
+    # monitor_last_error == None (a silent internal poll failure inside
+    # _confirm_and_finalize_protection, which never raises - see its own
+    # docstring), even though the real reason was fully described in the
+    # entry's OWN "error" field from its PROTECTION_FAILED transition.
+    # These fields close that second, more subtle opacity gap.
+    admin_id = _make_admin("lifecycle-error-admin")
+    target_id = _register_target_user("lifecycle-error-target")
+    entry = _stuck_entry(
+        "pt-stuck-lifecycle-error", stuck_since=(pluto_app._now_utc() - pluto_app.timedelta(seconds=2000)).isoformat(),
+        attempt_count=185, error=None,
+    )
+    entry["error"] = "could not confirm protection active within 5 attempts (stop_confirmed=False, target_confirmed=True)"
+    entry["stop_client_order_id"] = "stop-cid-real"
+    entry["stop_leg_quantity"] = 30.0
+    entry["filled_quantity"] = 30.0
+    record_overnight_order(target_id, entry)
+
+    with pluto_app.app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["user_id"] = admin_id
+        response = client.get("/api/admin/stuck-monitor-entries")
+
+    payload = response.get_json()
+    matches = [item for item in payload["data"]["stuck"] if item.get("entry_client_order_id") == "pt-stuck-lifecycle-error"]
+    assert len(matches) == 1
+    match = matches[0]
+    assert match["monitor_last_error"] is None  # the silent-failure case this test is specifically about
+    assert "stop_confirmed=False" in match["lifecycle_error"]
+    assert match["stop_client_order_id"] == "stop-cid-real"
+    assert match["stop_leg_quantity"] == 30.0
+    assert match["filled_quantity"] == 30.0
+
+
 def test_route_flags_a_not_yet_stuck_entry_as_not_causing_the_freeze(user_id):
     admin_id = _make_admin(user_id[:8] + "b")
     target_id = _register_target_user(user_id[:8] + "b")
