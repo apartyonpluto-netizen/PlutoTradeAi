@@ -793,79 +793,20 @@ def place_take_profit_order(
     }
     return _place_order_with_retry(trade_client, account_id, order, "place take-profit order")
 
-
-# --- TEMPORARY diagnostic: verify a real STOP_LOSS_PROFIT combo order (2026-08-31) -----
-# Found live: place_stop_loss_order and place_take_profit_order are placed as
-# two fully INDEPENDENT orders (see place_take_profit_order's own docstring -
-# a deliberate choice, since Webull's combo-order wire format has never been
-# empirically verified against this sandbox account). A real SLB entry hit
-# the cost of that gap today: after the stop leg placed and rested, the
-# take-profit leg was REJECTED outright - HTTP 417,
-# OPENAPI_ORDER_NOT_SUPPORT_REVERSE_OPTION, "this order cannot be entered
-# because it will reverse an existing position" - because Webull's risk
-# engine reads two independent full-quantity SELL orders against one long
-# position as an attempt to go net short. preview_order is a genuine dry-run
-# (validates the request shape and rejects/accepts exactly like a real
-# placement would, but never actually executes an order or touches capital -
-# same trust level as the STOP_LOSS order_type quirk that was verified this
-# same way before being wired into live placement) - safe to call against
-# the real, currently-stuck SLB position without risking it further.
-# Remove once STOP_LOSS_PROFIT combo orders are either adopted for real or
-# ruled out.
-def preview_stop_and_target_combo(
-    app_key: str,
-    app_secret: str,
-    account_id: str,
-    symbol: str,
-    quantity: float,
-    stop_price: float,
-    target_price: float,
-    combo_type: str = "OCO",
-) -> Dict[str, Any]:
-    # combo_type is parameterized (not hardcoded) because the first real
-    # attempt at this - "STOP_LOSS_PROFIT", the SDK's own ComboType member
-    # whose description ("Stop loss Profit") reads as the obvious match -
-    # was rejected outright by this live sandbox: HTTP 417, OPENAPI_PARAM_ERR,
-    # "invalid combo_type". The SDK's enum listing something doesn't prove
-    # this specific account/API version actually accepts it - exactly the
-    # allowlist-not-assumption discipline this file already applies
-    # elsewhere. "OCO" defaults here as the next real candidate (a stop and
-    # a target where either fill should cancel the other is precisely what
-    # "one cancels others" describes) - still unverified until this
-    # function's own caller gets back something other than a rejection.
-    trade_client = _get_trade_client(app_key, app_secret)
-    combo_order_id = uuid.uuid4().hex
-    stop_leg = {
-        "combo_type": combo_type,
-        "client_order_id": uuid.uuid4().hex,
-        "symbol": symbol,
-        "instrument_type": "EQUITY",
-        "market": "US",
-        "order_type": "STOP_LOSS",
-        "stop_price": str(stop_price),
-        "quantity": str(quantity),
-        "support_trading_session": "CORE",
-        "side": "SELL",
-        "time_in_force": "DAY",
-        "entrust_type": "QTY",
-    }
-    target_leg = {
-        "combo_type": combo_type,
-        "client_order_id": uuid.uuid4().hex,
-        "symbol": symbol,
-        "instrument_type": "EQUITY",
-        "market": "US",
-        "order_type": "LIMIT",
-        "limit_price": str(target_price),
-        "quantity": str(quantity),
-        "support_trading_session": "CORE",
-        "side": "SELL",
-        "time_in_force": "DAY",
-        "entrust_type": "QTY",
-    }
-    response = trade_client.order_v2.preview_order(account_id, [stop_leg, target_leg], client_combo_order_id=combo_order_id)
-    return response.json()
-# --- end temporary STOP_LOSS_PROFIT combo diagnostic ------------------------
+# NOTE (2026-08-31): broker-native combo/bracket orders for STOCK orders are
+# RULED OUT on this account, empirically - a temporary preview_order-based
+# diagnostic (see git history, commits d5c3c1a/7574f6c) tried every
+# combo_type the SDK's ComboType enum exposes (STOP_LOSS_PROFIT, OCO, OTOCO,
+# STOP_LOSS, STOP_PROFIT, and the raw numeric codes) against this sandbox
+# account and every single one was rejected: HTTP 417, OPENAPI_PARAM_ERR,
+# "invalid combo_type". The SDK exposing these values does not mean this
+# account/API version/endpoint accepts them for equity orders - only
+# "NORMAL" (what place_stock_order/place_stop_loss_order/place_take_profit_order
+# already use) is confirmed to work. Do not re-attempt OCO/OTOCO/combo
+# orders here without new evidence this has changed - see
+# place_take_profit_order's own docstring for why the two legs stay
+# independent, and _reconcile_both_legs_filled_emergency in app.py for how
+# the resulting stale-leg risk is already handled.
 
 
 def cancel_order(app_key: str, app_secret: str, account_id: str, client_order_id: str) -> Dict[str, Any]:
