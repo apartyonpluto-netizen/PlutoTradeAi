@@ -985,6 +985,49 @@ def api_admin_list_stuck_monitor_entries():
     return _api_success({"stuck": stuck}, ok=True, stuck=stuck)
 
 
+@app.route("/api/admin/diagnostic/order-detail", methods=["GET"])
+def api_admin_diagnostic_order_detail():
+    """Read-only: the broker's own CURRENT, LIVE answer for one specific
+    order (any client_order_id - entry, stop, target, or a target-exit
+    sell), for one specific account. Small and permanent, not a
+    remove-when-done diagnostic - "what does Webull actually say about
+    order X right now" is a question that has come up repeatedly this
+    session (the SLB take-profit rejection, the OPENAPI_PARAM_ERR
+    "Order not present" classification, and now a stop leg that won't
+    confirm as active) and always required either live shell access this
+    session doesn't have, or a fresh temporary diagnostic + deploy cycle
+    each time. This makes that a standing admin tool instead."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    target_user_id = str(request.args.get("user_id", "") or _current_user_id())
+    client_order_id = str(request.args.get("client_order_id", "") or "").strip()
+    if not client_order_id:
+        return _api_failure("client_order_id is required.", status_code=400, error_code="invalid_request", ok=False)
+
+    creds = get_webull_credentials(target_user_id)
+    if request.args.get("account_id"):
+        account_id = str(request.args["account_id"])
+    else:
+        try:
+            sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
+            account_id = webull_api.find_individual_cash_account(sandbox_accounts)["account_id"]
+        except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than crash
+            return _api_failure(f"Could not resolve the sandbox account: {error}", status_code=502, error_code="broker_error", ok=False)
+
+    try:
+        detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, client_order_id)
+    except webull_api.DefiniteOrderRejection as error:
+        return _api_success({"classification": "definite_rejection", "detail": str(error)}, ok=True)
+    except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than crash
+        return _api_failure(f"get_order_detail failed: {error}", status_code=502, error_code="broker_error", ok=False)
+    try:
+        summary = ol.summarize_fill(detail)
+    except Exception as error:  # noqa: BLE001
+        summary = {"summarize_fill_error": str(error)}
+    return _api_success({"classification": "ok", "summary": summary, "raw": detail}, ok=True)
+
+
 @app.route("/api/admin/ambiguous-submissions/resolve", methods=["POST"])
 def api_admin_resolve_ambiguous_submission():
     """The only route that can move an entry out of UNKNOWN_SUBMISSION_STATE
