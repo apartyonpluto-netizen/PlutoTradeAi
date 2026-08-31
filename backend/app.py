@@ -3326,6 +3326,15 @@ ENTRY_FILL_POLL_INTERVAL_SECONDS = 2.0
 PROTECTION_CONFIRM_POLL_ATTEMPTS = 5
 PROTECTION_CONFIRM_POLL_INTERVAL_SECONDS = 2.0
 
+# _check_and_execute_target_exit's own marketable-limit sell, placed once a
+# fresh price confirms the target has been reached - deliberately a LIMIT a
+# small amount below the fresh price, not a bare MARKET order (MARKET has
+# never been empirically verified against this sandbox, matching this
+# file's own allowlist-not-assumption discipline elsewhere), close enough
+# to all but guarantee an immediate fill while still bounding worst-case
+# slippage on what should be a routine, already-past-target exit.
+TARGET_EXIT_SLIPPAGE_TOLERANCE = 0.005
+
 # _reconcile_unknown_submission: even a well-formed, parsed "order not
 # found" response (webull_api.DefiniteOrderRejection) is not treated as
 # immediately conclusive - Webull has not published a read-after-write
@@ -4681,15 +4690,77 @@ def _reconcile_protective_leg_quantity(
     _monitor_transitional_orders) and retrying on a later pass. This
     function is itself safe to simply call again after any such failure -
     every step re-checks current broker state rather than trusting
-    anything left over from a prior, incomplete attempt."""
+    anything left over from a prior, incomplete attempt.
+
+    leg == "target" is a deliberate, permanent no-op (2026-08-31) - see
+    _check_and_execute_target_exit's own docstring for the full evidence.
+    Placing the target as a second independent resting SELL order was
+    empirically confirmed to get rejected by Webull once a stop leg is
+    already resting (HTTP 417, OPENAPI_ORDER_NOT_SUPPORT_REVERSE_OPTION -
+    a real SLB entry hit this live), and a follow-up preview_order
+    diagnostic ruled out every broker-native combo/bracket order_type this
+    account supports (git history: commits d5c3c1a/7574f6c/38a0c8b) - only
+    "NORMAL" works, which is exactly the independent-order shape that
+    caused the rejection in the first place. The target price is still
+    tracked on the entry and still enforced - just watched and executed by
+    this app's own monitor instead of resting at the broker.
+
+    For leg == "target" specifically: if this entry has no
+    target_client_order_id, this is simply a no-op (the normal, current-
+    scheme case - there was never a broker-side target leg to manage). If
+    it DOES have one (a legacy entry from before 2026-08-31 whose target
+    somehow got placed before this app stopped attempting it), this app
+    can no longer resize it correctly - so the first time a resize would
+    otherwise have been needed, this cancels-and-confirms that stale leg
+    and drops its tracking instead, migrating the entry onto the new
+    app-monitored scheme rather than leaving a target resting at the wrong
+    (stale) quantity forever. Cancelling a take-profit leg is not a safety
+    risk - it only forfeits upside capture until _check_and_execute_target_exit
+    takes over watching price, unlike ever cancelling a stop."""
+    if leg == "target":
+        old_target_id = entry.get("target_client_order_id")
+        if not old_target_id:
+            return
+        try:
+            old_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, old_target_id)
+            old_status = ol.summarize_fill(old_detail)["status"]
+        except Exception as error:  # noqa: BLE001
+            raise RuntimeError(f"could not confirm the legacy target leg's status before migrating {ticker} off it: {error}") from error
+        if old_status == "FILLED":
+            # A genuine target exit via the old broker-order path, not a
+            # migration case - _reconcile_position_exit's own broker-fill
+            # detection handles this; leave it fully alone.
+            return
+        if _protective_leg_is_active(old_status):
+            try:
+                webull_api.cancel_order(creds["app_key"], creds["app_secret"], account_id, old_target_id)
+            except Exception as error:  # noqa: BLE001
+                raise RuntimeError(f"could not cancel the legacy target leg while migrating {ticker} off it: {error}") from error
+            try:
+                recheck_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, old_target_id)
+                recheck_status = ol.summarize_fill(recheck_detail)["status"]
+            except Exception as error:  # noqa: BLE001
+                raise RuntimeError(f"could not confirm the legacy target leg's cancellation while migrating {ticker} off it: {error}") from error
+            if recheck_status == "FILLED":
+                return  # filled during the cancel race - a genuine exit, not a migration case; leave it alone
+            if _protective_leg_is_active(recheck_status):
+                raise RuntimeError(f"legacy target leg cancellation not yet confirmed for {ticker} - will retry")
+        # Confirmed CANCELLED/FAILED, or was never active to begin with -
+        # durably gone. Dropping tracking here makes target_confirmed's own
+        # check (see _confirm_and_finalize_protection) treat this entry the
+        # same as any other new-scheme entry from here on.
+        entry["target_client_order_id"] = None
+        entry["target_leg_quantity"] = None
+        pop_exit_order_by_id(user_id, ticker, old_target_id)
+        return
     if leg_price <= 0:
         # A genuinely absent leg - e.g. no take-profit configured for this
         # setup - is a normal, expected condition, not a failure to raise
-        # and retry. Matches _reconcile_entry_fill_and_protection's own
+        # and retry. Matches _confirm_and_finalize_protection's own
         # asymmetric treatment: a missing STOP still blocks
-        # PROTECTION_CONFIRMED_ACTIVE (safety), a missing TARGET does not
-        # (only forfeits upside capture) - decided there via
-        # target_confirmed = target_price <= 0, not here.
+        # PROTECTION_CONFIRMED_ACTIVE (safety) - a target's protection
+        # requirement is unconditionally satisfied there now (see its own
+        # comment), since there's no broker leg to confirm either way.
         entry[f"{leg}_order_error"] = f"no {leg} price computed for this setup"
         return
     current_leg_quantity = entry.get(f"{leg}_leg_quantity")
@@ -4877,7 +4948,13 @@ def _confirm_and_finalize_protection(
     target_client_order_id = entry.get("target_client_order_id")
 
     stop_confirmed = False
-    target_confirmed = target_price <= 0
+    # target_confirmed is unconditionally satisfied unless this is a
+    # legacy entry that genuinely has a target_client_order_id from before
+    # 2026-08-31 (see _reconcile_protective_leg_quantity's own comment) -
+    # a target is never placed as a broker order anymore, so there is
+    # nothing to confirm here; _check_and_execute_target_exit is what
+    # actually watches and enforces it now.
+    target_confirmed = target_price <= 0 or not target_client_order_id
     for attempt in range(PROTECTION_CONFIRM_POLL_ATTEMPTS):
         if attempt > 0:
             time.sleep(PROTECTION_CONFIRM_POLL_INTERVAL_SECONDS)
@@ -5075,6 +5152,259 @@ def _reconcile_both_legs_filled_emergency(
     raise RuntimeError(f"{ticker}: {evidence_summary} - frozen pending manual review, no automatic corrective action taken")
 
 
+def _check_and_execute_target_exit(
+    user_id: str,
+    creds: Dict[str, str],
+    account_id: str,
+    ticker: str,
+    trading_day: str,
+    entry: Dict[str, object],
+) -> bool:
+    """The target leg's real exit mechanism, since 2026-08-31 - see
+    _reconcile_protective_leg_quantity's own comment for the full evidence
+    trail (a real SLB entry's take-profit leg was rejected by Webull as an
+    attempted position reversal, and a follow-up preview_order diagnostic
+    ruled out every broker-native combo/bracket order_type this account
+    supports). The target is never placed as a resting broker order
+    anymore - this function is what watches a fresh price against it and
+    ACTIVELY executes the exit when reached, called once per monitor pass
+    for a PROTECTION_CONFIRMED_ACTIVE entry, before the passive
+    broker-fill-based exit detection in _reconcile_position_exit.
+
+    Only ever acts on a NEW-style entry (no target_client_order_id - see
+    _confirm_and_finalize_protection) and only while the stop leg is
+    confirmed still resting and unfilled - if the stop has already filled
+    (fully or partially), this is a stop-exit, not a target-exit, and
+    _reconcile_position_exit's own broker-fill check handles it instead;
+    racing a target-exit attempt on top of that would risk exactly the
+    both-legs-executed ambiguity _reconcile_both_legs_filled_emergency
+    exists to catch.
+
+    Webull will not accept a second independent SELL order while the stop
+    is resting (the confirmed root cause), so the stop must be
+    cancelled-and-confirmed FIRST - which means the position is genuinely,
+    briefly UNPROTECTED between that confirmation and the new sell order
+    landing. That window is minimized by placing the sell in the same pass,
+    immediately after cancellation is confirmed; if the sell placement
+    itself then fails, this immediately attempts to restore a fresh stop
+    order at the original stop price as a fallback, rather than leaving the
+    position naked until the next monitor pass - and raises either way, so
+    the caller's own failed-attempt tracking (monitor_first_failure_at,
+    MONITOR_STUCK_FREEZE_SECONDS) applies on top of whatever local recovery
+    was possible.
+
+    Returns True only once the exit sell is CONFIRMED FILLED and the trade
+    is recorded CLOSED. Fails closed at every earlier step (no fresh price,
+    price not yet at target, stop not confirmed cancellable) by simply
+    returning False - never guesses, never acts on stale or unconfirmed
+    information given this actively places and cancels real orders, unlike
+    every other check in this file that only ever reads broker state."""
+    target_price = float(entry.get("target") or 0)
+    if target_price <= 0 or entry.get("target_client_order_id"):
+        return False  # no target configured, or a legacy broker-order-target entry - not this function's job
+
+    stop_client_order_id = entry.get("stop_client_order_id")
+    if not stop_client_order_id:
+        return False  # nothing resting to reconcile against - shouldn't happen for PROTECTION_CONFIRMED_ACTIVE, fail closed
+
+    stop_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, stop_client_order_id)
+    stop_fill = ol.summarize_fill(stop_detail)
+    if stop_fill["filled_quantity"] > 0 or not _protective_leg_is_active(stop_fill["status"]):
+        return False  # stop already filled or otherwise not actively resting - let the normal exit path handle it
+
+    fresh_price = alpaca_data.get_latest_trade_price(ticker)
+    if fresh_price is None or fresh_price < target_price:
+        return False  # can't confirm the target was reached - fail closed, the resting stop still covers safety
+
+    quantity = float(entry.get("stop_leg_quantity") or entry.get("filled_quantity") or 0)
+    if quantity <= 0:
+        return False
+
+    try:
+        webull_api.cancel_order(creds["app_key"], creds["app_secret"], account_id, stop_client_order_id)
+    except Exception as error:  # noqa: BLE001
+        raise RuntimeError(f"could not cancel the stop leg to execute the target exit for {ticker}: {error}") from error
+
+    try:
+        recheck_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, stop_client_order_id)
+        recheck_fill = ol.summarize_fill(recheck_detail)
+    except Exception as error:  # noqa: BLE001
+        raise RuntimeError(f"could not confirm the stop leg's cancellation before executing the target exit for {ticker}: {error}") from error
+    if recheck_fill["filled_quantity"] > 0:
+        # Filled during the cancel race - now a stop-exit (or partial), not
+        # a target-exit. Nothing to undo (a fill is final); let
+        # _reconcile_position_exit's own broker-fill check pick this up.
+        return False
+    if _protective_leg_is_active(recheck_fill["status"]):
+        raise RuntimeError(f"stop leg cancellation not yet confirmed for {ticker}'s target exit - will retry")
+
+    # Stop is confirmed CANCELLED and never filled - genuinely unprotected
+    # right now until the sell below is placed and confirmed filled.
+    next_attempt = int(entry.get("target_exit_attempt") or 0) + 1
+    entry["target_exit_attempt"] = next_attempt
+    sell_client_order_id = ol.deterministic_client_order_id(user_id, ticker, trading_day, "target_exit", attempt=next_attempt)
+    exit_limit_price = round(fresh_price * (1 - TARGET_EXIT_SLIPPAGE_TOLERANCE), 2)
+    try:
+        webull_api.place_stock_order(
+            app_key=creds["app_key"],
+            app_secret=creds["app_secret"],
+            account_id=account_id,
+            symbol=ticker,
+            side="SELL",
+            quantity=quantity,
+            limit_price=exit_limit_price,
+            trading_session=_current_webull_trading_session(),
+            client_order_id=sell_client_order_id,
+        )
+    except Exception as error:  # noqa: BLE001
+        restore_error = _restore_fallback_stop_after_failed_target_exit(user_id, creds, account_id, ticker, trading_day, entry, quantity)
+        if restore_error is not None:
+            try:
+                add_manual_alert(
+                    user_id,
+                    {
+                        "type": "target_exit_left_position_unprotected",
+                        "ticker": ticker,
+                        "priority": "critical",
+                        "message": (
+                            f"{ticker}: cancelled the stop leg to execute a target-price exit, but BOTH the exit "
+                            f"sell order ({error}) and the fallback stop replacement ({restore_error}) failed. "
+                            "This position is genuinely UNPROTECTED right now. Review and act manually immediately."
+                        ),
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            raise RuntimeError(
+                f"target exit sell failed AND fallback stop restoration failed for {ticker}: sell={error}, restore={restore_error}"
+            ) from restore_error
+        raise RuntimeError(
+            f"target exit sell order failed for {ticker} ({error}) - restored the stop leg as a fallback, will retry the target exit next pass"
+        )
+
+    filled_this_sell = 0.0
+    average_exit_price: Optional[float] = None
+    for attempt in range(ENTRY_FILL_POLL_ATTEMPTS):
+        if attempt > 0:
+            time.sleep(ENTRY_FILL_POLL_INTERVAL_SECONDS)
+        try:
+            sell_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, sell_client_order_id)
+            sell_fill = ol.summarize_fill(sell_detail)
+        except Exception:  # noqa: BLE001 - transient lookup failure, try again next attempt
+            continue
+        filled_this_sell = sell_fill["filled_quantity"]
+        average_exit_price = sell_fill.get("average_price")
+        if filled_this_sell >= quantity or _entry_fill_is_final(sell_fill["status"]):
+            break
+
+    if filled_this_sell <= 0:
+        # The sell is genuinely placed and resting/pending - not a
+        # placement failure, so no fallback-stop restoration here (that's
+        # only for "the sell attempt itself failed"). The position is
+        # still unprotected until this fills; the caller's failed-attempt
+        # tracking applies, and the next pass re-checks this same order.
+        raise RuntimeError(
+            f"target exit sell order for {ticker} has not filled yet after {ENTRY_FILL_POLL_ATTEMPTS} checks "
+            "(position is currently UNPROTECTED - no resting stop) - will keep checking"
+        )
+
+    trade_id = str(entry.get("entry_client_order_id") or "")
+    average_entry_price = entry.get("average_entry_fill_price")
+    pnl_complete = average_entry_price is not None and average_exit_price is not None
+    gross_pnl = round(filled_this_sell * (average_exit_price - average_entry_price), 2) if pnl_complete else None
+    closed_record = {
+        "ticker": ticker,
+        "side": "BUY",
+        "entry_client_order_id": entry.get("entry_client_order_id"),
+        "stop_client_order_id": stop_client_order_id,
+        "target_client_order_id": sell_client_order_id,
+        "requested_quantity": entry.get("quantity"),
+        "filled_quantity": quantity,
+        "average_entry_price": average_entry_price,
+        "exit_type": "target",
+        "exited_quantity": filled_this_sell,
+        "average_exit_price": average_exit_price,
+        "entry_timestamp": entry.get("logged_at"),
+        "exit_timestamp": _now_utc().isoformat(),
+        "gross_realized_pnl": gross_pnl,
+        "fees": None,
+        "net_realized_pnl": gross_pnl,
+        "pnl_status": "complete" if pnl_complete else "incomplete_missing_fill_price",
+        "strategy": entry.get("strategy"),
+        "close_reason": "target_exit_executed",
+        "broker_evidence": {"exited_leg_status": "app_monitored_target_exit"},
+        "reconciled_at": _now_utc().isoformat(),
+    }
+    record_closed_trade(user_id, trade_id, closed_record)
+    ol.transition(entry, ol.CLOSED, closed_trade_id=trade_id, close_reason="target_exit_executed")
+    try:
+        if pnl_complete:
+            add_manual_alert(
+                user_id,
+                {
+                    "type": "position_closed",
+                    "ticker": ticker,
+                    "message": f"{ticker}: position closed via target ({filled_this_sell:g} shares). Realized P&L: ${gross_pnl:.2f}.",
+                },
+            )
+        else:
+            add_manual_alert(
+                user_id,
+                {
+                    "type": "position_closed_pnl_incomplete",
+                    "ticker": ticker,
+                    "message": (
+                        f"{ticker}: position closed via target ({filled_this_sell:g} shares), but realized P&L "
+                        "could not be computed - the broker response didn't report an average fill price for the "
+                        "entry and/or the exit sell. Review this trade's actual fill prices manually."
+                    ),
+                },
+            )
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
+def _restore_fallback_stop_after_failed_target_exit(
+    user_id: str,
+    creds: Dict[str, str],
+    account_id: str,
+    ticker: str,
+    trading_day: str,
+    entry: Dict[str, object],
+    quantity: float,
+) -> Optional[BaseException]:
+    """Called only when a target-exit's own sell order placement failed
+    AFTER the stop was already cancelled-and-confirmed - the position is
+    genuinely naked at that point, and waiting for the next monitor pass to
+    notice would leave it that way for longer than necessary. Places a
+    fresh stop order (a NEW attempt/client_order_id, matching
+    _reconcile_protective_leg_quantity's own cancel-confirm-replace
+    discipline - never a same-id resubmission) at the entry's original stop
+    price. Returns None on success, the exception on failure - never
+    raises itself, so the caller can decide how to report a total loss of
+    protection (both the sell AND this restoration failing) distinctly
+    from a partial recovery (sell failed, but the stop is back)."""
+    try:
+        fallback_attempt = int(entry.get("stop_leg_attempt") or 0) + 1
+        fallback_stop_id = ol.deterministic_client_order_id(user_id, ticker, trading_day, "stop", attempt=fallback_attempt)
+        webull_api.place_stop_loss_order(
+            app_key=creds["app_key"],
+            app_secret=creds["app_secret"],
+            account_id=account_id,
+            symbol=ticker,
+            quantity=quantity,
+            stop_price=float(entry.get("stop") or 0),
+            client_order_id=fallback_stop_id,
+        )
+    except Exception as error:  # noqa: BLE001
+        return error
+    entry["stop_client_order_id"] = fallback_stop_id
+    entry["stop_leg_attempt"] = fallback_attempt
+    entry["stop_leg_quantity"] = quantity
+    return None
+
+
 def _reconcile_position_exit(
     user_id: str,
     creds: Dict[str, str],
@@ -5117,7 +5447,19 @@ def _reconcile_position_exit(
     False if the position is still fully open and protected. Raises on
     any unresolved step (broker lookup failure, sibling cancellation not
     yet confirmed, ambiguous evidence) rather than silently continuing -
-    the caller records that as a failed monitor attempt and retries."""
+    the caller records that as a failed monitor attempt and retries.
+
+    Checks the target FIRST, via _check_and_execute_target_exit (see its
+    own docstring - the target is app-monitored now, never a resting
+    broker order, so it can never show up in the broker-fill check below).
+    Only falls through to that passive stop/target-leg-fill check if no
+    target exit was executed this pass - a stop that's already filled is
+    correctly picked up there either way, and _check_and_execute_target_exit
+    itself declines to act at all once it sees the stop is no longer
+    actively resting, so the two paths cannot race each other."""
+    if _check_and_execute_target_exit(user_id, creds, account_id, ticker, trading_day, entry):
+        return True
+
     stop_client_order_id = entry.get("stop_client_order_id")
     target_client_order_id = entry.get("target_client_order_id")
 

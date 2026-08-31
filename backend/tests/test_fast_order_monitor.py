@@ -83,7 +83,7 @@ def test_resume_from_entry_filled_skips_fill_poll_and_goes_straight_to_protectio
     entry = _transitional_entry(ol.ENTRY_FILLED)
     with patch.object(pluto_app.webull_api, "get_order_detail", return_value=_order_detail("ACTIVE", 10, 10)) as mock_detail, \
          patch.object(pluto_app.webull_api, "place_stop_loss_order", return_value={"client_order_id": "stop-id"}) as mock_stop, \
-         patch.object(pluto_app.webull_api, "place_take_profit_order", return_value={"client_order_id": "target-id"}) as mock_target, \
+         patch.object(pluto_app.webull_api, "place_take_profit_order") as mock_target, \
          patch.object(pluto_app, "time"), \
          patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"):
         result = pluto_app._poll_fill_and_protect(
@@ -93,9 +93,11 @@ def test_resume_from_entry_filled_skips_fill_poll_and_goes_straight_to_protectio
         )
     assert result["lifecycle_state"] in (ol.PROTECTION_CONFIRMED_ACTIVE, ol.PROTECTION_FAILED)
     mock_stop.assert_called_once()
-    mock_target.assert_called_once()
+    # The target is never placed as a broker order (app-monitored since
+    # 2026-08-31 - see _reconcile_protective_leg_quantity's own comment).
+    mock_target.assert_not_called()
     assert mock_stop.call_args.kwargs["quantity"] == 10.0
-    # The ENTRY's own fill was never re-polled - only the stop/target legs -
+    # The ENTRY's own fill was never re-polled - only the stop leg -
     # get_order_detail was called for confirmation, never re-checking the
     # entry_client_order_id itself for a fill that's already known.
     entry_lookup_calls = [c for c in mock_detail.call_args_list if c.args[-1] == "pt-entry-1"]
@@ -123,7 +125,7 @@ def test_resume_from_protection_failed_retries_placement_and_can_confirm():
     entry = _transitional_entry(ol.PROTECTION_FAILED)
     with patch.object(pluto_app.webull_api, "get_order_detail", side_effect=_discriminating_order_detail()), \
          patch.object(pluto_app.webull_api, "place_stop_loss_order", return_value={"client_order_id": "stop-id"}) as mock_stop, \
-         patch.object(pluto_app.webull_api, "place_take_profit_order", return_value={"client_order_id": "target-id"}) as mock_target, \
+         patch.object(pluto_app.webull_api, "place_take_profit_order") as mock_target, \
          patch.object(pluto_app, "time"), \
          patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"):
         result = pluto_app._poll_fill_and_protect(
@@ -132,17 +134,16 @@ def test_resume_from_protection_failed_retries_placement_and_can_confirm():
             trading_day="2026-08-11", entry=entry,
         )
     mock_stop.assert_called_once()
-    mock_target.assert_called_once()
+    mock_target.assert_not_called()  # app-monitored, never a broker order - see _reconcile_protective_leg_quantity
     assert result["lifecycle_state"] == ol.PROTECTION_CONFIRMED_ACTIVE
 
 
 def test_resume_uses_the_same_deterministic_client_order_ids_as_a_fresh_attempt():
     entry = _transitional_entry(ol.PROTECTION_FAILED)
     expected_stop_id = ol.deterministic_client_order_id("u1", "AAPL", "2026-08-11", "stop", attempt=1)
-    expected_target_id = ol.deterministic_client_order_id("u1", "AAPL", "2026-08-11", "target", attempt=1)
     with patch.object(pluto_app.webull_api, "get_order_detail", return_value=_order_detail("ACTIVE", 10, 10)), \
          patch.object(pluto_app.webull_api, "place_stop_loss_order", return_value={"client_order_id": "stop-id"}) as mock_stop, \
-         patch.object(pluto_app.webull_api, "place_take_profit_order", return_value={"client_order_id": "target-id"}) as mock_target, \
+         patch.object(pluto_app.webull_api, "place_take_profit_order") as mock_target, \
          patch.object(pluto_app, "time"), \
          patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"):
         pluto_app._poll_fill_and_protect(
@@ -151,7 +152,10 @@ def test_resume_uses_the_same_deterministic_client_order_ids_as_a_fresh_attempt(
             trading_day="2026-08-11", entry=entry,
         )
     assert mock_stop.call_args.kwargs["client_order_id"] == expected_stop_id
-    assert mock_target.call_args.kwargs["client_order_id"] == expected_target_id
+    # The target is never placed as a broker order (app-monitored since
+    # 2026-08-31 - see _reconcile_protective_leg_quantity's own comment) -
+    # no deterministic id to check for it here.
+    mock_target.assert_not_called()
 
 
 def test_resume_does_not_recompute_realized_risk_or_refire_the_alert():

@@ -84,12 +84,17 @@ def test_protective_orders_sized_to_actual_filled_quantity_not_requested(user_id
     # what's actually held, not what was originally requested - sizing a
     # stop for 10 shares when only 4 filled would either fail at the broker
     # (insufficient position) or, worse, misrepresent the real exposure.
+    # The target is never placed as a broker order (see
+    # _reconcile_protective_leg_quantity's own comment - app-monitored via
+    # _check_and_execute_target_exit since 2026-08-31) - place_take_profit_order
+    # must never be called at all, regardless of sizing.
     with patch.object(pluto_app.webull_api, "place_stock_order", return_value={"client_order_id": "entry-id"}), \
          patch.object(pluto_app.webull_api, "get_order_detail", return_value=_order_detail("PARTIAL FILLED", 10, 4)), \
          patch.object(pluto_app.webull_api, "place_stop_loss_order", return_value={"client_order_id": "stop-id"}) as mock_stop, \
-         patch.object(pluto_app.webull_api, "place_take_profit_order", return_value={"client_order_id": "target-id"}) as mock_target, \
+         patch.object(pluto_app.webull_api, "place_take_profit_order") as mock_target, \
          patch.object(pluto_app, "time"), \
          patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"):
+        entry = {}
         pluto_app._submit_and_protect_entry(
             user_id="user-sizing",
             creds=CREDS,
@@ -100,10 +105,10 @@ def test_protective_orders_sized_to_actual_filled_quantity_not_requested(user_id
             stop_price=95.0,
             target_price=110.0,
             trading_day="2026-08-11",
-            entry={},
+            entry=entry,
         )
     assert mock_stop.call_args.kwargs["quantity"] == 4.0
-    assert mock_target.call_args.kwargs["quantity"] == 4.0
+    mock_target.assert_not_called()
 
 
 def test_realized_risk_flagged_when_it_exceeds_planned(user_id):
@@ -434,7 +439,7 @@ def test_reconciliation_ambiguous_submission_that_partially_filled_then_cancelle
     entry = _unknown_entry()
     with patch.object(pluto_app.webull_api, "get_order_detail", return_value=_order_detail("CANCELLED", 10, 4)), \
          patch.object(pluto_app.webull_api, "place_stop_loss_order", return_value={"client_order_id": "stop-id"}) as mock_stop, \
-         patch.object(pluto_app.webull_api, "place_take_profit_order", return_value={"client_order_id": "target-id"}) as mock_target, \
+         patch.object(pluto_app.webull_api, "place_take_profit_order") as mock_target, \
          patch.object(pluto_app, "time"), \
          patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"):
         result = pluto_app._reconcile_unknown_submission(user_id, CREDS, ACCOUNT_ID, entry)
@@ -442,9 +447,11 @@ def test_reconciliation_ambiguous_submission_that_partially_filled_then_cancelle
     assert result["unfilled_remainder_status"] == "CANCELLED"
     assert result["lifecycle_state"] in (ol.PROTECTION_CONFIRMED_ACTIVE, ol.PROTECTION_FAILED)
     # Protection is sized to what actually filled (4), not the original
-    # requested quantity (10) and not zero.
+    # requested quantity (10) and not zero. The target is never placed as a
+    # broker order (app-monitored since 2026-08-31 - see
+    # _reconcile_protective_leg_quantity's own comment).
     assert mock_stop.call_args.kwargs["quantity"] == 4.0
-    assert mock_target.call_args.kwargs["quantity"] == 4.0
+    mock_target.assert_not_called()
 
 
 def test_reconciliation_finds_a_cancelled_order_does_not_resume_it_as_active(user_id):
@@ -477,7 +484,7 @@ def test_normal_entry_partially_filled_then_cancelled_still_gets_protected(user_
     with patch.object(pluto_app.webull_api, "place_stock_order", return_value={"client_order_id": "entry-id"}), \
          patch.object(pluto_app.webull_api, "get_order_detail", return_value=_order_detail("CANCELLED", 10, 3)), \
          patch.object(pluto_app.webull_api, "place_stop_loss_order", return_value={"client_order_id": "stop-id"}) as mock_stop, \
-         patch.object(pluto_app.webull_api, "place_take_profit_order", return_value={"client_order_id": "target-id"}) as mock_target, \
+         patch.object(pluto_app.webull_api, "place_take_profit_order") as mock_target, \
          patch.object(pluto_app, "time"), \
          patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"):
         result = pluto_app._submit_and_protect_entry(
@@ -494,9 +501,9 @@ def test_normal_entry_partially_filled_then_cancelled_still_gets_protected(user_
         )
     assert result["filled_quantity"] == 3.0
     assert result["unfilled_remainder_status"] == "CANCELLED"
+    mock_target.assert_not_called()  # app-monitored, never a broker order - see _reconcile_protective_leg_quantity
     assert result["lifecycle_state"] != ol.ENTRY_FAILED  # the 3 filled shares must not be discarded as a no-op
     assert mock_stop.call_args.kwargs["quantity"] == 3.0
-    assert mock_target.call_args.kwargs["quantity"] == 3.0
 
 
 def test_normal_entry_truly_zero_fill_cancelled_still_resolves_entry_failed(user_id):

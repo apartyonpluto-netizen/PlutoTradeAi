@@ -223,7 +223,15 @@ def test_missing_entry_fill_price_also_leaves_pnl_incomplete(user_id):
 
 def test_partial_stop_fill_preserves_and_reprotects_the_remainder(user_id):
     """4 of 10 shares exit through the stop - the remaining 6 must stay
-    tracked and protected (resized target), NOT closed out entirely."""
+    tracked and protected, NOT closed out entirely. The fixture's legacy
+    target leg (TARGET_ID - see _protected_entry) can no longer be
+    correctly resized (target legs are app-monitored since 2026-08-31, see
+    _reconcile_protective_leg_quantity's own comment) - the first resize
+    attempt migrates it away (cancel-confirm, drop tracking) instead of
+    replacing it with a smaller one. The remaining 6 shares stay protected
+    by the SAME stop order's own still-resting remainder - untouched here -
+    with the target price now watched by _check_and_execute_target_exit
+    going forward instead of a second broker order."""
     entry = _protected_entry(user_id)
     broker_legs = {
         STOP_ID: {"status": "PARTIAL FILLED", "total_quantity": 10, "filled_quantity": 4},
@@ -239,29 +247,27 @@ def test_partial_stop_fill_preserves_and_reprotects_the_remainder(user_id):
     def _cancel(app_key, app_secret, account_id, client_order_id):
         broker_legs[client_order_id]["status"] = "CANCELLED"
 
-    def _place_target(*, app_key, app_secret, account_id, symbol, quantity, target_price, trading_session, client_order_id):
-        broker_legs[client_order_id] = {"status": "SUBMITTED", "total_quantity": quantity, "filled_quantity": 0}
-        return {"client_order_id": client_order_id}
-
     with patch.object(pluto_app.webull_api, "get_order_detail", side_effect=_get_detail), \
          patch.object(pluto_app.webull_api, "cancel_order", side_effect=_cancel), \
-         patch.object(pluto_app.webull_api, "place_take_profit_order", side_effect=_place_target), \
+         patch.object(pluto_app.webull_api, "place_take_profit_order") as mock_place_target, \
          patch.object(pluto_app, "time"), \
          patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"):
         exited = pluto_app._reconcile_position_exit(user_id, CREDS, ACCOUNT_ID, TICKER, TRADING_DAY, entry)
+    mock_place_target.assert_not_called()
 
     assert exited is True
     assert entry["lifecycle_state"] == ol.PROTECTION_CONFIRMED_ACTIVE  # NOT closed - still an open remainder
     assert entry["filled_quantity"] == 6.0
-    assert entry["target_leg_quantity"] == 6.0
     assert list_closed_trades(user_id) == []  # no full exit yet - nothing to record as closed
 
-    # Old target leg is gone from tracking; a new, resized one replaces it.
+    # The legacy target leg is gone from tracking entirely - cancelled and
+    # migrated away, not replaced with a resized one (no new
+    # place_take_profit_order call at all).
+    assert entry["target_client_order_id"] is None
+    assert entry["target_leg_quantity"] is None
+    assert broker_legs[TARGET_ID]["status"] == "CANCELLED"
     tracked_ids = {o["id"] for o in get_exit_orders(user_id, TICKER)}
     assert TARGET_ID not in tracked_ids
-    new_target_id = entry["target_client_order_id"]
-    assert new_target_id != TARGET_ID
-    assert new_target_id in tracked_ids
     assert STOP_ID in tracked_ids  # the exited leg's own order is untouched - broker manages its remainder
 
 

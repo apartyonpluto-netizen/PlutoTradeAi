@@ -202,13 +202,14 @@ def _place_stage3_order(user_id, ticker="AAPL", stop_price=95.0, target_price=11
          patch.object(pluto_app.webull_api, "place_stock_order", side_effect=_fake_place_stock_order), \
          patch.object(pluto_app.webull_api, "get_order_detail", side_effect=_fake_get_order_detail), \
          patch.object(pluto_app.webull_api, "place_stop_loss_order", side_effect=_fake_place_stop_loss_order), \
-         patch.object(pluto_app.webull_api, "place_take_profit_order", side_effect=_fake_place_take_profit_order), \
+         patch.object(pluto_app.webull_api, "place_take_profit_order", side_effect=_fake_place_take_profit_order) as mock_target, \
          patch.object(pluto_app, "time"):
         client = _logged_in_client(user_id)
         response = client.post(
             "/api/webull/place-stage3-order",
             json={"ticker": ticker, "stop_price": stop_price, "target_price": target_price},
         )
+    mock_target.assert_not_called()  # app-monitored, never a broker order - see _reconcile_protective_leg_quantity
     return response
 
 
@@ -221,7 +222,9 @@ def test_stage3_order_fills_and_gets_real_protection_end_to_end(user_id):
     assert body["quantity"] == 1
     assert body["lifecycle_state"] == ol.PROTECTION_CONFIRMED_ACTIVE
     assert body["stop_client_order_id"]
-    assert body["target_client_order_id"]
+    # The target is never placed as a broker order (app-monitored since
+    # 2026-08-31 - see _reconcile_protective_leg_quantity's own comment).
+    assert not body.get("target_client_order_id")
     assert body["display_status"] == "Filled & protected"
 
     matches = [order for order in list_overnight_orders(registered_user_id) if order.get("ticker") == "AAPL"]

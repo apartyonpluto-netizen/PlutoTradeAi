@@ -380,7 +380,7 @@ def test_resolve_link_immediately_protects_a_filled_order_not_merely_clears_the_
          mocks["get_account_positions"], mocks["get_order_history"], \
          patch.object(pluto_app.webull_api, "get_order_detail", return_value=_order_detail("FILLED", 10, 10)), \
          patch.object(pluto_app.webull_api, "place_stop_loss_order", return_value={"client_order_id": "stop-id"}) as mock_stop, \
-         patch.object(pluto_app.webull_api, "place_take_profit_order", return_value={"client_order_id": "target-id"}) as mock_target, \
+         patch.object(pluto_app.webull_api, "place_take_profit_order") as mock_target, \
          patch.object(pluto_app, "time"), \
          patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"):
         result = pluto_app._resolve_ambiguous_submission(
@@ -398,9 +398,12 @@ def test_resolve_link_immediately_protects_a_filled_order_not_merely_clears_the_
     stored = list_overnight_orders(user_id)[0]
     assert stored["lifecycle_state"] in (ol.PROTECTION_CONFIRMED_ACTIVE, ol.PROTECTION_FAILED)
     # Protection was actually attempted - proves this isn't just a state
-    # label with nothing behind it.
+    # label with nothing behind it. The target is never placed as a broker
+    # order (app-monitored since 2026-08-31 - see
+    # _reconcile_protective_leg_quantity's own comment), so only the stop
+    # leg is expected here.
     mock_stop.assert_called_once()
-    mock_target.assert_called_once()
+    mock_target.assert_not_called()
     assert mock_stop.call_args.kwargs["quantity"] == 10.0
 
 
@@ -967,7 +970,7 @@ def test_successful_link_resolution_writes_started_then_completed(user_id):
          mocks["get_account_positions"], mocks["get_order_history"], mocks["get_open_orders"], \
          patch.object(pluto_app.webull_api, "get_order_detail", return_value=_order_detail("FILLED", 10, 10)), \
          patch.object(pluto_app.webull_api, "place_stop_loss_order", return_value={"client_order_id": "stop-id"}), \
-         patch.object(pluto_app.webull_api, "place_take_profit_order", return_value={"client_order_id": "target-id"}), \
+         patch.object(pluto_app.webull_api, "place_take_profit_order") as mock_target, \
          patch.object(pluto_app, "time"), \
          patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"):
         pluto_app._resolve_ambiguous_submission(
@@ -978,7 +981,11 @@ def test_successful_link_resolution_writes_started_then_completed(user_id):
     assert [r["phase"] for r in records] == [pluto_app.RESOLUTION_PHASE_STARTED, pluto_app.RESOLUTION_PHASE_COMPLETED]
     assert records[1]["resolution_id"] == records[0]["resolution_id"]
     assert records[1]["protective_order_ids"]["stop"]
-    assert records[1]["protective_order_ids"]["target"]
+    # The target is never placed as a broker order (app-monitored since
+    # 2026-08-31 - see _reconcile_protective_leg_quantity's own comment),
+    # so its audited protective_order_ids entry is genuinely None.
+    mock_target.assert_not_called()
+    assert records[1]["protective_order_ids"]["target"] is None
     assert pluto_app.find_incomplete_resolutions(user_id) == []
     assert pluto_app._has_unresolved_ambiguous_submission_locally(user_id) is False
 
@@ -1145,14 +1152,16 @@ def test_restart_recovery_resumes_a_manual_link_in_progress_entry_and_completes_
 
     with patch.object(pluto_app.webull_api, "get_order_detail", return_value=_order_detail("FILLED", 10, 10)), \
          patch.object(pluto_app.webull_api, "place_stop_loss_order", return_value={"client_order_id": "stop-id"}) as mock_stop, \
-         patch.object(pluto_app.webull_api, "place_take_profit_order", return_value={"client_order_id": "target-id"}) as mock_target, \
+         patch.object(pluto_app.webull_api, "place_take_profit_order") as mock_target, \
          patch.object(pluto_app, "time"), \
          patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"):
         result = pluto_app._recover_incomplete_manual_resolutions(user_id, CREDS, ACCOUNT_ID)
 
     assert result is False
     mock_stop.assert_called_once()
-    mock_target.assert_called_once()
+    # The target is never placed as a broker order (app-monitored since
+    # 2026-08-31 - see _reconcile_protective_leg_quantity's own comment).
+    mock_target.assert_not_called()
     stored = list_overnight_orders(user_id)[0]
     assert stored["lifecycle_state"] in (ol.PROTECTION_CONFIRMED_ACTIVE, ol.PROTECTION_FAILED)
     records = list_ambiguous_resolution_audit(user_id)

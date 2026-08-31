@@ -169,7 +169,9 @@ def test_ai_discovered_candidate_actually_gets_filled_and_protected(user_id):
     # the way to a genuinely protected position.
     assert entry["lifecycle_state"] == ol.PROTECTION_CONFIRMED_ACTIVE
     assert entry["stop_client_order_id"]
-    assert entry["target_client_order_id"]
+    # The target is never placed as a broker order (app-monitored since
+    # 2026-08-31 - see _reconcile_protective_leg_quantity's own comment).
+    assert not entry.get("target_client_order_id")
 
     # And a user opening Trade Journal right now would see it correctly -
     # not frozen at "placed" (the bug fixed earlier this session).
@@ -181,29 +183,52 @@ def test_ai_discovered_candidate_actually_gets_filled_and_protected(user_id):
 
 
 def test_that_position_then_closes_with_a_profit_when_the_target_fills_and_the_page_shows_it(user_id):
+    # The target is never a broker order (app-monitored since 2026-08-31 -
+    # see _reconcile_protective_leg_quantity's own comment) - "the target
+    # fills" now means _check_and_execute_target_exit sees a fresh price at
+    # or past entry["target"], cancels the resting stop, and places a real
+    # SELL to close the position itself, rather than a broker-side
+    # take-profit order filling on its own.
     registered_user_id = _registered_user(user_id[:8] + "tp")
     candidate = _ai_found_candidate(ticker="NVDA", confidence=82)
     _run_full_autonomous_scan(registered_user_id, [candidate])
     entry = _the_one_recorded_order(registered_user_id, "NVDA")
     quantity = entry["quantity"]
     trading_day = entry["trading_day"]
-    target_client_order_id = entry["target_client_order_id"]
     stop_client_order_id = entry["stop_client_order_id"]
+    fresh_price = entry["target"] + 0.5  # genuinely past target (110.0), not just at it
+    sell_client_order_id = ol.deterministic_client_order_id(registered_user_id, "NVDA", trading_day, "target_exit", attempt=1)
     cancelled = set()
+    sell_orders_placed = []
 
     def _get_detail(app_key, app_secret, account_id, client_order_id):
-        if client_order_id == target_client_order_id:
-            return _exit_order_detail("FILLED", quantity, quantity, average_price=110.0)
-        if client_order_id == stop_client_order_id and client_order_id in cancelled:
-            return _exit_order_detail("CANCELLED", quantity, 0)
-        return _exit_order_detail("SUBMITTED", quantity, 0)
+        if client_order_id == stop_client_order_id:
+            if client_order_id in cancelled:
+                return _exit_order_detail("CANCELLED", quantity, 0)
+            return _exit_order_detail("SUBMITTED", quantity, 0)
+        if client_order_id == sell_client_order_id:
+            return _exit_order_detail("FILLED", quantity, quantity, average_price=fresh_price)
+        return _exit_order_detail("UNKNOWN", 0, 0)
 
     def _cancel(app_key, app_secret, account_id, client_order_id):
         cancelled.add(client_order_id)
 
+    def _place_sell(**kwargs):
+        assert kwargs["side"] == "SELL"
+        assert kwargs["quantity"] == quantity
+        sell_orders_placed.append(kwargs["client_order_id"])
+        return {"client_order_id": kwargs["client_order_id"]}
+
     with patch.object(pluto_app.webull_api, "get_order_detail", side_effect=_get_detail), \
-         patch.object(pluto_app.webull_api, "cancel_order", side_effect=_cancel):
+         patch.object(pluto_app.webull_api, "cancel_order", side_effect=_cancel), \
+         patch.object(pluto_app.webull_api, "place_stock_order", side_effect=_place_sell), \
+         patch.object(pluto_app.alpaca_data, "get_latest_trade_price", return_value=fresh_price), \
+         patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"), \
+         patch.object(pluto_app, "time"):
         exited = pluto_app._reconcile_position_exit(registered_user_id, CREDS, ACCOUNT_ID, "NVDA", trading_day, entry)
+
+    assert sell_orders_placed == [sell_client_order_id]
+    assert stop_client_order_id in cancelled  # the stop was cancelled to clear the way for the real sell
 
     assert exited is True
     assert entry["lifecycle_state"] == ol.CLOSED
@@ -234,14 +259,14 @@ def test_that_position_then_closes_with_a_loss_when_the_stop_fills_and_the_page_
     quantity = entry["quantity"]
     trading_day = entry["trading_day"]
     stop_client_order_id = entry["stop_client_order_id"]
-    target_client_order_id = entry["target_client_order_id"]
+    # The target is never a broker order (app-monitored since 2026-08-31) -
+    # nothing to cancel/track for it here; the stop fill alone drives this
+    # test's exit path.
     cancelled = set()
 
     def _get_detail(app_key, app_secret, account_id, client_order_id):
         if client_order_id == stop_client_order_id:
             return _exit_order_detail("FILLED", quantity, quantity, average_price=50.0)
-        if client_order_id == target_client_order_id and client_order_id in cancelled:
-            return _exit_order_detail("CANCELLED", quantity, 0)
         return _exit_order_detail("SUBMITTED", quantity, 0)
 
     def _cancel(app_key, app_secret, account_id, client_order_id):

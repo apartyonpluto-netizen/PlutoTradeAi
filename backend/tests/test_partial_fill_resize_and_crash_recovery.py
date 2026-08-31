@@ -86,7 +86,13 @@ def _patched(broker):
          patch.object(pluto_app.webull_api, "place_stop_loss_order", side_effect=broker.place_stop_loss_order), \
          patch.object(pluto_app.webull_api, "place_take_profit_order", side_effect=broker.place_take_profit_order), \
          patch.object(pluto_app, "time"), \
-         patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"):
+         patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"), \
+         patch.object(pluto_app.alpaca_data, "get_latest_trade_price", return_value=None):
+        # get_latest_trade_price mocked to None (the real "can't confirm a
+        # fresh price" fail-closed path) so _check_and_execute_target_exit
+        # never has anything to act on here - this file is about protective
+        # LEG resizing/crash recovery, not the target-price-exit mechanism,
+        # which has its own dedicated tests.
         yield
 
 
@@ -94,6 +100,10 @@ def _patched(broker):
 
 
 def test_partial_fill_then_full_fill_resizes_protection_without_duplicate_exit_orders(user_id):
+    # The target leg is never placed as a broker order (app-monitored since
+    # 2026-08-31 - see _reconcile_protective_leg_quantity's own comment),
+    # so this test - originally about BOTH legs resizing in lockstep - now
+    # proves the same property for the one leg that still does: the stop.
     entry = _fresh_entry()
     record_overnight_order(user_id, entry)
 
@@ -106,18 +116,17 @@ def test_partial_fill_then_full_fill_resizes_protection_without_duplicate_exit_o
     assert stored["lifecycle_state"] == ol.PROTECTION_CONFIRMED_ACTIVE
     assert stored["filled_quantity"] == 4.0
     assert stored["stop_leg_quantity"] == 4.0
-    assert stored["target_leg_quantity"] == 4.0
+    assert "target_leg_quantity" not in stored
     stop_id_v1 = stored["stop_client_order_id"]
-    target_id_v1 = stored["target_client_order_id"]
     assert stop_id_v1 == ol.deterministic_client_order_id(user_id, TICKER, TRADING_DAY, "stop", attempt=1)
-    assert target_id_v1 == ol.deterministic_client_order_id(user_id, TICKER, TRADING_DAY, "target", attempt=1)
+    assert broker.place_target_calls == []
 
     exit_orders_after_tick_1 = get_exit_orders(user_id, TICKER)
-    assert {o["id"] for o in exit_orders_after_tick_1} == {stop_id_v1, target_id_v1}
-    assert len(exit_orders_after_tick_1) == 2  # exactly one live stop, one live target - no extras yet
+    assert {o["id"] for o in exit_orders_after_tick_1} == {stop_id_v1}
+    assert len(exit_orders_after_tick_1) == 1  # exactly one live stop - no target leg is ever placed
 
     # Tick 2: the remaining 6 shares fill - the entry is now fully FILLED.
-    # Reuse the SAME broker (it remembers the v1 legs it already placed and
+    # Reuse the SAME broker (it remembers the v1 leg it already placed and
     # cancelled), just advance its entry-order state.
     broker.entry_status = "FILLED"
     broker.entry_filled = 10
@@ -129,31 +138,25 @@ def test_partial_fill_then_full_fill_resizes_protection_without_duplicate_exit_o
     assert stored["filled_quantity"] == 10.0
     assert stored["entry_order_terminal"] is True
     assert stored["stop_leg_quantity"] == 10.0
-    assert stored["target_leg_quantity"] == 10.0
+    assert "target_leg_quantity" not in stored
     stop_id_v2 = stored["stop_client_order_id"]
-    target_id_v2 = stored["target_client_order_id"]
     assert stop_id_v2 == ol.deterministic_client_order_id(user_id, TICKER, TRADING_DAY, "stop", attempt=2)
-    assert target_id_v2 == ol.deterministic_client_order_id(user_id, TICKER, TRADING_DAY, "target", attempt=2)
     assert stop_id_v2 != stop_id_v1
-    assert target_id_v2 != target_id_v1
+    assert broker.place_target_calls == []
 
-    # The v1 legs were genuinely cancelled at the broker (not just dropped
-    # from tracking) before the v2 legs were placed.
+    # The v1 leg was genuinely cancelled at the broker (not just dropped
+    # from tracking) before the v2 leg was placed.
     assert stop_id_v1 in broker.cancel_calls
-    assert target_id_v1 in broker.cancel_calls
     assert broker.legs[stop_id_v1]["status"] == "CANCELLED"
-    assert broker.legs[target_id_v1]["status"] == "CANCELLED"
     assert broker.legs[stop_id_v2]["total_quantity"] == 10.0
-    assert broker.legs[target_id_v2]["total_quantity"] == 10.0
 
-    # The crux of the required proof: exactly ONE live stop and ONE live
-    # target are tracked after the resize - the v1 legs are gone from
-    # tracking, not just superseded/left dangling alongside the v2 ones.
+    # The crux of the required proof: exactly ONE live stop is tracked
+    # after the resize - the v1 leg is gone from tracking, not just
+    # superseded/left dangling alongside the v2 one.
     exit_orders_after_tick_2 = get_exit_orders(user_id, TICKER)
-    assert len(exit_orders_after_tick_2) == 2
-    assert {o["id"] for o in exit_orders_after_tick_2} == {stop_id_v2, target_id_v2}
+    assert len(exit_orders_after_tick_2) == 1
+    assert {o["id"] for o in exit_orders_after_tick_2} == {stop_id_v2}
     assert stop_id_v1 not in {o["id"] for o in exit_orders_after_tick_2}
-    assert target_id_v1 not in {o["id"] for o in exit_orders_after_tick_2}
 
 
 # --- Crash boundaries during protective-leg resizing -------------------------
