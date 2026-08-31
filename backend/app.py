@@ -918,6 +918,62 @@ def api_admin_list_ambiguous_submissions():
     return _api_success({"pending": pending}, ok=True, pending=pending)
 
 
+@app.route("/api/admin/stuck-monitor-entries", methods=["GET"])
+def api_admin_list_stuck_monitor_entries():
+    """Every entry, across every user, that the fast/continuous monitor has
+    made no forward progress on since monitor_first_failure_at was first
+    stamped (see _record_monitor_attempt) - includes entries that haven't
+    yet crossed MONITOR_STUCK_FREEZE_SECONDS as useful early-warning
+    context, each flagged via is_causing_freeze for whether it's actually
+    the reason _has_stuck_transitional_orders_locally is currently blocking
+    new autonomous entries for that account.
+
+    Found live 2026-08-31: _alert_if_entry_newly_stuck's own alert is
+    DELIBERATELY a fixed, no-detail message (ticker + entry id only, no
+    error text) so add_manual_alert's content-hash dedup keeps it one-shot
+    per entry rather than re-firing (and spamming) every ~10s tick with a
+    possibly-different error string - see that function's own docstring.
+    That left no admin-visible way to see monitor_last_error, the actual
+    reason recovery couldn't be confirmed - the exact same opacity gap
+    _resolve_ambiguous_submission's evidence errors already had until they
+    were fixed to surface the real per-check error text (see that
+    endpoint's own history). This read-only endpoint closes the same gap
+    for this different freeze - it does not resolve or unfreeze anything;
+    recovery is still only genuine forward progress on the entry itself, or
+    direct manual intervention, per _alert_if_entry_newly_stuck's contract."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    now = _now_utc()
+    stuck: List[Dict[str, object]] = []
+    for user in list_all_users():
+        target_user_id = user.get("id", "")
+        if not target_user_id:
+            continue
+        for order in list_overnight_orders(target_user_id):
+            stuck_since_raw = order.get("monitor_first_failure_at")
+            if not stuck_since_raw:
+                continue
+            stuck_since = _parse_trusted_past_timestamp(stuck_since_raw, now=now, default=now)
+            stuck_seconds = (now - stuck_since).total_seconds()
+            stuck.append(
+                {
+                    "user_id": target_user_id,
+                    "username": user.get("username", ""),
+                    "ticker": order.get("ticker", ""),
+                    "entry_client_order_id": order.get("entry_client_order_id", ""),
+                    "lifecycle_state": order.get("lifecycle_state", ""),
+                    "monitor_first_failure_at": stuck_since_raw,
+                    "stuck_seconds": stuck_seconds,
+                    "is_causing_freeze": stuck_seconds >= MONITOR_STUCK_FREEZE_SECONDS,
+                    "monitor_attempt_count": order.get("monitor_attempt_count", 0),
+                    "monitor_last_error": order.get("monitor_last_error"),
+                    "monitor_last_attempt_at": order.get("monitor_last_attempt_at"),
+                }
+            )
+    return _api_success({"stuck": stuck}, ok=True, stuck=stuck)
+
+
 @app.route("/api/admin/ambiguous-submissions/resolve", methods=["POST"])
 def api_admin_resolve_ambiguous_submission():
     """The only route that can move an entry out of UNKNOWN_SUBMISSION_STATE
