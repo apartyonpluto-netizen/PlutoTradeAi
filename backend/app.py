@@ -7149,6 +7149,230 @@ def _alert_if_entry_newly_stuck(user_id: str, order: Dict[str, object]) -> None:
         pass
 
 
+def _check_position_absent_while_stuck(
+    user_id: str,
+    creds: Dict[str, str],
+    account_id: str,
+    ticker: str,
+    entry: Dict[str, object],
+) -> bool:
+    """Only meaningful for an entry stuck in PROTECTION_FAILED. Found live
+    2026-08-31: a real SLB entry's stop leg was confirmed CANCELLED (see
+    the stale-stop replacement fix, _confirm_and_finalize_protection) -
+    but placing a fresh one then hit Webull's OPENAPI_GENERATE_NEW_SHORT_POSITION,
+    revealing the broker's real position for this ticker was already ZERO,
+    closed by some means this app's own tracked orders don't explain.
+    Without this check, the resize path would keep re-attempting (and
+    Webull would keep correctly rejecting) a stop for shares that no
+    longer exist, forever.
+
+    Deliberately does NOT auto-close the entry on position absence alone -
+    matches _reconcile_closed_ticker_exit_orders' own established
+    discipline ("position absence alone is never sufficient evidence" -
+    see its own docstring). Only a tracked leg confirmed FILLED explains
+    an exit well enough to record real P&L and close automatically; a
+    CANCELLED stop plus an absent position together describe a genuine,
+    unexplained gap this app has no business guessing at. Instead: flags
+    entry["position_absent_unexplained"] = True (the caller uses this to
+    skip the pointless protective-leg placement attempt for this pass),
+    persists the evidence gathered, and fires ONE fixed-content critical
+    alert (content-hash deduped, one-shot per entry - same pattern as
+    _alert_if_entry_newly_stuck) pointing an admin at
+    /api/admin/reconcile-position-absent for a real, human-reviewed
+    resolution - never an automatic guess at what happened.
+
+    Returns True if the entry is (now, or already) flagged - the caller
+    uses this to skip the normal resize/confirm attempt this pass."""
+    if entry.get("position_absent_unexplained"):
+        return True
+    try:
+        positions = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
+    except Exception:  # noqa: BLE001 - inconclusive, never treated as evidence either way
+        return False
+    live_quantity = next(
+        (float(position.get("quantity", 0) or 0) for position in positions if str(position.get("symbol", "")).upper() == ticker.upper()),
+        0.0,
+    )
+    if live_quantity > 0:
+        return False  # position genuinely still held - not this situation
+
+    stop_client_order_id = entry.get("stop_client_order_id")
+    stop_status: Optional[str] = None
+    if stop_client_order_id:
+        try:
+            stop_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, stop_client_order_id)
+            stop_status = ol.summarize_fill(stop_detail)["status"]
+        except Exception:  # noqa: BLE001
+            stop_status = None
+
+    if stop_status == "FILLED":
+        # A tracked leg DOES explain the exit after all - not this
+        # function's job; the normal resize/confirm path will itself find
+        # the stop non-active, and _reconcile_position_exit-style handling
+        # is the right place for a genuine FILLED-leg exit, not a guess
+        # made here.
+        return False
+
+    entry["position_absent_unexplained"] = True
+    entry["position_absent_evidence"] = {
+        "checked_at": _now_utc().isoformat(),
+        "stop_client_order_id": stop_client_order_id,
+        "stop_status": stop_status,
+        "live_quantity": live_quantity,
+    }
+    try:
+        add_manual_alert(
+            user_id,
+            {
+                "type": "position_absent_while_stuck",
+                "ticker": ticker,
+                "priority": "critical",
+                "message": (
+                    f"{ticker}: this app was still trying to protect a position it believes is held, but the "
+                    "broker's own positions list shows ZERO shares - and no tracked protective leg confirms a "
+                    "FILLED status that would explain how it closed. This app will not guess at what happened or "
+                    "invent a P&L - review the real broker order history for this ticker and resolve via "
+                    "/api/admin/reconcile-position-absent once confirmed. New autonomous entries stay frozen for "
+                    "this account until this is resolved."
+                ),
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
+def _resolve_position_absent_reconciliation(
+    target_user_id: str, admin_user_id: str, entry_client_order_id: str, reason: str, confirmation: str
+) -> Dict[str, object]:
+    """The ONLY code path allowed to close an entry flagged
+    position_absent_unexplained (see _check_position_absent_while_stuck's
+    own docstring for the full evidence trail). Mirrors
+    _resolve_ambiguous_submission's own discipline for the same reason:
+    this is the sole way to unfreeze an account stuck on this specific
+    condition, and an incorrect close here would mean recording invented
+    P&L for a real trade this app never actually confirmed the outcome
+    of - so it never trusts the stored flag or evidence, always
+    re-verifying fresh, right now.
+
+    Requires BOTH a typed reason AND a typed confirmation (must exactly
+    match the entry's own ticker) - same two-separate-inputs discipline as
+    _resolve_ambiguous_submission, for the same reason (a stray click or
+    an unread copy-paste must not execute this).
+
+    The resulting closed_trade record is explicit about what this is:
+    pnl_status="unknown_manual_reconciliation", gross/net_realized_pnl
+    left None - this app never had a FILLED leg to compute a real exit
+    price from, and inventing one would be worse than admitting it's
+    unknown. The ADMIN's reason is the only human-provided account of what
+    happened, recorded verbatim on the record for the actual trade history
+    to reflect it."""
+    orders = list_overnight_orders(target_user_id)
+    entry = next((order for order in orders if order.get("entry_client_order_id") == entry_client_order_id), None)
+    if entry is None:
+        raise ValidationError(f"No entry found for target_user_id={target_user_id} with entry_client_order_id={entry_client_order_id!r}.")
+    if entry.get("lifecycle_state") != ol.PROTECTION_FAILED or not entry.get("position_absent_unexplained"):
+        raise ValidationError(
+            f"This entry is not currently flagged position_absent_unexplained (lifecycle_state={entry.get('lifecycle_state')})."
+        )
+    ticker = str(entry.get("ticker", ""))
+    if not reason or not reason.strip():
+        raise ValidationError("A reason is required.")
+    if not confirmation or confirmation.strip().upper() != ticker.strip().upper():
+        raise ValidationError(f"Confirmation text must exactly match the ticker ({ticker!r}) to proceed.")
+
+    creds = get_webull_credentials(target_user_id)
+    accounts = get_accounts(target_user_id)
+    webull_account = next((account for account in accounts if account.get("platform") == "webull"), None)
+    if not webull_account or webull_account.get("status") != "Connected":
+        raise ValidationError("This user's Webull account is not connected - cannot re-verify fresh.")
+    sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
+    cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
+    if not cash_account:
+        raise ValidationError("No Webull sandbox account found for this user's credentials.")
+    account_id = cash_account["account_id"]
+
+    try:
+        positions = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
+    except Exception as error:  # noqa: BLE001
+        raise ValidationError(f"Could not re-verify the live position - broker call failed: {error}") from error
+    live_quantity = next(
+        (float(position.get("quantity", 0) or 0) for position in positions if str(position.get("symbol", "")).upper() == ticker.upper()),
+        0.0,
+    )
+    if live_quantity > 0:
+        raise ValidationError(f"Cannot resolve - the broker now shows {live_quantity:g} shares of {ticker} held. The position is not actually absent.")
+
+    stop_client_order_id = entry.get("stop_client_order_id")
+    if stop_client_order_id:
+        try:
+            stop_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, stop_client_order_id)
+            stop_status = ol.summarize_fill(stop_detail)["status"]
+        except Exception as error:  # noqa: BLE001
+            raise ValidationError(f"Could not re-verify the stop leg's status - broker call failed: {error}") from error
+        if stop_status == "FILLED":
+            raise ValidationError(
+                f"Cannot resolve as unexplained - the stop leg now shows FILLED, which DOES explain the exit. "
+                "This entry should be reconciled through the normal fill-detection path instead, not this route."
+            )
+
+    trade_id = str(entry.get("entry_client_order_id") or "")
+    closed_record = {
+        "ticker": ticker,
+        "side": "BUY",
+        "entry_client_order_id": entry.get("entry_client_order_id"),
+        "stop_client_order_id": stop_client_order_id,
+        "target_client_order_id": None,
+        "requested_quantity": entry.get("quantity"),
+        "filled_quantity": entry.get("filled_quantity"),
+        "average_entry_price": entry.get("average_entry_fill_price"),
+        "exit_type": "unknown",
+        "exited_quantity": entry.get("filled_quantity"),
+        "average_exit_price": None,
+        "entry_timestamp": entry.get("logged_at"),
+        "exit_timestamp": _now_utc().isoformat(),
+        "gross_realized_pnl": None,
+        "fees": None,
+        "net_realized_pnl": None,
+        "pnl_status": "unknown_manual_reconciliation",
+        "strategy": entry.get("strategy"),
+        "close_reason": "manual_reconciliation_position_absent",
+        "broker_evidence": {"live_quantity_at_resolution": live_quantity, "stop_status_at_resolution": stop_status if stop_client_order_id else None},
+        "resolved_by_admin": admin_user_id,
+        "resolution_reason": reason.strip(),
+        "reconciled_at": _now_utc().isoformat(),
+    }
+    record_closed_trade(target_user_id, trade_id, closed_record)
+    ol.transition(entry, ol.CLOSED, closed_trade_id=trade_id, close_reason="manual_reconciliation_position_absent")
+    replace_overnight_orders(target_user_id, orders)
+    logger.warning(
+        "Manually reconciled position_absent_unexplained entry: user_id=%s ticker=%s entry_client_order_id=%s admin=%s reason=%s",
+        target_user_id, ticker, entry_client_order_id, admin_user_id, reason.strip(),
+    )
+    return {"entry": entry}
+
+
+@app.route("/api/admin/reconcile-position-absent", methods=["POST"])
+def api_admin_reconcile_position_absent():
+    """The admin-facing route for _resolve_position_absent_reconciliation -
+    see its own docstring for the full discipline this delegates to."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = _resolve_position_absent_reconciliation(
+            target_user_id=str(payload.get("user_id", "")),
+            admin_user_id=_current_user_id(),
+            entry_client_order_id=str(payload.get("entry_client_order_id", "")),
+            reason=str(payload.get("reason", "")),
+            confirmation=str(payload.get("confirmation", "")),
+        )
+    except ValidationError as error:
+        return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
+    return _api_success({"entry": result["entry"]}, ok=True, entry=result["entry"])
+
+
 def _monitor_transitional_orders(user_id: str, creds: Dict[str, str], account_id: str) -> bool:
     """The fast, frequently-run per-order monitor - task list: "Build fast
     per-order monitor decoupled from the 5-minute scan". Processes every
@@ -7233,6 +7457,8 @@ def _monitor_transitional_orders(user_id: str, creds: Dict[str, str], account_id
                         trading_day=trading_day,
                         entry=order,
                     )
+            elif state_before == ol.PROTECTION_FAILED and _check_position_absent_while_stuck(user_id, creds, account_id, ticker, order):
+                pass  # flagged position_absent_unexplained this pass or already - skip the pointless resize attempt, see the function's own docstring
             else:
                 _reconcile_entry_fill_and_protection(
                     user_id=user_id,
