@@ -820,11 +820,23 @@ def preview_stop_and_target_combo(
     quantity: float,
     stop_price: float,
     target_price: float,
+    combo_type: str = "OCO",
 ) -> Dict[str, Any]:
+    # combo_type is parameterized (not hardcoded) because the first real
+    # attempt at this - "STOP_LOSS_PROFIT", the SDK's own ComboType member
+    # whose description ("Stop loss Profit") reads as the obvious match -
+    # was rejected outright by this live sandbox: HTTP 417, OPENAPI_PARAM_ERR,
+    # "invalid combo_type". The SDK's enum listing something doesn't prove
+    # this specific account/API version actually accepts it - exactly the
+    # allowlist-not-assumption discipline this file already applies
+    # elsewhere. "OCO" defaults here as the next real candidate (a stop and
+    # a target where either fill should cancel the other is precisely what
+    # "one cancels others" describes) - still unverified until this
+    # function's own caller gets back something other than a rejection.
     trade_client = _get_trade_client(app_key, app_secret)
     combo_order_id = uuid.uuid4().hex
     stop_leg = {
-        "combo_type": "STOP_LOSS_PROFIT",
+        "combo_type": combo_type,
         "client_order_id": uuid.uuid4().hex,
         "symbol": symbol,
         "instrument_type": "EQUITY",
@@ -838,7 +850,7 @@ def preview_stop_and_target_combo(
         "entrust_type": "QTY",
     }
     target_leg = {
-        "combo_type": "STOP_LOSS_PROFIT",
+        "combo_type": combo_type,
         "client_order_id": uuid.uuid4().hex,
         "symbol": symbol,
         "instrument_type": "EQUITY",

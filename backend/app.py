@@ -1032,6 +1032,7 @@ def api_admin_diagnostic_preview_stop_target_combo():
             quantity=live_quantity,
             stop_price=float(matching_order.get("stop") or 0),
             target_price=float(matching_order.get("target") or 0),
+            combo_type=str(payload.get("combo_type", "") or "OCO"),
         )
     except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than crash
         return _api_failure(f"Preview call failed: {error}", status_code=502, error_code="broker_error", ok=False)
