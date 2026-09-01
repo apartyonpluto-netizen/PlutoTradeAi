@@ -364,6 +364,21 @@ def test_has_stuck_transitional_orders_true_past_the_threshold(user_id):
     assert pluto_app._has_stuck_transitional_orders_locally(user_id) is True
 
 
+def test_has_stuck_transitional_orders_false_once_the_entry_is_closed(user_id):
+    # Found live 2026-09-01: resolving a stuck entry through a DIFFERENT
+    # path (e.g. _resolve_position_absent_reconciliation, which transitions
+    # straight to CLOSED) never clears monitor_first_failure_at - a real
+    # account stayed frozen after its stuck entry was fully, correctly
+    # resolved, because this check only ever looked at
+    # monitor_first_failure_at in isolation, never whether the entry was
+    # still transitional at all.
+    old = datetime.now(timezone.utc) - timedelta(seconds=pluto_app.MONITOR_STUCK_FREEZE_SECONDS + 60)
+    entry = _transitional_entry(ol.PROTECTION_FAILED, monitor_first_failure_at=old.isoformat())
+    ol.transition(entry, ol.CLOSED, closed_trade_id="pt-entry-1", close_reason="manual_reconciliation_position_absent")
+    record_overnight_order(user_id, entry)
+    assert pluto_app._has_stuck_transitional_orders_locally(user_id) is False
+
+
 def test_has_unresolved_ambiguous_submission_locally_includes_the_stuck_signal(user_id):
     old = datetime.now(timezone.utc) - timedelta(seconds=pluto_app.MONITOR_STUCK_FREEZE_SECONDS + 60)
     entry = _transitional_entry(ol.PROTECTION_FAILED, monitor_first_failure_at=old.isoformat())

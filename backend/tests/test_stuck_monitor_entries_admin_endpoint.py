@@ -162,3 +162,32 @@ def test_route_omits_entries_that_have_never_failed_a_monitor_attempt(user_id):
     payload = response.get_json()
     matches = [item for item in payload["data"]["stuck"] if item.get("entry_client_order_id") == "pt-stuck-c-healthy"]
     assert matches == []
+
+
+def test_route_omits_an_entry_that_has_since_been_closed(user_id):
+    # Same bug as _has_stuck_transitional_orders_locally, found the same
+    # day: monitor_first_failure_at is never cleared by resolving an entry
+    # through a different path (e.g. CLOSED via
+    # _resolve_position_absent_reconciliation) - without excluding
+    # terminal entries, this endpoint would list a fully-resolved entry as
+    # "stuck" forever.
+    admin_id = _make_admin(user_id[:8] + "d")
+    target_id = _register_target_user(user_id[:8] + "d")
+    entry = _stuck_entry(
+        "pt-stuck-d-closed", stuck_since=(pluto_app._now_utc() - pluto_app.timedelta(seconds=2000)).isoformat(),
+        attempt_count=50, error="some earlier error",
+    )
+    ol.transition(entry, ol.ENTRY_FILLED, filled_quantity=30.0)
+    ol.transition(entry, ol.PROTECTION_PENDING)
+    ol.transition(entry, ol.PROTECTION_FAILED, error="could not confirm protection active")
+    ol.transition(entry, ol.CLOSED, closed_trade_id="pt-stuck-d-closed", close_reason="manual_reconciliation_position_absent")
+    record_overnight_order(target_id, entry)
+
+    with pluto_app.app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["user_id"] = admin_id
+        response = client.get("/api/admin/stuck-monitor-entries")
+
+    payload = response.get_json()
+    matches = [item for item in payload["data"]["stuck"] if item.get("entry_client_order_id") == "pt-stuck-d-closed"]
+    assert matches == []

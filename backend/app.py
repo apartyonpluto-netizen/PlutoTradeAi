@@ -951,6 +951,14 @@ def api_admin_list_stuck_monitor_entries():
         if not target_user_id:
             continue
         for order in list_overnight_orders(target_user_id):
+            # Same fix as _has_stuck_transitional_orders_locally (found
+            # live 2026-09-01, same day) - monitor_first_failure_at is
+            # never cleared by resolving an entry through a different path
+            # (e.g. CLOSED via _resolve_position_absent_reconciliation), so
+            # without this an entry stays listed here forever after it's
+            # actually fully resolved.
+            if not ol.is_transitional(order):
+                continue
             stuck_since_raw = order.get("monitor_first_failure_at")
             if not stuck_since_raw:
                 continue
@@ -7506,9 +7514,22 @@ def _has_stuck_transitional_orders_locally(user_id: str) -> bool:
     on its own, so it stops compounding the uncertainty with new capital
     while a human looks at it - the same reasoning
     UNKNOWN_SUBMISSION_STATE already applies to a different kind of
-    uncertainty."""
+    uncertainty.
+
+    Found live 2026-09-01: monitor_first_failure_at is stamped once and
+    never cleared by _record_monitor_attempt on its own - resolving the
+    entry through an entirely different path (e.g.
+    _resolve_position_absent_reconciliation, which transitions straight to
+    CLOSED) left it set forever, so this check kept reporting the account
+    frozen on an entry that was actually fully resolved and terminal.
+    ol.is_transitional(order) - the same check order_lifecycle.py's own
+    is_transitional already defines for exactly this purpose - excludes
+    anything CLOSED/terminal, regardless of what monitor_first_failure_at
+    still says."""
     now = _now_utc()
     for order in list_overnight_orders(user_id):
+        if not ol.is_transitional(order):
+            continue
         stuck_since_raw = order.get("monitor_first_failure_at")
         if not stuck_since_raw:
             continue
