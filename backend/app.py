@@ -1017,6 +1017,19 @@ def api_admin_diagnostic_sandbox_accounts():
         accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
     except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than crash
         return _api_failure(f"get_paper_accounts failed: {error}", status_code=502, error_code="broker_error", ok=False)
+    # Best-effort balance per account - a single account's balance lookup
+    # failing (e.g. a FUTURES/CRYPTO account this app's get_account_balance
+    # was never written to parse) must not hide the other accounts' real
+    # answers, so each failure is captured inline rather than aborting the
+    # whole response.
+    for account in accounts:
+        account_id = account.get("account_id")
+        if not account_id:
+            continue
+        try:
+            account["balance"] = webull_api.get_account_balance(creds["app_key"], creds["app_secret"], account_id)
+        except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than hide
+            account["balance_error"] = str(error)
     return _api_success({"accounts": accounts, "count": len(accounts)}, ok=True)
 
 

@@ -52,7 +52,8 @@ def test_returns_the_full_raw_account_list_not_just_the_cash_one(user_id):
         {"account_id": "acct-margin-1", "account_class": "INDIVIDUAL_MARGIN"},
     ]
     with patch.object(pluto_app, "get_webull_credentials", return_value=CREDS), \
-         patch.object(pluto_app.webull_api, "get_paper_accounts", return_value=accounts) as mock_accounts:
+         patch.object(pluto_app.webull_api, "get_paper_accounts", return_value=accounts) as mock_accounts, \
+         patch.object(pluto_app.webull_api, "get_account_balance", return_value={"buying_power": "10000"}):
         with pluto_app.app.test_client() as client:
             with client.session_transaction() as sess:
                 sess["user_id"] = admin_id
@@ -61,8 +62,36 @@ def test_returns_the_full_raw_account_list_not_just_the_cash_one(user_id):
     assert response.status_code == 200
     payload = response.get_json()["data"]
     assert payload["count"] == 2
-    assert payload["accounts"] == accounts
+    assert payload["accounts"][0]["account_id"] == "acct-cash-1"
+    assert payload["accounts"][0]["balance"] == {"buying_power": "10000"}
+    assert payload["accounts"][1]["balance"] == {"buying_power": "10000"}
     mock_accounts.assert_called_once_with(CREDS["app_key"], CREDS["app_secret"])
+
+
+def test_one_account_balance_failing_does_not_hide_the_others(user_id):
+    admin_id = _make_admin(user_id[:8] + "e")
+    accounts = [
+        {"account_id": "acct-cash-1", "account_class": "INDIVIDUAL_CASH"},
+        {"account_id": "acct-futures-1", "account_class": "FUTURES"},
+    ]
+
+    def _balance_side_effect(app_key, app_secret, account_id):
+        if account_id == "acct-futures-1":
+            raise RuntimeError("unsupported account type for balance lookup")
+        return {"buying_power": "10000"}
+
+    with patch.object(pluto_app, "get_webull_credentials", return_value=CREDS), \
+         patch.object(pluto_app.webull_api, "get_paper_accounts", return_value=accounts), \
+         patch.object(pluto_app.webull_api, "get_account_balance", side_effect=_balance_side_effect):
+        with pluto_app.app.test_client() as client:
+            with client.session_transaction() as sess:
+                sess["user_id"] = admin_id
+            response = client.get(f"/api/admin/diagnostic/sandbox-accounts?user_id={admin_id}")
+
+    assert response.status_code == 200
+    payload = response.get_json()["data"]
+    assert payload["accounts"][0]["balance"] == {"buying_power": "10000"}
+    assert "unsupported account type" in payload["accounts"][1]["balance_error"]
 
 
 def test_a_broker_failure_is_reported_not_swallowed(user_id):
