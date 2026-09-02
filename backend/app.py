@@ -4744,6 +4744,11 @@ def _run_fast_order_monitor(user_id: str) -> Dict[str, object]:
     if not cash_account:
         raise ValidationError("No Webull sandbox account found for this user's credentials.")
     account_id = cash_account["account_id"]
+    # See _run_autonomous_trade_scan_locked's own comment on the identical
+    # margin lookup - None is the normal case for a user with no margin
+    # account provisioned, not an error.
+    margin_account = webull_api.find_individual_margin_account(sandbox_accounts)
+    margin_account_id = margin_account["account_id"] if margin_account else None
 
     entries_checked_before = sum(1 for order in list_overnight_orders(user_id) if ol.is_transitional(order))
 
@@ -4753,6 +4758,15 @@ def _run_fast_order_monitor(user_id: str) -> Dict[str, object]:
         has_unresolved_ambiguous_submission = _reconcile_unknown_submissions(user_id, creds, account_id)
         has_incomplete_manual_resolution = _recover_incomplete_manual_resolutions(user_id, creds, account_id)
         still_transitional = _monitor_transitional_orders(user_id, creds, account_id)
+        # THE primary safety loop for a margin/short entry - see
+        # _monitor_transitional_orders' own account-filtering docstring.
+        # Deliberately narrower than the cash path above (orphan
+        # discovery, ambiguous-submission recovery, and the outside-hours
+        # stop retry are not yet extended to the margin account) - a
+        # known, documented gap, not an oversight; see
+        # _run_autonomous_trade_scan_locked's matching comment.
+        if margin_account_id:
+            still_transitional = _monitor_transitional_orders(user_id, creds, margin_account_id) or still_transitional
 
     entries_checked_after = sum(1 for order in list_overnight_orders(user_id) if ol.is_transitional(order))
 
@@ -7656,8 +7670,23 @@ def _monitor_transitional_orders(user_id: str, creds: Dict[str, str], account_id
     function's own return value for the rest.
 
     Returns True if ANY entry this function is responsible for is still
-    non-terminal after this pass."""
-    orders = list_overnight_orders(user_id)
+    non-terminal after this pass.
+
+    Account-aware since 2026-09-02 (short-selling work): a caller with a
+    mix of cash-account (long) and margin-account (short) entries must
+    call this ONCE PER ACCOUNT, each time with that account's own
+    account_id - see _run_fast_order_monitor/_run_autonomous_trade_scan_locked.
+    An order whose OWN stored account_id doesn't match the account_id
+    THIS call is processing is skipped entirely - looking it up against
+    the wrong account's credentials would be querying for an order that
+    genuinely does not exist there. An order with no account_id at all
+    (a legacy/test record from before this field was always stamped) is
+    processed regardless - matching the original, single-account
+    behavior exactly for anything that predates this distinction."""
+    orders = [
+        order for order in list_overnight_orders(user_id)
+        if not order.get("account_id") or order.get("account_id") == account_id
+    ]
     resumable = [order for order in orders if order.get("lifecycle_state") in ol.MONITOR_RESUMABLE_STATES]
     exit_checkable = [order for order in orders if order.get("lifecycle_state") == ol.PROTECTION_CONFIRMED_ACTIVE]
     now_iso = _now_utc().isoformat()
@@ -8434,6 +8463,14 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
     if not cash_account:
         raise ValidationError("No Webull sandbox account found for these credentials.")
     account_id = cash_account["account_id"]
+    # PUT/short candidates need a genuine margin account - INDIVIDUAL_CASH
+    # cannot hold a short position (OPENAPI_GENERATE_NEW_SHORT_POSITION,
+    # confirmed live 2026-08-31). None here (no margin account provisioned
+    # for these credentials) is a legitimate, expected state for most
+    # users, not an error - PUT candidates are simply skipped below with a
+    # clear reason rather than this whole scan failing over it.
+    margin_account = webull_api.find_individual_margin_account(sandbox_accounts)
+    margin_account_id = margin_account["account_id"] if margin_account else None
 
     # Every one of these reconciliation passes can place, cancel, or resize
     # a REAL order at the broker for an EXISTING position - a preview must
@@ -8471,6 +8508,19 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         # configured, so this app's OWN 5-minute scan never regresses to
         # leaving these unresumed.
         _monitor_transitional_orders(user_id, creds, account_id)
+        # Same pass, but for the MARGIN account - only if one exists for
+        # this user. Without this, a short entry's fill/protection/exit
+        # would never be checked by this scan at all (see
+        # _monitor_transitional_orders' own account-filtering docstring).
+        # Deliberately narrower than the cash path above: only the fill/
+        # protection/exit monitor runs against the margin account for now,
+        # not orphan discovery, ambiguous-submission recovery, or the
+        # outside-hours stop retry - a known, documented gap (matching
+        # this app's own established discipline of a narrower, verified
+        # feature over an unverified broader one - see the OCO/OTOCO
+        # precedent), not an oversight.
+        if margin_account_id:
+            _monitor_transitional_orders(user_id, creds, margin_account_id)
     else:
         has_unresolved_ambiguous_submission = False
         has_incomplete_manual_resolution = False
