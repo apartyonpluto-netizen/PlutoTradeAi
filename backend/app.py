@@ -1089,6 +1089,49 @@ def api_admin_diagnostic_preview_short_sell():
     return _api_success({"classification": "accepted", "raw": result, "account_id": account_id}, ok=True)
 
 
+@app.route("/api/admin/diagnostic/preview-raw-order", methods=["POST"])
+def api_admin_diagnostic_preview_raw_order():
+    """TEMPORARY - same removal condition as preview-short-sell above.
+    Verifies order SHAPES this app has never empirically confirmed before
+    wiring them into real placement code for the short-selling feature -
+    specifically a BUY-side STOP_LOSS (a "buy-stop", used to cover a
+    short position on a rise - place_stop_loss_order today only ever
+    places SELL-side) and a BUY-side LIMIT (the eventual short target-
+    exit cover). Genuinely a dry-run preview (webull_api.preview_raw_order -
+    same preview_order endpoint, never executes an order or touches
+    capital) against an arbitrary, caller-constructed order dict, so it
+    isn't limited to preview_stock_order's fixed LIMIT-only shape.
+
+    Body: {"order": {...}} - the raw order dict to preview (account_id/
+    user_id resolve the margin account the same way preview-short-sell
+    does, unless "account_id" is also given directly)."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    order = payload.get("order")
+    if not isinstance(order, dict) or not order:
+        return _api_failure("order (a non-empty object) is required.", status_code=400, error_code="invalid_request", ok=False)
+    target_user_id = str(payload.get("user_id", "") or _current_user_id())
+    creds = get_webull_credentials(target_user_id)
+    account_id = str(payload.get("account_id", "") or "")
+    if not account_id:
+        try:
+            accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
+        except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than crash
+            return _api_failure(f"get_paper_accounts failed: {error}", status_code=502, error_code="broker_error", ok=False)
+        margin_account = next((a for a in accounts if a.get("account_class") == "INDIVIDUAL_MARGIN"), None)
+        if not margin_account:
+            return _api_failure("No INDIVIDUAL_MARGIN account found on this user's sandbox credentials.", status_code=404, error_code="not_found", ok=False)
+        account_id = margin_account["account_id"]
+
+    try:
+        result = webull_api.preview_raw_order(creds["app_key"], creds["app_secret"], account_id, order)
+    except Exception as error:  # noqa: BLE001 - diagnostic-only, the whole point is seeing what the broker actually said
+        return _api_success({"classification": "rejected_or_errored", "detail": str(error), "account_id": account_id}, ok=True)
+    return _api_success({"classification": "accepted", "raw": result, "account_id": account_id}, ok=True)
+
+
 @app.route("/api/admin/diagnostic/order-detail", methods=["GET"])
 def api_admin_diagnostic_order_detail():
     """Read-only: the broker's own CURRENT, LIVE answer for one specific

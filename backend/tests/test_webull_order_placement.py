@@ -635,3 +635,22 @@ def test_get_order_history_bare_list_is_a_legitimate_response_shape():
     with patch.object(webull_api, "_get_trade_client", return_value=client):
         result = webull_api.get_order_history("key", "secret", "acct1")
     assert len(result) == 1
+
+
+def test_find_individual_margin_account_returns_the_margin_class_account():
+    accounts = [
+        {"account_id": "acct-cash", "account_class": "INDIVIDUAL_CASH"},
+        {"account_id": "acct-margin", "account_class": "INDIVIDUAL_MARGIN"},
+        {"account_id": "acct-futures", "account_class": "FUTURES"},
+    ]
+    result = webull_api.find_individual_margin_account(accounts)
+    assert result["account_id"] == "acct-margin"
+
+
+def test_find_individual_margin_account_returns_none_without_a_real_margin_account():
+    # Deliberately does NOT fall back to accounts[0] the way the cash
+    # finder does - a caller placing a SELL SHORT against the wrong
+    # account class is exactly the rejection this exists to avoid.
+    accounts = [{"account_id": "acct-cash", "account_class": "INDIVIDUAL_CASH"}]
+    assert webull_api.find_individual_margin_account(accounts) is None
+    assert webull_api.find_individual_margin_account([]) is None

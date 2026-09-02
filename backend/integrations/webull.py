@@ -216,6 +216,22 @@ def find_individual_cash_account(accounts: List[Dict[str, Any]]) -> Optional[Dic
     return accounts[0] if accounts else None
 
 
+def find_individual_margin_account(accounts: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The PUT/short-entry counterpart to find_individual_cash_account.
+    Deliberately does NOT fall back to accounts[0] the way the cash
+    finder does - a caller placing a SELL SHORT order against the wrong
+    account class is exactly the OPENAPI_GENERATE_NEW_SHORT_POSITION
+    rejection this whole margin-account path exists to avoid (see
+    /api/admin/diagnostic/sandbox-accounts and preview-short-sell,
+    2026-09-01/02), so returning None when no real margin account exists
+    - forcing the caller to fail closed - is the correct behavior here,
+    not an oversight."""
+    for account in accounts:
+        if account.get("account_class") == "INDIVIDUAL_MARGIN":
+            return account
+    return None
+
+
 def get_account_balance(app_key: str, app_secret: str, account_id: str) -> Dict[str, Any]:
     trade_client = _get_trade_client(app_key, app_secret)
     response = _call_with_429_retry("balance", lambda: trade_client.account_v2.get_account_balance(account_id))
@@ -665,6 +681,27 @@ def preview_stock_order(
         "time_in_force": "DAY",
         "entrust_type": "QTY",
     }
+    response = trade_client.order_v2.preview_order(account_id, [order])
+    if response.status_code != 200:
+        raise ValueError(f"Webull API error (preview order): HTTP {response.status_code} {response.text}")
+    return response.json()
+
+
+def preview_raw_order(app_key: str, app_secret: str, account_id: str, order: Dict[str, Any]) -> Dict[str, Any]:
+    """TEMPORARY diagnostic helper (2026-09-02) - genuinely a dry-run
+    preview (no capital ever at risk, no order ever executed), but unlike
+    preview_stock_order this accepts an arbitrary, caller-constructed
+    order dict rather than a fixed LIMIT-order shape. Exists specifically
+    to verify order shapes this app has never empirically confirmed
+    before wiring them into real placement code - matching the same
+    verify-before-adopt discipline as the combo-order diagnostic
+    (d5c3c1a/7574f6c/38a0c8b) and preview_stock_order itself. Remove once
+    every order shape the short-selling feature needs (a BUY-side
+    STOP_LOSS to cover a short, a BUY-side LIMIT target-exit cover) has
+    been verified and adopted into real placement functions, or ruled
+    out."""
+    trade_client = _get_trade_client(app_key, app_secret)
+    order = {**order, "combo_type": order.get("combo_type", "NORMAL"), "client_order_id": order.get("client_order_id") or uuid.uuid4().hex}
     response = trade_client.order_v2.preview_order(account_id, [order])
     if response.status_code != 200:
         raise ValueError(f"Webull API error (preview order): HTTP {response.status_code} {response.text}")
