@@ -8556,7 +8556,16 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
 
     max_positions = int(risk_settings.get("max_positions", 0) or 0)
     real_open_positions_snapshot = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
+    # Portfolio-wide, not per-account - max_positions is the user's own
+    # "how many concurrent positions am I comfortable holding" setting,
+    # not a separate cap per broker account, so a margin-account short
+    # counts against the same limit as a cash-account long. Not wrapped
+    # in a try/except - same as the cash lookup immediately above it,
+    # a failed positions read here must fail the whole scan closed, not
+    # silently undercount the portfolio's true open-position exposure.
     open_position_count = len(real_open_positions_snapshot)
+    if margin_account_id:
+        open_position_count += len(webull_api.get_account_positions(creds["app_key"], creds["app_secret"], margin_account_id))
     available_position_slots = _available_position_slots(max_positions, open_position_count, OVERNIGHT_MAX_ORDERS_PER_RUN)
 
     # ONE reconciled broker snapshot for the whole scan, not one per
@@ -8576,6 +8585,30 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         total_equity=current_balance,
     )
 
+    # The margin account's OWN real broker buying power - a hard ceiling
+    # for a SHORT candidate specifically, same role broker_buying_power
+    # plays for a long against the cash account. Deliberately does NOT
+    # get its own risk_budget/current_balance - risk_percent_of_balance
+    # stays anchored to the SAME (cash) balance for both directions, so
+    # the user's per-trade risk setting means the same dollar amount
+    # regardless of which account a candidate happens to trade through;
+    # only the hard buying-power ceiling differs per account.
+    margin_broker_buying_power: Optional[float] = None
+    margin_snapshot_available_buying_power: Optional[float] = None
+    if margin_account_id:
+        try:
+            margin_balance = webull_api.get_account_balance(creds["app_key"], creds["app_secret"], margin_account_id)
+            margin_broker_buying_power = _extract_broker_buying_power(margin_balance)
+            margin_real_net_liquidation_value = float(margin_balance.get("total_net_liquidation_value", 0) or 0)
+            margin_snapshot_available_buying_power = _build_capital_snapshot(
+                fetch_open_orders=lambda: webull_api.get_open_orders(creds["app_key"], creds["app_secret"], margin_account_id),
+                real_open_positions=webull_api.get_account_positions(creds["app_key"], creds["app_secret"], margin_account_id),
+                tracked_tickers=tracked_tickers_for_user,
+                total_equity=margin_real_net_liquidation_value,
+            )
+        except Exception as error:  # noqa: BLE001 - fails closed (both stay None -> every short candidate sizes to 0 below), never guesses
+            logger.warning("Margin account balance/snapshot lookup failed, short candidates this scan will fail closed: %s", error)
+
     # In-scan reservations layered over the snapshot above - authoritative
     # and immediate the moment an order is accepted, regardless of whether
     # the broker's own read side has caught up yet. Reconciled against
@@ -8587,7 +8620,14 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
     # once _reservation_notional is added to it - see that function's
     # docstring for why accumulating in float can reintroduce
     # binary-imprecision even when each individual term was Decimal-safe.
-    local_reservations = _to_decimal(0.0)
+    #
+    # Keyed by account_id, not a single running total - a cash-account
+    # reservation must never draw down the margin account's own buying
+    # power, or vice versa; each account's own dollars are entirely
+    # separate.
+    local_reservations_by_account: Dict[str, "Decimal"] = {account_id: _to_decimal(0.0)}
+    if margin_account_id:
+        local_reservations_by_account[margin_account_id] = _to_decimal(0.0)
 
     risk_percent_of_balance = float(risk_settings.get("risk_percent_of_balance", 0) or 0)
     risk_budget = _compute_risk_budget(current_balance, risk_percent_of_balance)
@@ -8625,7 +8665,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
     qualifying = [
         opp
         for opp in opportunities
-        if str(opp.get("recommendation", "")).upper() == "CALL"
+        if str(opp.get("recommendation", "")).upper() in ("CALL", "PUT")
         and int(opp.get("confidence", 0) or 0) >= OVERNIGHT_MIN_CONFIDENCE
         and str(opp.get("ticker", "")).upper() not in already_placed_today
     ]
@@ -8811,10 +8851,10 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         elif opp_was_qualifying:
             reason = f"max_positions limit reached ({open_position_count}/{max_positions} open)" if max_positions > 0 else "no position slots available"
             surface_in_summary = True
-        elif str(opp.get("recommendation", "")).upper() == "CALL":
+        elif str(opp.get("recommendation", "")).upper() in ("CALL", "PUT"):
             reason = f"confidence {opp.get('confidence')} below {OVERNIGHT_MIN_CONFIDENCE} threshold"
         else:
-            reason = f"recommendation is {opp.get('recommendation')}, only CALL/bullish setups auto-order tonight"
+            reason = f"recommendation is {opp.get('recommendation')}, only CALL/PUT setups auto-order tonight"
         skip_record = {
             "ticker": opp.get("ticker"),
             "recommendation": opp.get("recommendation"),
@@ -8836,22 +8876,48 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         ticker = str(opp.get("ticker", ""))
         limit_price = float(opp.get("ideal_entry") or 0)
         stop_price_for_sizing = float(opp.get("stop") or 0)
+        direction = "short" if str(opp.get("recommendation", "")).upper() == "PUT" else "long"
+
+        if direction == "short" and not margin_account_id:
+            # A genuine margin account is required to hold a short position
+            # (OPENAPI_GENERATE_NEW_SHORT_POSITION on the cash account,
+            # confirmed live 2026-08-31) - this user simply doesn't have
+            # one provisioned. Fails closed with a clear reason rather than
+            # ever falling through to attempt this against the cash
+            # account, which the broker would reject anyway.
+            reason = "no margin account available for a PUT/short entry"
+            skipped.append(
+                {"ticker": ticker, "recommendation": opp.get("recommendation"), "confidence": opp.get("confidence"), "reason_skipped": reason, "was_qualifying": True}
+            )
+            _log_research_decision(
+                ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
+                raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=reason,
+                quantity=0, entry_client_order_id=None,
+            )
+            continue
+
+        candidate_account_id = margin_account_id if direction == "short" else account_id
+        candidate_snapshot_buying_power = margin_snapshot_available_buying_power if direction == "short" else snapshot_available_buying_power
+        candidate_broker_buying_power = margin_broker_buying_power if direction == "short" else broker_buying_power
 
         # The snapshot taken once above, minus every reservation added for a
-        # candidate earlier in THIS run - not a fresh broker read per
-        # candidate. See the comment above the snapshot for why re-reading
-        # the broker here would not actually be safe. The same in-scan
-        # reservations are subtracted from the REAL broker buying power too
-        # (not just the virtual allocation) - dollars an earlier candidate in
-        # this same run already committed will draw down the real account
-        # once the broker's own bookkeeping catches up, even though it
-        # hasn't yet, so a later candidate must not be sized as if that
-        # money were still free.
+        # candidate earlier in THIS run AGAINST THIS SAME ACCOUNT - not a
+        # fresh broker read per candidate, and never mixed with the OTHER
+        # account's own reservations (a cash-account long and a margin-
+        # account short draw from entirely separate dollars). See the
+        # comment above the snapshot for why re-reading the broker here
+        # would not actually be safe. The same in-scan reservations are
+        # subtracted from the REAL broker buying power too (not just the
+        # virtual allocation) - dollars an earlier candidate in this same
+        # run already committed will draw down the real account once the
+        # broker's own bookkeeping catches up, even though it hasn't yet,
+        # so a later candidate must not be sized as if that money were
+        # still free.
         available_buying_power = _compute_available_buying_power_with_reservations(
-            snapshot_available_buying_power, local_reservations
+            candidate_snapshot_buying_power, local_reservations_by_account[candidate_account_id]
         )
         available_broker_buying_power = _compute_available_buying_power_with_reservations(
-            broker_buying_power, local_reservations
+            candidate_broker_buying_power, local_reservations_by_account[candidate_account_id]
         )
 
         # Sized by risk-at-stop (how much you'd lose if the stop is hit), not
@@ -8867,6 +8933,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             available_buying_power=available_buying_power,
             broker_buying_power=available_broker_buying_power,
             position_exposure_cap=position_exposure_cap,
+            direction=direction,
         )
         quantity = int(sizing["quantity"])
         if quantity < 1:
@@ -8895,10 +8962,14 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 quantity=0, entry_client_order_id=None,
             )
             continue
-        planned_risk_dollars = round(quantity * (limit_price - stop_price_for_sizing), 2)
+        # direction="short" has its stop ABOVE limit_price - mirrored so
+        # this stays a positive dollars-at-risk figure, matching
+        # _reconcile_entry_fill_and_protection's own realized_risk_dollars.
+        planned_risk_dollars = round(quantity * ((stop_price_for_sizing - limit_price) if direction == "short" else (limit_price - stop_price_for_sizing)), 2)
         entry = {
             "ticker": ticker,
-            "side": "BUY",
+            "direction": direction,
+            "side": "SELL" if direction == "short" else "BUY",
             "quantity": quantity,
             "limit_price": limit_price,
             "confidence": opp.get("confidence"),
@@ -8916,7 +8987,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             "risk_warning": opp.get("risk_warning"),
             "target": opp.get("target"),
             "stop": opp.get("stop"),
-            "account_id": account_id,
+            "account_id": candidate_account_id,
             "status": "pending",
             # Auditable even on success, not just on skip - see
             # _compute_position_quantity's structured return.
@@ -8996,7 +9067,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 entry["stop_price"] = stop_price
                 entry["target_price"] = target_price
                 placed.append(entry)
-                local_reservations += _reservation_notional(quantity, limit_price)
+                local_reservations_by_account[candidate_account_id] += _reservation_notional(quantity, limit_price)
                 continue
 
             # A fresh, genuinely real-time price check immediately before
@@ -9047,7 +9118,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             _submit_and_protect_entry(
                 user_id=user_id,
                 creds=creds,
-                account_id=account_id,
+                account_id=candidate_account_id,
                 ticker=ticker,
                 requested_quantity=quantity,
                 limit_price=limit_price,
@@ -9076,7 +9147,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 # a later candidate in this same run must not be sized as if
                 # those dollars were still free. See _reconcile_unknown_submission
                 # for how this gets resolved on a later scan.
-                local_reservations += _reservation_notional(quantity, limit_price)
+                local_reservations_by_account[candidate_account_id] += _reservation_notional(quantity, limit_price)
                 skipped.append(entry)
                 try:
                     add_manual_alert(
@@ -9108,7 +9179,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                     # sizing above sees even if the broker's own open-orders
                     # read hasn't caught up to candidate 1 yet (see
                     # test_reservation_survives_broker_eventual_consistency).
-                    local_reservations += _reservation_notional(quantity, limit_price)
+                    local_reservations_by_account[candidate_account_id] += _reservation_notional(quantity, limit_price)
         except Exception as error:  # noqa: BLE001 - one bad ticker shouldn't kill the whole batch
             entry["status"] = "failed"
             entry["error"] = str(error)
