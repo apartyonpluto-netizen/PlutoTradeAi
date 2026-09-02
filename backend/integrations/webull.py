@@ -757,8 +757,9 @@ def place_stop_loss_order(
     quantity: float,
     stop_price: float,
     client_order_id: Optional[str] = None,
+    side: str = "SELL",
 ) -> Dict[str, Any]:
-    """Places a real standalone stop-loss SELL order at the broker - once this
+    """Places a real standalone stop-loss order at the broker - once this
     is accepted, Webull itself watches the price and executes the exit, with
     no dependency on this app polling or a cron job firing in time. order_type
     must be the literal string "STOP_LOSS" (underscore, not a space - "STOP
@@ -770,6 +771,13 @@ def place_stop_loss_order(
     gateway is up (roughly 9:30-16:00 ET). Callers placing an entry outside
     those hours should expect this to fail and retry once CORE hours begin -
     see _reconcile_exit_orders in app.py.
+
+    side defaults to "SELL" (protects a LONG position - the only shape this
+    function placed before 2026-09-02) - pass side="BUY" for a "buy-stop"
+    that protects a SHORT position instead (covers on a price RISE, the
+    mirror image of a sell-stop). Verified live via preview_raw_order
+    against the margin sandbox account before being wired in here - see
+    /api/admin/diagnostic/preview-raw-order's own history.
 
     client_order_id: see place_stock_order."""
     trade_client = _get_trade_client(app_key, app_secret)
@@ -784,7 +792,7 @@ def place_stop_loss_order(
         "stop_price": str(stop_price),
         "quantity": str(quantity),
         "support_trading_session": "CORE",
-        "side": "SELL",
+        "side": side,
         "time_in_force": "DAY",
         "entrust_type": "QTY",
     }

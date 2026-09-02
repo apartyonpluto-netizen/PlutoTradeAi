@@ -4044,6 +4044,7 @@ def _compute_position_quantity(
     broker_buying_power: Optional[float],
     position_exposure_cap: float = 0.0,
     portfolio_risk_remaining: Optional[float] = None,
+    direction: str = "long",
 ) -> Dict[str, object]:
     """Sizes a position by risk-at-stop, not by raw share price - fixes a
     real bug found in production this session where "risk per trade" was
@@ -4097,21 +4098,41 @@ def _compute_position_quantity(
     None in "constraints" rather than a number, and is excluded from the
     min() - it never binds, it just isn't evaluated.
 
-    entry_price <= 0/None, or stop_price missing/invalid (<= 0, or at/above
-    entry_price - not a valid long stop) both fail closed immediately with
-    quantity 0 and no constraint breakdown, since risk-per-share can't be
-    computed at all without a valid stop.
+    entry_price <= 0/None, or stop_price missing/invalid (<= 0, or on the
+    wrong side of entry_price for `direction` - not a valid stop) both fail
+    closed immediately with quantity 0 and no constraint breakdown, since
+    risk-per-share can't be computed at all without a valid stop.
+
+    direction="long" (the default, and the only shape this function sized
+    before 2026-09-02) requires stop_price BELOW entry_price - a rise past
+    entry is the position working, a fall to the stop is the loss.
+    direction="short" requires stop_price ABOVE entry_price instead - the
+    mirror image: a fall past entry is the position working, a rise to the
+    stop is the loss. Either way risk_per_share is computed so it's always
+    positive for a valid stop, never silently negative.
 
     Whole shares only - Webull's OpenAPI quantity field hasn't been verified
     to accept a fractional value, so this floors rather than guessing."""
     if entry_price is None or entry_price <= 0:
         return {"quantity": 0, "constraints": {}, "binding_constraints": ["entry_price"], "reason": "no valid entry price"}
-    if stop_price is None or stop_price <= 0 or stop_price >= entry_price:
+    is_short = direction == "short"
+    if stop_price is None or stop_price <= 0:
         return {
             "quantity": 0,
             "constraints": {},
             "binding_constraints": ["stop_price"],
-            "reason": "no valid stop below entry price to size risk against",
+            "reason": "no valid stop price to size risk against",
+        }
+    stop_on_wrong_side = (stop_price >= entry_price) if not is_short else (stop_price <= entry_price)
+    if stop_on_wrong_side:
+        return {
+            "quantity": 0,
+            "constraints": {},
+            "binding_constraints": ["stop_price"],
+            "reason": (
+                "no valid stop below entry price to size risk against" if not is_short
+                else "no valid stop above entry price to size risk against"
+            ),
         }
 
     from decimal import Decimal
@@ -4121,7 +4142,7 @@ def _compute_position_quantity(
     # doing this only at the final division is not enough.
     entry_price_dec = _to_decimal(entry_price)
     stop_price_dec = _to_decimal(stop_price)
-    risk_per_share = entry_price_dec - stop_price_dec
+    risk_per_share = (stop_price_dec - entry_price_dec) if is_short else (entry_price_dec - stop_price_dec)
 
     constraints: Dict[str, Optional[int]] = {
         "risk": None,
@@ -4800,13 +4821,19 @@ def _submit_and_protect_entry(
     entry_client_order_id = ol.deterministic_client_order_id(user_id, ticker, trading_day, "entry", attempt=1)
     ol.initialize(entry, ol.ENTRY_SUBMITTED, entry_client_order_id=entry_client_order_id)
 
+    # direction="short" (PUT) opens with a SELL (short-to-open) instead of
+    # a BUY - see find_individual_margin_account/the 2026-09-02 short-
+    # selling work. Defaults to "long" for every pre-existing entry that
+    # never set this field, so this is a pure addition, not a behavior
+    # change for the proven long path.
+    entry_side = "SELL" if entry.get("direction") == "short" else "BUY"
     try:
         webull_api.place_stock_order(
             app_key=creds["app_key"],
             app_secret=creds["app_secret"],
             account_id=account_id,
             symbol=ticker,
-            side="BUY",
+            side=entry_side,
             quantity=requested_quantity,
             limit_price=limit_price,
             trading_session=_current_webull_trading_session(),  # candidates are already restricted to CORE hours by _new_entries_allowed
@@ -5021,6 +5048,12 @@ def _reconcile_protective_leg_quantity(
 
     def _place_new_leg() -> None:
         if leg == "stop":
+            # direction="short" protects with a BUY-side stop (a "buy-
+            # stop" that covers on a price RISE) instead of the SELL-side
+            # stop that protects a long - verified live via
+            # preview_raw_order against the margin sandbox account before
+            # being wired in here.
+            stop_side = "BUY" if entry.get("direction") == "short" else "SELL"
             webull_api.place_stop_loss_order(
                 app_key=creds["app_key"],
                 app_secret=creds["app_secret"],
@@ -5029,6 +5062,7 @@ def _reconcile_protective_leg_quantity(
                 quantity=target_quantity,
                 stop_price=leg_price,
                 client_order_id=new_client_order_id,
+                side=stop_side,
             )
         else:
             webull_api.place_take_profit_order(
@@ -5437,8 +5471,14 @@ def _check_and_execute_target_exit(
     if stop_fill["filled_quantity"] > 0 or not _protective_leg_is_active(stop_fill["status"]):
         return False  # stop already filled or otherwise not actively resting - let the normal exit path handle it
 
+    is_short = entry.get("direction") == "short"
     fresh_price = alpaca_data.get_latest_trade_price(ticker)
-    if fresh_price is None or fresh_price < target_price:
+    if fresh_price is None:
+        return False  # can't confirm the target was reached - fail closed, the resting stop still covers safety
+    # direction="short" has its target BELOW entry - reached on a FALL to
+    # or past it, the mirror of a long's target being reached on a RISE.
+    target_not_yet_reached = (fresh_price > target_price) if is_short else (fresh_price < target_price)
+    if target_not_yet_reached:
         return False  # can't confirm the target was reached - fail closed, the resting stop still covers safety
 
     quantity = float(entry.get("stop_leg_quantity") or entry.get("filled_quantity") or 0)
@@ -5468,14 +5508,20 @@ def _check_and_execute_target_exit(
     next_attempt = int(entry.get("target_exit_attempt") or 0) + 1
     entry["target_exit_attempt"] = next_attempt
     sell_client_order_id = ol.deterministic_client_order_id(user_id, ticker, trading_day, "target_exit", attempt=next_attempt)
-    exit_limit_price = round(fresh_price * (1 - TARGET_EXIT_SLIPPAGE_TOLERANCE), 2)
+    # direction="short" covers with a BUY - a marketable buy limit sits
+    # slightly ABOVE fresh_price (the mirror of a long's sell limit
+    # sitting slightly below it, to make it marketable on the way down).
+    exit_limit_price = round(
+        fresh_price * ((1 + TARGET_EXIT_SLIPPAGE_TOLERANCE) if is_short else (1 - TARGET_EXIT_SLIPPAGE_TOLERANCE)), 2
+    )
+    exit_side = "BUY" if is_short else "SELL"
     try:
         webull_api.place_stock_order(
             app_key=creds["app_key"],
             app_secret=creds["app_secret"],
             account_id=account_id,
             symbol=ticker,
-            side="SELL",
+            side=exit_side,
             quantity=quantity,
             limit_price=exit_limit_price,
             trading_session=_current_webull_trading_session(),
@@ -5536,10 +5582,16 @@ def _check_and_execute_target_exit(
     trade_id = str(entry.get("entry_client_order_id") or "")
     average_entry_price = entry.get("average_entry_fill_price")
     pnl_complete = average_entry_price is not None and average_exit_price is not None
-    gross_pnl = round(filled_this_sell * (average_exit_price - average_entry_price), 2) if pnl_complete else None
+    # direction="short" profits from a FALL (entry - exit), the mirror of
+    # a long's (exit - entry) - opened with a SELL and closed with a BUY,
+    # so a lower exit price than entry is the gain, not the loss.
+    gross_pnl = (
+        round(filled_this_sell * ((average_entry_price - average_exit_price) if is_short else (average_exit_price - average_entry_price)), 2)
+        if pnl_complete else None
+    )
     closed_record = {
         "ticker": ticker,
-        "side": "BUY",
+        "side": "SELL" if is_short else "BUY",
         "entry_client_order_id": entry.get("entry_client_order_id"),
         "stop_client_order_id": stop_client_order_id,
         "target_client_order_id": sell_client_order_id,
@@ -5621,6 +5673,7 @@ def _restore_fallback_stop_after_failed_target_exit(
             quantity=quantity,
             stop_price=float(entry.get("stop") or 0),
             client_order_id=fallback_stop_id,
+            side="BUY" if entry.get("direction") == "short" else "SELL",
         )
     except Exception as error:  # noqa: BLE001
         return error
@@ -5793,10 +5846,19 @@ def _reconcile_position_exit(
         trade_id = str(entry.get("entry_client_order_id") or "")
         average_entry_price = entry.get("average_entry_fill_price")
         pnl_complete = average_entry_price is not None and exited_average_price is not None
-        gross_pnl = round(exited_quantity * (exited_average_price - average_entry_price), 2) if pnl_complete else None
+        is_short = entry.get("direction") == "short"
+        # direction="short" profits from a FALL (entry - exit) - the
+        # mirror of a long's (exit - entry). The exited leg here is
+        # always the stop for a short (its target never rests at the
+        # broker - see _check_and_execute_target_exit), and a short's
+        # stop is a BUY that fills on a RISE, i.e. a loss.
+        gross_pnl = (
+            round(exited_quantity * ((average_entry_price - exited_average_price) if is_short else (exited_average_price - average_entry_price)), 2)
+            if pnl_complete else None
+        )
         closed_record = {
             "ticker": ticker,
-            "side": "BUY",
+            "side": "SELL" if is_short else "BUY",
             "entry_client_order_id": entry.get("entry_client_order_id"),
             "stop_client_order_id": stop_client_order_id,
             "target_client_order_id": target_client_order_id,
@@ -5998,7 +6060,13 @@ def _reconcile_entry_fill_and_protection(
     # would risk re-firing the over-planned-risk alert on every single
     # monitor tick while protection keeps retrying.
     if "realized_risk_dollars" not in entry:
-        realized_risk_dollars = round(filled_quantity * (limit_price - stop_price), 2)
+        # direction="short" has its stop ABOVE limit_price (a rise is the
+        # loss, not a fall) - (limit_price - stop_price) would come out
+        # negative there, so the subtraction is mirrored to stay a
+        # positive dollars-at-risk figure either way.
+        realized_risk_dollars = round(
+            filled_quantity * ((stop_price - limit_price) if entry.get("direction") == "short" else (limit_price - stop_price)), 2
+        )
         entry["realized_risk_dollars"] = realized_risk_dollars
         planned_risk_dollars = entry.get("planned_risk_dollars")
         if isinstance(planned_risk_dollars, (int, float)) and realized_risk_dollars > planned_risk_dollars + 0.01:
@@ -7329,7 +7397,25 @@ def _check_position_absent_while_stuck(
     resolution - never an automatic guess at what happened.
 
     Returns True if the entry is (now, or already) flagged - the caller
-    uses this to skip the normal resize/confirm attempt this pass."""
+    uses this to skip the normal resize/confirm attempt this pass.
+
+    Deliberately does NOT run this check for direction="short" entries
+    yet (2026-09-02) - live_quantity > 0 below assumes the long-only sign
+    convention this app has always observed (a held position reads as a
+    positive quantity). Whether Webull represents a SHORT position as a
+    negative quantity, a positive quantity with a separate side field, or
+    something else has never been empirically observed - the exact same
+    unconfirmed-schema concern an explicit prior reviewer instruction
+    already disabled automatic short-covering over (see
+    _reconcile_both_legs_filled_emergency's own docstring). Misreading
+    that sign here could flag a genuinely still-open short as absent, or
+    vice versa - so this returns False (inconclusive, not evidence either
+    way) for a short until that schema is confirmed via a controlled,
+    human-approved sandbox observation, matching this app's own
+    established discipline of never building on unverified broker
+    behavior."""
+    if entry.get("direction") == "short":
+        return False
     if entry.get("position_absent_unexplained"):
         return True
     try:

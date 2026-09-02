@@ -68,7 +68,7 @@ class _StatefulBroker:
         if client_order_id in self.legs:
             self.legs[client_order_id]["status"] = "CANCELLED"
 
-    def place_stop_loss_order(self, *, app_key, app_secret, account_id, symbol, quantity, stop_price, client_order_id):
+    def place_stop_loss_order(self, *, app_key, app_secret, account_id, symbol, quantity, stop_price, client_order_id, side="SELL"):
         self.place_stop_calls.append(client_order_id)
         self.legs[client_order_id] = {"status": "SUBMITTED", "total_quantity": quantity, "filled_quantity": 0}
         return {"client_order_id": client_order_id}

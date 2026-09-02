@@ -358,7 +358,30 @@ def test_stop_price_none_fails_closed():
 def test_quantity_zero_for_zero_stop():
     result = pluto_app._compute_position_quantity(risk_budget=100.0, entry_price=50.0, stop_price=0, available_buying_power=100000, broker_buying_power=10_000_000.0)
     assert result["quantity"] == 0
-    assert result["reason"] == "no valid stop below entry price to size risk against"
+    assert result["reason"] == "no valid stop price to size risk against"
+
+
+def test_quantity_direction_short_requires_stop_above_entry():
+    # A stop BELOW entry (a valid LONG stop) is invalid for a short - the
+    # mirror-image validation direction="short" adds.
+    result = pluto_app._compute_position_quantity(
+        risk_budget=100.0, entry_price=50.0, stop_price=45.0,
+        available_buying_power=100000, broker_buying_power=10_000_000.0, direction="short",
+    )
+    assert result["quantity"] == 0
+    assert result["reason"] == "no valid stop above entry price to size risk against"
+
+
+def test_quantity_direction_short_sizes_correctly_with_a_valid_stop_above_entry():
+    # entry 50, stop 55 -> risk_per_share = 5 (positive, not -5) - a $100
+    # risk budget should size exactly 20 shares, same as the long-side
+    # mirror (entry 50, stop 45) would.
+    result = pluto_app._compute_position_quantity(
+        risk_budget=100.0, entry_price=50.0, stop_price=55.0,
+        available_buying_power=100000, broker_buying_power=10_000_000.0, direction="short",
+    )
+    assert result["quantity"] == 20
+    assert result["reason"] == ""
 
 
 def test_quantity_zero_for_stop_at_or_above_entry():
