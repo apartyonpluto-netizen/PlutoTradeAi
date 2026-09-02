@@ -993,6 +993,33 @@ def api_admin_list_stuck_monitor_entries():
     return _api_success({"stuck": stuck}, ok=True, stuck=stuck)
 
 
+@app.route("/api/admin/diagnostic/sandbox-accounts", methods=["GET"])
+def api_admin_diagnostic_sandbox_accounts():
+    """Read-only: the RAW list of every Webull sandbox account these API
+    credentials expose, not just the single INDIVIDUAL_CASH one
+    find_individual_cash_account picks out for every real trading code
+    path in this app. Built to answer a real question live (2026-09-01):
+    the entire autonomous PUT/short-entry path is blocked by
+    OPENAPI_GENERATE_NEW_SHORT_POSITION because that one account's
+    account_class is INDIVIDUAL_CASH - but that says nothing about
+    whether these SAME credentials also expose a second, margin-class
+    sandbox account this app has simply never looked at (every call site
+    filters straight to the cash one). Small and permanent, matching
+    order-detail's own precedent, rather than a one-off temporary
+    diagnostic - "what accounts do these credentials actually have" is a
+    reasonable thing to want to check again later."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    target_user_id = str(request.args.get("user_id", "") or _current_user_id())
+    creds = get_webull_credentials(target_user_id)
+    try:
+        accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
+    except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than crash
+        return _api_failure(f"get_paper_accounts failed: {error}", status_code=502, error_code="broker_error", ok=False)
+    return _api_success({"accounts": accounts, "count": len(accounts)}, ok=True)
+
+
 @app.route("/api/admin/diagnostic/order-detail", methods=["GET"])
 def api_admin_diagnostic_order_detail():
     """Read-only: the broker's own CURRENT, LIVE answer for one specific
