@@ -1033,6 +1033,62 @@ def api_admin_diagnostic_sandbox_accounts():
     return _api_success({"accounts": accounts, "count": len(accounts)}, ok=True)
 
 
+@app.route("/api/admin/diagnostic/preview-short-sell", methods=["POST"])
+def api_admin_diagnostic_preview_short_sell():
+    """TEMPORARY - remove once real short selling on the INDIVIDUAL_MARGIN
+    sandbox account is either verified and adopted for real, or ruled
+    out (same removal condition as the earlier combo-order diagnostic,
+    d5c3c1a/38a0c8b).
+
+    Found live 2026-09-01: these sandbox credentials expose a second,
+    INDIVIDUAL_MARGIN account (see /api/admin/diagnostic/sandbox-accounts,
+    3bcb336/40f9fe7) with real (paper) buying power, alongside the
+    INDIVIDUAL_CASH one every real trading code path uses today - the one
+    whose account_class rejected a short-generating order outright with
+    OPENAPI_GENERATE_NEW_SHORT_POSITION. Before building the real
+    entry/stop/target/monitor/P&L machinery a genuine PUT/short feature
+    needs, this answers ONE narrow question with real broker evidence
+    instead of an assumption: does Webull's own preview_order endpoint
+    (validates the exact request shape and returns accept/reject like a
+    real placement would, but never executes an order or touches
+    capital - same mechanism already used once this session to rule out
+    combo/bracket orders) accept a SELL order for a ticker with no
+    existing long position, against the MARGIN account specifically.
+
+    Body: {"symbol": "AAPL", "quantity": 1, "limit_price": 100.0}
+    (all optional - sane small defaults below) and optional
+    "account_id"/"user_id" overrides for testing against a specific
+    account/user other than the live margin account discovered above."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    target_user_id = str(payload.get("user_id", "") or _current_user_id())
+    creds = get_webull_credentials(target_user_id)
+    account_id = str(payload.get("account_id", "") or "")
+    if not account_id:
+        try:
+            accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
+        except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than crash
+            return _api_failure(f"get_paper_accounts failed: {error}", status_code=502, error_code="broker_error", ok=False)
+        margin_account = next((a for a in accounts if a.get("account_class") == "INDIVIDUAL_MARGIN"), None)
+        if not margin_account:
+            return _api_failure("No INDIVIDUAL_MARGIN account found on this user's sandbox credentials.", status_code=404, error_code="not_found", ok=False)
+        account_id = margin_account["account_id"]
+
+    symbol = str(payload.get("symbol", "AAPL") or "AAPL")
+    quantity = float(payload.get("quantity", 1) or 1)
+    limit_price = float(payload.get("limit_price", 100.0) or 100.0)
+    try:
+        result = webull_api.preview_stock_order(
+            creds["app_key"], creds["app_secret"], account_id,
+            symbol=symbol, side="SELL", quantity=quantity, limit_price=limit_price,
+        )
+    except Exception as error:  # noqa: BLE001 - diagnostic-only, the whole point is seeing what the broker actually said
+        return _api_success({"classification": "rejected_or_errored", "detail": str(error), "account_id": account_id}, ok=True)
+    return _api_success({"classification": "accepted", "raw": result, "account_id": account_id}, ok=True)
+
+
 @app.route("/api/admin/diagnostic/order-detail", methods=["GET"])
 def api_admin_diagnostic_order_detail():
     """Read-only: the broker's own CURRENT, LIVE answer for one specific
