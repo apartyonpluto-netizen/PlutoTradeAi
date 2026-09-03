@@ -7866,8 +7866,30 @@ def _monitor_transitional_orders(user_id: str, creds: Dict[str, str], account_id
             continue
 
         changed = True
-        progressed = order.get("lifecycle_state") != state_before
-        _record_monitor_attempt(order, progressed=progressed, error=None, now_iso=now_iso)
+        # Reaching here means the whole try block above completed WITHOUT
+        # raising - a real, fresh, successful check against the broker
+        # this tick, whether or not the lifecycle_state LABEL happened to
+        # change. That distinction matters: found live 2026-09-03, the
+        # previous definition (progressed = lifecycle_state != state_before)
+        # meant ANY perfectly healthy, actively-protected position with
+        # nothing new to report - the overwhelmingly common case for a
+        # normal trade sitting at its stop/target for a while - was marked
+        # "no progress" on EVERY SINGLE TICK, forever, since a stable state
+        # never "changes". After MONITOR_STUCK_FREEZE_SECONDS (30 min) that
+        # silently tripped the SAME account-wide freeze meant for genuinely
+        # uncertain entries, blocking new autonomous entries over a
+        # position that was never actually wrong - exactly what happened
+        # to a real ADBE position. The function this feeds
+        # (_has_stuck_transitional_orders_locally) documents its own intent
+        # as "safe recovery cannot be proven" - a real, RAISED exception
+        # (network/broker failure, an unresolved resize, ambiguous
+        # evidence - still caught above and still marked progressed=False)
+        # is genuine uncertainty; a clean, successful re-verification that
+        # a position is still fine, or a clean flag-and-alert for a human
+        # to review (_check_position_absent_while_stuck reaching its own
+        # short-circuit) is not - both are proof this app DID just confirm
+        # reality, not evidence it can't.
+        _record_monitor_attempt(order, progressed=True, error=None, now_iso=now_iso)
         _alert_if_entry_newly_stuck(user_id, order)
 
     if changed:

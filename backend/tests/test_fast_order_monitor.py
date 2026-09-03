@@ -213,9 +213,26 @@ def test_malformed_broker_response_fails_closed_without_advancing_or_protecting(
     result) must not be misread as any real status. summarize_fill falls
     back to status "UNKNOWN" for this shape, which _entry_fill_is_final
     correctly does NOT treat as terminal - so this must leave the entry
-    exactly where it was (no fill advance, no placement attempt) and be
-    picked up by the monitor's own failed-attempt tracking, not silently
-    treated as a normal "nothing happened yet" tick."""
+    exactly where it was (no fill advance, no placement attempt).
+
+    Updated 2026-09-03: no longer asserts this starts the stuck timer.
+    Found live the same day: the OLD progressed definition
+    (lifecycle_state != state_before) meant this case only "failed
+    closed" onto the stuck timer by ACCIDENT of the state label never
+    changing - the exact same accidental mechanism that silently froze
+    the account over a perfectly healthy, unchanged, actively-protected
+    real position (ADBE) after 30 minutes of nothing being wrong. There
+    was never a real, deliberate distinction anywhere in this code
+    between "a malformed/not-yet-visible response" and "a genuinely
+    still-resting, confirmed-pending order" - both hit the exact same
+    code path in _reconcile_entry_fill_and_protection. summarize_fill's
+    OWN docstring is explicit that this is deliberate: "a not-yet-visible
+    order is a normal transient state for a monitor poll, not an error."
+    progressed is now True whenever this whole pass completes without
+    raising - matching that same stated philosophy - and only a genuine
+    exception (a real broker/network failure, an unresolved resize, or
+    truly ambiguous evidence) still starts the stuck timer, exactly as
+    it already did before this change."""
     entry = _transitional_entry(ol.ENTRY_SUBMITTED)
     record_overnight_order(user_id, entry)
     with patch.object(pluto_app.webull_api, "get_order_detail", return_value={"malformed": "no orders key"}), \
@@ -227,11 +244,9 @@ def test_malformed_broker_response_fails_closed_without_advancing_or_protecting(
     stored = list_overnight_orders(user_id)[0]
     assert stored["lifecycle_state"] == ol.ENTRY_SUBMITTED  # not falsely advanced
     assert stored.get("filled_quantity") in (None, 0, 0.0)
-    # Counted as a no-progress attempt (not a raised error, just an
-    # inconclusive read) - still starts the stuck timer, same as any other
-    # stall, rather than being silently treated as a fully normal tick.
-    assert stored.get("monitor_first_failure_at")
-    assert stored.get("monitor_attempt_count") == 1
+    # A clean pass (no raised exception) - does NOT start the stuck timer.
+    assert not stored.get("monitor_first_failure_at")
+    assert stored.get("monitor_attempt_count") in (None, 0)
     assert stored["monitor_last_attempt_at"]
 
 
@@ -339,6 +354,36 @@ def test_monitor_clears_stuck_since_once_progress_resumes(user_id):
     stored = list_overnight_orders(user_id)[0]
     assert stored["lifecycle_state"] == ol.PROTECTION_CONFIRMED_ACTIVE
     assert stored.get("monitor_first_failure_at") is None
+
+
+def test_a_healthy_unchanged_active_position_never_accumulates_stuck_time(user_id):
+    # Found live 2026-09-03: a real, perfectly healthy ADBE position (stop
+    # resting, nothing exited, nothing wrong at all) silently accumulated
+    # "no forward progress" on EVERY tick under the OLD progressed
+    # definition (lifecycle_state != state_before) simply because a
+    # stable, healthy position's state label never changes tick to tick -
+    # after 30 minutes this tripped the SAME account-wide freeze meant for
+    # genuinely broken entries. This proves the fix across THREE
+    # consecutive monitor ticks with nothing changing: the stuck timer
+    # must never start at all for a position this healthy.
+    entry = _transitional_entry(ol.PROTECTION_CONFIRMED_ACTIVE)
+    record_overnight_order(user_id, entry)
+
+    def _get_detail(app_key, app_secret, account_id, client_order_id):
+        # Both the stop and (legacy) target legs read as genuinely still
+        # resting/active - nothing has exited.
+        return _order_detail("SUBMITTED", 10, 0)
+
+    with patch.object(pluto_app.webull_api, "get_order_detail", side_effect=_get_detail), \
+         patch.object(pluto_app.webull_api, "get_account_positions", return_value=[{"symbol": "AAPL", "quantity": "10"}]), \
+         patch.object(pluto_app.alpaca_data, "get_latest_trade_price", return_value=None), \
+         patch.object(pluto_app, "time"), patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"):
+        for _ in range(3):
+            pluto_app._monitor_transitional_orders(user_id, CREDS, ACCOUNT_ID)
+            stored = list_overnight_orders(user_id)[0]
+            assert stored["lifecycle_state"] == ol.PROTECTION_CONFIRMED_ACTIVE
+            assert stored.get("monitor_first_failure_at") is None
+            assert stored.get("monitor_attempt_count") in (None, 0)
 
 
 # --- stuck-transitional-order freeze -----------------------------------------
