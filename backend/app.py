@@ -5976,6 +5976,126 @@ def _restore_fallback_stop_after_failed_target_exit(
     return None
 
 
+def _check_and_rearm_dead_stop(
+    user_id: str,
+    creds: Dict[str, str],
+    account_id: str,
+    ticker: str,
+    trading_day: str,
+    entry: Dict[str, object],
+) -> bool:
+    """Closes a real, live gap confirmed empirically 2026-09-03: a resting
+    STOP_LOSS order's time_in_force is "DAY" (integrations/webull.py,
+    every order type), and while it was confirmed still SUBMITTED
+    immediately AT today's market close, a follow-up check about an hour
+    later found it had gone CANCELLED - Webull DOES eventually cancel a
+    DAY-TIF stop-loss order, just not instantly at the close boundary.
+
+    The gap this closes: once an entry reaches PROTECTION_CONFIRMED_ACTIVE
+    with entry_order_terminal=True (a normal, fully-filled, healthy
+    position - true for the overwhelming majority of held positions),
+    _reconcile_entry_fill_and_protection - the ONLY function that already
+    knows how to detect a dead stop and place a fresh one
+    (_confirm_and_finalize_protection's stop_confirmed_dead handling) - is
+    never called again (see its own docstring: it only re-runs for
+    further FILL growth). _reconcile_position_exit only ever looks for a
+    genuine FILL on the stop/target legs, never for "the stop order itself
+    is simply gone with nothing having triggered it." A position could
+    therefore sit genuinely unprotected, indefinitely, with nothing
+    noticing - this function is the fix: called from
+    _monitor_transitional_orders for exactly this state (PROTECTION_CONFIRMED_ACTIVE,
+    entry_order_terminal=True, no exit found this pass).
+
+    Deliberately narrower than the general protective-leg machinery:
+      - Skips direction="short" entries - Webull's short-position sign
+        convention in get_account_positions has never been empirically
+        confirmed, same reason _check_position_absent_while_stuck already
+        excludes shorts.
+      - Only acts when the stop is confirmed CANCELLED/FAILED with ZERO
+        fill (a genuine fill is a real exit, not this function's job -
+        _reconcile_position_exit's own passive-fill path handles that) AND
+        the broker's live position for this ticker is still > 0 shares (if
+        the position is genuinely gone too, this is a position-absent
+        case, not a rearm - _check_position_absent_while_active is the
+        right handler, not this one).
+      - Requires CORE trading hours to place the replacement (same
+        constraint place_stop_loss_order/_reconcile_exit_orders already
+        work around) - returns False and simply retries on a later tick
+        outside CORE hours, exactly like _reconcile_exit_orders' own
+        outside-hours stop retry.
+
+    Returns True once a fresh stop is confirmed placed (or nothing needed
+    doing - the stop is still genuinely resting); raises if the position
+    is confirmed naked and a replacement placement attempt itself fails,
+    so the caller's own failed-attempt tracking applies on top and this
+    keeps retrying every subsequent tick rather than going silent."""
+    stop_client_order_id = entry.get("stop_client_order_id")
+    if not stop_client_order_id or entry.get("direction") == "short":
+        return False
+
+    try:
+        stop_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, stop_client_order_id)
+        stop_fill = ol.summarize_fill(stop_detail)
+    except Exception:  # noqa: BLE001 - transient lookup failure, try again next tick
+        return False
+
+    if stop_fill["filled_quantity"] > 0 or _protective_leg_is_active(stop_fill["status"]):
+        return False  # a genuine fill (real exit, handled elsewhere) or still genuinely resting - nothing to rearm
+
+    try:
+        positions = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
+    except Exception:  # noqa: BLE001 - transient lookup failure, try again next tick
+        return False
+    position = next((p for p in positions if str(p.get("symbol", "")).upper() == ticker.upper()), None)
+    live_quantity = float(position.get("quantity", 0) or 0) if position else 0.0
+    if live_quantity <= 0:
+        return False  # position is also gone - a position-absent case, not this function's job
+
+    if _current_webull_trading_session() != "CORE":
+        return False  # can't place a stop outside CORE hours - retry next tick, same as _reconcile_exit_orders' own outside-hours retry
+
+    stop_price = float(entry.get("stop") or 0)
+    if stop_price <= 0:
+        return False
+
+    next_attempt = int(entry.get("stop_rearm_attempt") or 0) + 1
+    entry["stop_rearm_attempt"] = next_attempt
+    new_stop_id = ol.deterministic_client_order_id(user_id, ticker, trading_day, "stop_rearm", attempt=next_attempt)
+    try:
+        webull_api.place_stop_loss_order(
+            app_key=creds["app_key"], app_secret=creds["app_secret"], account_id=account_id,
+            symbol=ticker, quantity=live_quantity, stop_price=stop_price,
+            client_order_id=new_stop_id,
+        )
+    except Exception as error:  # noqa: BLE001
+        raise RuntimeError(
+            f"{ticker}: protective stop went {stop_fill['status']} while {live_quantity:g} shares are still held, "
+            f"AND re-arming a fresh stop also failed - position is genuinely UNPROTECTED right now: {error}"
+        ) from error
+
+    entry["stop_client_order_id"] = new_stop_id
+    entry["stop_leg_quantity"] = live_quantity
+    entry["stop_rearmed_at"] = _now_utc().isoformat()
+    entry["stop_rearm_reason"] = f"previous stop showed {stop_fill['status']} with zero fill while {live_quantity:g} shares were still held"
+    try:
+        add_manual_alert(
+            user_id,
+            {
+                "type": "stop_rearmed",
+                "ticker": ticker,
+                "priority": "critical",
+                "message": (
+                    f"{ticker}: the protective stop had gone {stop_fill['status']} (likely a DAY-TIF expiration) "
+                    f"while {live_quantity:g} shares were still held - a fresh stop was just placed at ${stop_price:.2f} "
+                    "to close the gap automatically. Review the position to confirm it looks right."
+                ),
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
 def _reconcile_position_exit(
     user_id: str,
     creds: Dict[str, str],
@@ -8497,6 +8617,16 @@ def _monitor_transitional_orders(user_id: str, creds: Dict[str, str], account_id
                         trading_day=trading_day,
                         entry=order,
                     )
+                elif not exited and order.get("entry_order_terminal"):
+                    # Entry is fully filled and broker-terminal, so
+                    # _reconcile_entry_fill_and_protection above is never
+                    # called again for this entry (see its own docstring) -
+                    # this is the ONLY remaining check for "did the
+                    # resting stop leg silently go dead while the position
+                    # is still held" (see _check_and_rearm_dead_stop's own
+                    # docstring for the real gap this closes, confirmed
+                    # live 2026-09-03).
+                    _check_and_rearm_dead_stop(user_id, creds, account_id, ticker, trading_day, order)
             elif state_before == ol.PROTECTION_FAILED and _check_position_absent_while_stuck(user_id, creds, account_id, ticker, order):
                 pass  # flagged position_absent_unexplained this pass or already - skip the pointless resize attempt, see the function's own docstring
             else:
