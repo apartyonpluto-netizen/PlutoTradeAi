@@ -1132,6 +1132,86 @@ def api_admin_diagnostic_preview_raw_order():
     return _api_success({"classification": "accepted", "raw": result, "account_id": account_id}, ok=True)
 
 
+@app.route("/api/admin/diagnostic/option-contracts", methods=["GET"])
+def api_admin_diagnostic_option_contracts():
+    """Read-only, permanent (same precedent as sandbox-accounts above -
+    "what option contracts does the broker actually list for this ticker"
+    is a reasonable thing to want to check again later, not a one-off).
+    Built 2026-09-03 as the first empirical step of real options trading:
+    confirms the REAL response shape of Webull's own option chain
+    (DataClient.instrument.get_option_contracts) against the sandbox before
+    any contract-selection logic is written to assume particular field
+    names exist.
+
+    Query params: ticker (required), option_type (CALL/PUT, optional),
+    days_out (expiration window upper bound, default 21), user_id
+    (optional, defaults to the caller)."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    ticker = str(request.args.get("ticker", "") or "").strip().upper()
+    if not ticker:
+        return _api_failure("ticker is required.", status_code=400, error_code="invalid_request", ok=False)
+    option_type = str(request.args.get("option_type", "") or "").strip().upper() or None
+    try:
+        days_out = int(request.args.get("days_out", 21))
+    except (TypeError, ValueError):
+        days_out = 21
+    target_user_id = str(request.args.get("user_id", "") or _current_user_id())
+    creds = get_webull_credentials(target_user_id)
+    start_date = _now_utc().date().isoformat()
+    end_date = (_now_utc().date() + timedelta(days=days_out)).isoformat()
+    try:
+        contracts = webull_api.get_option_contracts(
+            creds["app_key"], creds["app_secret"], ticker,
+            option_type=option_type, start_date=start_date, end_date=end_date,
+        )
+    except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than crash
+        return _api_failure(f"get_option_contracts failed: {error}", status_code=502, error_code="broker_error", ok=False)
+    return _api_success({"ticker": ticker, "start_date": start_date, "end_date": end_date, "contracts": contracts, "count": len(contracts)}, ok=True)
+
+
+@app.route("/api/admin/diagnostic/preview-raw-option-order", methods=["POST"])
+def api_admin_diagnostic_preview_raw_option_order():
+    """TEMPORARY - remove once every order shape real options trading
+    needs (BUY_TO_OPEN a call, BUY_TO_OPEN a put, SELL_TO_CLOSE either) has
+    been verified and adopted into real placement code, or ruled out - same
+    removal condition and same dry-run-only guarantee as
+    preview-raw-order above, calling webull_api.preview_raw_option_order
+    (order_v2.preview_option) instead of preview_order.
+
+    Body: {"order": {...}} - the raw order dict (including its own "legs")
+    to preview. account_id/user_id resolve the margin account the same way
+    preview-raw-order does, unless "account_id" is given directly - the
+    margin account is the one carrying option_buying_power (confirmed live
+    via /api/admin/diagnostic/sandbox-accounts)."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    order = payload.get("order")
+    if not isinstance(order, dict) or not order:
+        return _api_failure("order (a non-empty object) is required.", status_code=400, error_code="invalid_request", ok=False)
+    target_user_id = str(payload.get("user_id", "") or _current_user_id())
+    creds = get_webull_credentials(target_user_id)
+    account_id = str(payload.get("account_id", "") or "")
+    if not account_id:
+        try:
+            accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
+        except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than crash
+            return _api_failure(f"get_paper_accounts failed: {error}", status_code=502, error_code="broker_error", ok=False)
+        margin_account = next((a for a in accounts if a.get("account_class") == "INDIVIDUAL_MARGIN"), None)
+        if not margin_account:
+            return _api_failure("No INDIVIDUAL_MARGIN account found on this user's sandbox credentials.", status_code=404, error_code="not_found", ok=False)
+        account_id = margin_account["account_id"]
+
+    try:
+        result = webull_api.preview_raw_option_order(creds["app_key"], creds["app_secret"], account_id, order)
+    except Exception as error:  # noqa: BLE001 - diagnostic-only, the whole point is seeing what the broker actually said
+        return _api_success({"classification": "rejected_or_errored", "detail": str(error), "account_id": account_id}, ok=True)
+    return _api_success({"classification": "accepted", "raw": result, "account_id": account_id}, ok=True)
+
+
 @app.route("/api/admin/diagnostic/capital-snapshot", methods=["GET"])
 def api_admin_diagnostic_capital_snapshot():
     """Read-only: the three individual broker calls _build_capital_snapshot

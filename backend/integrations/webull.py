@@ -131,6 +131,45 @@ def _get_trade_client(app_key: str, app_secret: str):
         return trade_client
 
 
+_data_client_cache: Dict[Tuple[str, str], Any] = {}
+_data_client_cache_lock = threading.Lock()
+
+
+def _get_data_client(app_key: str, app_secret: str):
+    """Mirrors _get_trade_client exactly (same ApiClient/sandbox-endpoint/
+    per-credential caching discipline - see its own comment for why), but
+    builds a webull.data.data_client.DataClient instead of a TradeClient.
+    Added 2026-09-03 for options contract/quote lookups - the trading
+    functions in this module (place_stock_order and friends) never needed
+    market-data reads before now, only the trade-execution client."""
+    app_key = (app_key or "").strip()
+    app_secret = (app_secret or "").strip()
+    if not app_key or not app_secret:
+        raise ValueError("Webull API credentials are not configured for this account.")
+
+    cache_key = (app_key, app_secret)
+    cached_client = _data_client_cache.get(cache_key)
+    if cached_client is not None:
+        return cached_client
+
+    with _data_client_cache_lock:
+        cached_client = _data_client_cache.get(cache_key)
+        if cached_client is not None:
+            return cached_client
+
+        from webull.core.client import ApiClient
+        from webull.data.data_client import DataClient
+
+        _redact_webull_sdk_logging()
+        api_client = ApiClient(app_key, app_secret, _REGION_ID)
+        api_client._stream_logger_set = True
+        api_client._file_logger_set = True
+        api_client.add_endpoint(_REGION_ID, _SANDBOX_ENDPOINT)
+        data_client = DataClient(api_client)
+        _data_client_cache[cache_key] = data_client
+        return data_client
+
+
 def _call_with_429_retry(action_label: str, call):
     """Retries a read-only Webull API call up to 3 times on a 429
     (rate-limited) response, matching the backoff _place_order_with_retry
@@ -279,6 +318,71 @@ def get_account_positions(app_key: str, app_secret: str, account_id: str) -> Lis
         raise ValueError(f"Webull API error (positions): HTTP {response.status_code}")
     positions = response.json()
     return positions if isinstance(positions, list) else []
+
+
+def get_option_contracts(
+    app_key: str,
+    app_secret: str,
+    underlying_symbol: str,
+    option_type: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    strike_price_gte: Optional[float] = None,
+    strike_price_lte: Optional[float] = None,
+    page_size: int = 50,
+) -> List[Dict[str, Any]]:
+    """Real, live option chain from Webull's own market data (DataClient.
+    instrument.get_option_contracts) - not the Yahoo-sourced data
+    options/options_brain.py uses for its research-only display. option_type
+    is "CALL" or "PUT"; start_date/end_date bound the expiration window
+    (YYYY-MM-DD); strike_price_gte/lte bound the strike range. Only LISTING
+    (currently tradeable) contracts are returned. Response field names are
+    whatever Webull's real payload uses - added 2026-09-03 alongside the
+    options-trading diagnostic routes specifically so those shapes get
+    confirmed empirically before any code here assumes a particular key
+    exists, matching this module's established discipline (see
+    _extract_orders_page's combo-wrapper fix and preview_raw_order for two
+    prior examples of a documented vs. real shape mismatch caught this way)."""
+    data_client = _get_data_client(app_key, app_secret)
+    response = _call_with_429_retry(
+        "option contracts",
+        lambda: data_client.instrument.get_option_contracts(
+            underlying_symbols=underlying_symbol,
+            status="LISTING",
+            start_date=start_date,
+            end_date=end_date,
+            option_type=option_type,
+            strike_price_gte=strike_price_gte,
+            strike_price_lte=strike_price_lte,
+            page_size=page_size,
+        ),
+    )
+    if response.status_code != 200:
+        raise ValueError(f"Webull API error (option contracts): HTTP {response.status_code}")
+    payload = response.json()
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        contracts = payload.get("data") or payload.get("contracts") or payload.get("instruments")
+        if isinstance(contracts, list):
+            return contracts
+    return []
+
+
+def get_option_snapshot(app_key: str, app_secret: str, option_symbols: List[str]) -> Dict[str, Any]:
+    """Live bid/ask/last for one or more option contract symbols (e.g.
+    "AAPL250620C00150000"), via DataClient.option_market_data.
+    get_option_snapshot. Up to 20 symbols per call (Webull SDK limit)."""
+    if not option_symbols:
+        return {}
+    data_client = _get_data_client(app_key, app_secret)
+    response = _call_with_429_retry(
+        "option snapshot",
+        lambda: data_client.option_market_data.get_option_snapshot(",".join(option_symbols), category="US_OPTION"),
+    )
+    if response.status_code != 200:
+        raise ValueError(f"Webull API error (option snapshot): HTTP {response.status_code}")
+    return response.json()
 
 
 # Webull's client (webull.core.client.Client.get_response) raises a
@@ -759,6 +863,32 @@ def preview_raw_order(app_key: str, app_secret: str, account_id: str, order: Dic
     response = trade_client.order_v2.preview_order(account_id, [order])
     if response.status_code != 200:
         raise ValueError(f"Webull API error (preview order): HTTP {response.status_code} {response.text}")
+    return response.json()
+
+
+def preview_raw_option_order(app_key: str, app_secret: str, account_id: str, order: Dict[str, Any]) -> Dict[str, Any]:
+    """TEMPORARY diagnostic helper (2026-09-03) - same purpose and same
+    zero-capital-at-risk guarantee as preview_raw_order above, but calls
+    order_v2.preview_option instead of preview_order. The real options
+    OrderOperationV2.place_option/preview_option (installed SDK, webull/
+    trade/trade/v2/order_operation_v2.py) shows new_orders is a list and
+    each order's legs (a list) carries instrument_type="OPTION" - but the
+    exact field names WITHIN a leg (how the specific contract, side,
+    quantity, and order type are expressed) are not confirmed from reading
+    the SDK/request classes alone, since ApiRequest.add_body_params passes
+    the caller's dict straight through with no schema of its own. This
+    function accepts a completely caller-constructed order dict (including
+    its own "legs") so real shapes can be discovered against the sandbox
+    exactly like the short-selling order shapes were - via the broker's own
+    error messages on a dry-run preview, not by guessing. Remove once every
+    order shape real options trading needs (BUY_TO_OPEN a call, BUY_TO_OPEN
+    a put, SELL_TO_CLOSE either) has been verified and adopted into real
+    placement code, or ruled out."""
+    trade_client = _get_trade_client(app_key, app_secret)
+    order = {**order, "combo_type": order.get("combo_type", "NORMAL"), "client_order_id": order.get("client_order_id") or uuid.uuid4().hex}
+    response = trade_client.order_v2.preview_option(account_id, [order])
+    if response.status_code != 200:
+        raise ValueError(f"Webull API error (preview option order): HTTP {response.status_code} {response.text}")
     return response.json()
 
 
