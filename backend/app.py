@@ -8416,7 +8416,24 @@ def _monitor_transitional_orders(user_id: str, creds: Dict[str, str], account_id
     genuinely does not exist there. An order with no account_id at all
     (a legacy/test record from before this field was always stamped) is
     processed regardless - matching the original, single-account
-    behavior exactly for anything that predates this distinction."""
+    behavior exactly for anything that predates this distinction.
+
+    instrument_type-aware since 2026-09-03 (real options trading): an
+    "OPTION" entry (order.get("instrument_type") == "OPTION" - absent/
+    "EQUITY" for every entry that predates this field, so this is a pure
+    addition) routes to _check_and_execute_option_exit (from
+    PROTECTION_CONFIRMED_ACTIVE) or _reconcile_option_entry_fill
+    (everywhere else) instead of the equity-only functions. Known,
+    documented gap matching this session's own short-selling precedent
+    (orphan discovery/ambiguous-submission recovery not yet extended to
+    margin): an option position closed OUTSIDE this app (manually, at the
+    broker) is not yet detected here the way
+    _check_position_absent_while_active/_stuck detect it for equity -
+    get_account_positions' real response shape for an OPTION row has not
+    been empirically confirmed. The failure mode is still safe, not
+    silent: a stale entry's exit attempt would simply be rejected by the
+    broker (nothing to sell) and surface as a normal monitor error via
+    _record_monitor_attempt, not lost."""
     orders = [
         order for order in list_overnight_orders(user_id)
         if not order.get("account_id") or order.get("account_id") == account_id
@@ -8437,8 +8454,14 @@ def _monitor_transitional_orders(user_id: str, creds: Dict[str, str], account_id
             continue
 
         state_before = order.get("lifecycle_state")
+        is_option = order.get("instrument_type") == "OPTION"
         try:
-            if state_before == ol.PROTECTION_CONFIRMED_ACTIVE:
+            if is_option:
+                if state_before == ol.PROTECTION_CONFIRMED_ACTIVE:
+                    _check_and_execute_option_exit(user_id, creds, account_id, ticker, trading_day, order)
+                else:
+                    _reconcile_option_entry_fill(user_id, creds, account_id, str(entry_client_order_id), order)
+            elif state_before == ol.PROTECTION_CONFIRMED_ACTIVE:
                 exited = _reconcile_position_exit(user_id, creds, account_id, ticker, trading_day, order)
                 if not exited and not order.get("entry_order_terminal"):
                     _reconcile_entry_fill_and_protection(

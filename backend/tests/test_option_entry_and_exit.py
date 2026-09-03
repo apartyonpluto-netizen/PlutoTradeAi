@@ -7,6 +7,7 @@ import app as pluto_app
 import order_lifecycle as ol
 from autonomy import autonomous_controller as controller
 from autonomy.closed_trades import list_closed_trades
+from autonomy.overnight_orders import list_overnight_orders, record_overnight_order
 
 """Real options entry/exit lifecycle (2026-09-03) - _submit_and_confirm_option_entry/
 _reconcile_option_entry_fill/_check_and_execute_option_exit. Mirrors
@@ -215,3 +216,40 @@ def test_option_exit_thresholds_are_read_from_the_users_real_risk_settings(user_
     assert result is True
     record = list_closed_trades(user_id)[0]
     assert record["exit_type"] == "option_target_reached"
+
+
+# --- Monitor wiring: instrument_type routes to the right functions ----------
+
+
+def test_monitor_routes_a_protection_confirmed_active_option_entry_to_the_option_exit_check(user_id):
+    entry = _active_option_entry("opt-entry-monitor-a")
+    record_overnight_order(user_id, entry)
+    with patch.object(pluto_app, "_check_and_execute_option_exit") as mock_option_exit, \
+         patch.object(pluto_app, "_reconcile_position_exit") as mock_equity_exit, \
+         patch.object(pluto_app, "_reconcile_entry_fill_and_protection") as mock_equity_fill:
+        pluto_app._monitor_transitional_orders(user_id, CREDS, ACCOUNT_ID)
+    mock_option_exit.assert_called_once()
+    mock_equity_exit.assert_not_called()
+    mock_equity_fill.assert_not_called()
+
+
+def test_monitor_routes_a_submitted_option_entry_to_the_option_fill_reconciler(user_id):
+    entry: dict = {"ticker": TICKER, "instrument_type": "OPTION", "trading_day": TRADING_DAY}
+    ol.initialize(entry, ol.ENTRY_SUBMITTED, entry_client_order_id="opt-entry-monitor-b")
+    record_overnight_order(user_id, entry)
+    with patch.object(pluto_app, "_reconcile_option_entry_fill") as mock_option_fill, \
+         patch.object(pluto_app, "_reconcile_entry_fill_and_protection") as mock_equity_fill:
+        pluto_app._monitor_transitional_orders(user_id, CREDS, ACCOUNT_ID)
+    mock_option_fill.assert_called_once()
+    mock_equity_fill.assert_not_called()
+
+
+def test_monitor_still_routes_an_equity_entry_to_the_equity_functions_not_the_option_ones(user_id):
+    entry: dict = {"ticker": TICKER, "trading_day": TRADING_DAY}  # no instrument_type - every pre-2026-09-03 entry
+    ol.initialize(entry, ol.ENTRY_SUBMITTED, entry_client_order_id="eq-entry-monitor-a")
+    record_overnight_order(user_id, entry)
+    with patch.object(pluto_app, "_reconcile_entry_fill_and_protection") as mock_equity_fill, \
+         patch.object(pluto_app, "_reconcile_option_entry_fill") as mock_option_fill:
+        pluto_app._monitor_transitional_orders(user_id, CREDS, ACCOUNT_ID)
+    mock_equity_fill.assert_called_once()
+    mock_option_fill.assert_not_called()
