@@ -182,7 +182,29 @@ def _extract_orders_page(payload: Any, action_label: str) -> List[Dict[str, Any]
     wire format for the same data. The per-row validation below (dict
     shape, stable order_id) is applied identically regardless of which
     shape it came from - a bare list of garbage is rejected exactly as
-    strictly as an object-wrapped list of garbage would be."""
+    strictly as an object-wrapped list of garbage would be.
+
+    Each list ITEM is also normalized before validation - found live
+    2026-09-03: get_order_open's real response is a list of COMBO-level
+    wrapper objects ({"client_order_id", "combo_order_id", "combo_type",
+    "orders": [{"order_id": ..., "side": ..., "symbol": ..., ...}]}),
+    the SAME per-order-detail-lookup shape get_order_detail's own
+    summarize_fill already parses (leg = orders[0]) - NOT a flat list of
+    order rows the way every existing caller (and every existing test)
+    had always assumed. A real resting order (a stop leg) tripped the
+    "missing order_id" check below for weeks/months of quiet operation
+    simply because no open order had ever survived long enough to be
+    captured by a get_open_orders poll during a scan tick until then -
+    this was never a broker data-quality problem, only a parsing gap. A
+    row that already carries its OWN top-level order_id is left exactly
+    as it was (covers get_order_history, whose real wire shape has never
+    been directly observed live the way get_open_orders' now has - if
+    it's genuinely flat, this changes nothing for it); a row that
+    doesn't, but carries a nested "orders" list whose first item DOES,
+    is replaced by that nested item - the real, flat, per-leg record
+    every downstream consumer (_compute_committed_virtual_capital in
+    app.py, in particular) already expects "side"/"symbol"/
+    "total_quantity"/"filled_quantity"/"limit_price" on directly."""
     if isinstance(payload, list):
         raw_orders: Any = payload
     elif isinstance(payload, dict):
@@ -195,9 +217,19 @@ def _extract_orders_page(payload: Any, action_label: str) -> List[Dict[str, Any]
         raise ValueError(f"Webull API error ({action_label}): 'orders' field is not a list ({type(raw_orders).__name__})")
     if not all(isinstance(order, dict) for order in raw_orders):
         raise ValueError(f"Webull API error ({action_label}): one or more order rows is not a JSON object")
-    if not all(order.get("order_id") for order in raw_orders):
+
+    def _normalize(order: Dict[str, Any]) -> Dict[str, Any]:
+        if order.get("order_id"):
+            return order
+        nested = order.get("orders")
+        if isinstance(nested, list) and nested and isinstance(nested[0], dict) and nested[0].get("order_id"):
+            return nested[0]
+        return order  # unrecognized shape - left as-is, still fails the order_id check below
+
+    normalized_orders = [_normalize(order) for order in raw_orders]
+    if not all(order.get("order_id") for order in normalized_orders):
         raise ValueError(f"Webull API error ({action_label}): one or more order rows is missing a stable order_id")
-    return raw_orders
+    return normalized_orders
 
 
 def get_paper_accounts(app_key: str, app_secret: str) -> List[Dict[str, Any]]:

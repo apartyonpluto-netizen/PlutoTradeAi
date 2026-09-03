@@ -427,7 +427,9 @@ def test_get_open_orders_row_missing_order_id_fails_closed():
     # Every row must carry a stable order_id - a row missing one (anywhere
     # in the page, not just the last row) would otherwise collide with
     # every OTHER such row during de-duplication (None == None) and be
-    # silently dropped as a "duplicate" rather than counted.
+    # silently dropped as a "duplicate" rather than counted. A row with
+    # no top-level order_id AND no recognizable nested "orders" list
+    # (genuinely malformed, not just combo-wrapped) still fails closed.
     open_response = MagicMock()
     open_response.status_code = 200
     open_response.json.return_value = {"orders": [{"order_id": "a"}, {"client_order_id": "b-only"}]}
@@ -436,6 +438,62 @@ def test_get_open_orders_row_missing_order_id_fails_closed():
     with patch.object(webull_api, "_get_trade_client", return_value=client):
         with pytest.raises(ValueError, match="stable order_id"):
             webull_api.get_open_orders("key", "secret", "acct1")
+
+
+def test_get_open_orders_unwraps_the_real_combo_wrapper_shape():
+    # Found live 2026-09-03: get_order_open's real response is a list of
+    # COMBO-level wrapper objects (client_order_id/combo_order_id/
+    # combo_type at the top, the actual order fields nested one level
+    # deeper in "orders") - the SAME per-lookup shape get_order_detail's
+    # own summarize_fill already parses (leg = orders[0]), not the flat
+    # row shape every other test in this file assumes. A real resting
+    # stop leg's own actual JSON, trimmed to the fields that matter here.
+    combo_wrapped_row = {
+        "client_order_id": "pte0566903c2ddfa780c6937d4332192",
+        "combo_order_id": "H0HCD9G3VGV3FAKAJUKAV2BHAA",
+        "combo_type": "NORMAL",
+        "orders": [
+            {
+                "client_order_id": "pte0566903c2ddfa780c6937d4332192",
+                "filled_quantity": "0",
+                "instrument_type": "EQUITY",
+                "order_id": "H0HCD9G3VGV3FAKAJUKAV2BHAA",
+                "order_type": "STOP_LOSS",
+                "side": "SELL",
+                "symbol": "ADBE",
+                "total_quantity": "1",
+            }
+        ],
+    }
+    open_response = MagicMock()
+    open_response.status_code = 200
+    open_response.json.return_value = {"orders": [combo_wrapped_row]}
+    client = MagicMock()
+    client.order_v2.get_order_open.return_value = open_response
+    with patch.object(webull_api, "_get_trade_client", return_value=client):
+        result = webull_api.get_open_orders("key", "secret", "acct1")
+    assert len(result) == 1
+    # Flattened to the NESTED order dict, not the outer combo wrapper -
+    # every field a downstream consumer needs (side/symbol/total_quantity,
+    # see _compute_committed_virtual_capital in app.py) is directly
+    # accessible, not buried under another "orders" key.
+    assert result[0]["order_id"] == "H0HCD9G3VGV3FAKAJUKAV2BHAA"
+    assert result[0]["side"] == "SELL"
+    assert result[0]["symbol"] == "ADBE"
+    assert result[0]["total_quantity"] == "1"
+
+
+def test_get_open_orders_a_row_with_its_own_top_level_order_id_is_left_alone():
+    # If get_order_open ever DOES send a genuinely flat row (order_id
+    # already at the top level), it must not be needlessly transformed.
+    open_response = MagicMock()
+    open_response.status_code = 200
+    open_response.json.return_value = {"orders": [{"order_id": "flat-1", "side": "BUY", "symbol": "AAPL"}]}
+    client = MagicMock()
+    client.order_v2.get_order_open.return_value = open_response
+    with patch.object(webull_api, "_get_trade_client", return_value=client):
+        result = webull_api.get_open_orders("key", "secret", "acct1")
+    assert result == [{"order_id": "flat-1", "side": "BUY", "symbol": "AAPL"}]
 
 
 def _open_orders_page(orders):
