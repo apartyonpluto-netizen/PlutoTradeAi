@@ -554,6 +554,28 @@ def get_open_orders(app_key: str, app_secret: str, account_id: str) -> List[Dict
     return all_orders
 
 
+def get_open_orders_raw_first_page(app_key: str, app_secret: str, account_id: str) -> Dict[str, Any]:
+    """TEMPORARY diagnostic helper (2026-09-03) - the exact same
+    trade_client.order_v2.get_order_open call get_open_orders makes for
+    its first page, but returns the response's raw JSON completely
+    unvalidated, bypassing _extract_orders_page's strict order_id/shape
+    checks entirely. Built to answer one real, live question: get_open_orders
+    started raising "one or more order rows is missing a stable order_id"
+    for a real account, correctly failing the whole capital snapshot
+    closed (see _build_capital_snapshot in app.py) rather than risk
+    under-counting committed capital - but there was no way to see WHICH
+    row, or what it actually looks like, without this. Remove once the
+    real cause is understood and either handled for real or confirmed to
+    need no code change (e.g. a genuinely transient broker-side blip)."""
+    trade_client = _get_trade_client(app_key, app_secret)
+    response = _call_with_429_retry("open orders raw", lambda: trade_client.order_v2.get_order_open(
+        account_id, page_size=OPEN_ORDERS_PAGE_SIZE, last_order_id=None, last_client_order_id=None,
+    ))
+    if response.status_code != 200:
+        raise ValueError(f"Webull API error (open orders raw): HTTP {response.status_code}")
+    return response.json()
+
+
 ORDER_HISTORY_LOOKBACK_DAYS = 7
 ORDER_HISTORY_PAGE_SIZE = 100
 

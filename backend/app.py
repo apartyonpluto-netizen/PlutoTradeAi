@@ -1175,6 +1175,12 @@ def api_admin_diagnostic_capital_snapshot():
     result.update(_try("balance", lambda: webull_api.get_account_balance(creds["app_key"], creds["app_secret"], account_id)))
     result.update(_try("positions", lambda: webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)))
     result.update(_try("open_orders", lambda: webull_api.get_open_orders(creds["app_key"], creds["app_secret"], account_id)))
+    if not result["open_orders"]["ok"]:
+        # TEMPORARY (see get_open_orders_raw_first_page's own docstring) -
+        # only fetched when the validated call above already failed, to
+        # see the actual malformed row without validation getting in the
+        # way.
+        result.update(_try("open_orders_raw_first_page", lambda: webull_api.get_open_orders_raw_first_page(creds["app_key"], creds["app_secret"], account_id)))
     return _api_success(result, ok=True)
 
 

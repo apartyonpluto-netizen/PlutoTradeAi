@@ -48,7 +48,8 @@ def test_reports_each_call_separately_including_a_real_failure(user_id):
     with patch.object(pluto_app, "get_webull_credentials", return_value=CREDS), \
          patch.object(pluto_app.webull_api, "get_account_balance", return_value={"total_net_liquidation_value": 100000.0}), \
          patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
-         patch.object(pluto_app.webull_api, "get_open_orders", side_effect=RuntimeError("HTTP 429")):
+         patch.object(pluto_app.webull_api, "get_open_orders", side_effect=RuntimeError("HTTP 429")), \
+         patch.object(pluto_app.webull_api, "get_open_orders_raw_first_page", return_value={"orders": [{"status": "SUBMITTED"}]}):
         with pluto_app.app.test_client() as client:
             with client.session_transaction() as sess:
                 sess["user_id"] = admin_id
@@ -61,6 +62,28 @@ def test_reports_each_call_separately_including_a_real_failure(user_id):
     assert payload["open_orders"]["ok"] is False
     assert "HTTP 429" in payload["open_orders"]["error"]
     assert payload["open_orders"]["error_type"] == "RuntimeError"
+    # The validated call failed, so the raw fallback should have been
+    # fetched too - showing the row without validation in the way.
+    assert payload["open_orders_raw_first_page"]["ok"] is True
+    assert payload["open_orders_raw_first_page"]["result"] == {"orders": [{"status": "SUBMITTED"}]}
+
+
+def test_raw_fallback_is_not_fetched_when_open_orders_succeeds(user_id):
+    admin_id = _make_admin(user_id[:8] + "c")
+    with patch.object(pluto_app, "get_webull_credentials", return_value=CREDS), \
+         patch.object(pluto_app.webull_api, "get_account_balance", return_value={}), \
+         patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
+         patch.object(pluto_app.webull_api, "get_open_orders", return_value=[]), \
+         patch.object(pluto_app.webull_api, "get_open_orders_raw_first_page") as mock_raw:
+        with pluto_app.app.test_client() as client:
+            with client.session_transaction() as sess:
+                sess["user_id"] = admin_id
+            response = client.get(f"/api/admin/diagnostic/capital-snapshot?user_id={admin_id}&account_id=acct-1")
+
+    assert response.status_code == 200
+    payload = response.get_json()["data"]
+    assert "open_orders_raw_first_page" not in payload
+    mock_raw.assert_not_called()
 
 
 def test_auto_resolves_the_cash_account_when_none_given(user_id):
