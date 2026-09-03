@@ -4372,6 +4372,104 @@ def _compute_position_quantity(
     return {"quantity": minimum, "constraints": constraints, "binding_constraints": binding, "reason": ""}
 
 
+def _compute_option_contract_quantity(
+    risk_budget: Optional[float],
+    ask_price: Optional[float],
+    available_buying_power: Optional[float],
+    broker_option_buying_power: Optional[float],
+    position_exposure_cap: float = 0.0,
+    contract_multiplier: float = 100.0,
+) -> Dict[str, object]:
+    """Sizes a long option position by premium cost, not risk-at-stop -
+    unlike _compute_position_quantity (equity), a long call/put's maximum
+    possible loss IS the premium paid: there is no separate stop-distance
+    to size risk against, buying the contract already bounds the risk by
+    construction (see the options plan's "Lifecycle" section - a long
+    option skips PROTECTION_PENDING for exactly this reason). So "risk"
+    and "cost" are the same number here, both measured against
+    ask_price * contract_multiplier per contract.
+
+    Every input is Optional and every failure mode fails CLOSED (quantity
+    0), matching _compute_position_quantity's own discipline exactly - see
+    its docstring for the full reasoning. available_buying_power is this
+    app's own virtual/reserved allocation; broker_option_buying_power is
+    the broker's real option_buying_power balance (confirmed live
+    2026-09-03 as a distinct field from day_buying_power/cash_balance on
+    the margin sandbox account - see get_account_balance's raw response
+    via /api/admin/diagnostic/sandbox-accounts) - both must independently
+    cover the trade, and either being unknown fails closed rather than
+    sizing off the other alone.
+
+    Whole contracts only, floored - fractional contracts don't exist."""
+    if ask_price is None or ask_price <= 0:
+        return {"quantity": 0, "constraints": {}, "binding_constraints": ["ask_price"], "reason": "no valid ask price to size against"}
+
+    from decimal import Decimal
+
+    ask_price_dec = _to_decimal(ask_price)
+    cost_per_contract = ask_price_dec * _to_decimal(contract_multiplier)
+
+    constraints: Dict[str, Optional[int]] = {
+        "risk": None,
+        "buying_power": None,
+        "broker_buying_power": None,
+        "position_cap": None,
+    }
+
+    risk_disabled = risk_budget is None or risk_budget <= 0
+    if not risk_disabled:
+        constraints["risk"] = _floor_shares(_to_decimal(risk_budget), cost_per_contract)
+
+    buying_power_unknown = available_buying_power is None
+    if not buying_power_unknown:
+        constraints["buying_power"] = _floor_shares(_to_decimal(max(0.0, available_buying_power)), cost_per_contract)
+
+    broker_buying_power_unknown = broker_option_buying_power is None
+    if not broker_buying_power_unknown:
+        constraints["broker_buying_power"] = _floor_shares(_to_decimal(max(0.0, broker_option_buying_power)), cost_per_contract)
+
+    if position_exposure_cap and position_exposure_cap > 0:
+        constraints["position_cap"] = _floor_shares(_to_decimal(position_exposure_cap), cost_per_contract)
+
+    reasons_by_key = {
+        "risk": "risk budget too small for one contract at this premium",
+        "buying_power": "insufficient buying power",
+        "broker_buying_power": "insufficient real broker option buying power",
+        "position_cap": "position exposure cap reached",
+    }
+
+    if risk_disabled:
+        return {
+            "quantity": 0,
+            "constraints": constraints,
+            "binding_constraints": ["risk"],
+            "reason": "risk-based sizing is disabled or unavailable - refusing to size a trade without a valid risk budget",
+        }
+    if buying_power_unknown:
+        return {
+            "quantity": 0,
+            "constraints": constraints,
+            "binding_constraints": ["buying_power"],
+            "reason": "available buying power could not be determined - refusing to size a trade against stale or missing account data",
+        }
+    if broker_buying_power_unknown:
+        return {
+            "quantity": 0,
+            "constraints": constraints,
+            "binding_constraints": ["broker_buying_power"],
+            "reason": "real broker option buying power could not be determined - refusing to size a trade against stale or missing account data",
+        }
+
+    active = {key: value for key, value in constraints.items() if value is not None}
+    minimum = min(active.values())
+    binding = [key for key, value in active.items() if value == minimum]
+
+    if minimum < 1:
+        reason = " and ".join(reasons_by_key[key] for key in binding)
+        return {"quantity": 0, "constraints": constraints, "binding_constraints": binding, "reason": reason}
+    return {"quantity": minimum, "constraints": constraints, "binding_constraints": binding, "reason": "", "cost_per_contract": float(cost_per_contract)}
+
+
 def _compute_committed_virtual_capital(
     real_open_positions: Sequence[Dict[str, object]],
     real_open_orders: Sequence[Dict[str, object]],

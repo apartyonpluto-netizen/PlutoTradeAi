@@ -369,12 +369,19 @@ def get_option_contracts(
     return []
 
 
-def get_option_snapshot(app_key: str, app_secret: str, option_symbols: List[str]) -> Dict[str, Any]:
-    """Live bid/ask/last for one or more option contract symbols (e.g.
+def get_option_snapshot(app_key: str, app_secret: str, option_symbols: List[str]) -> List[Dict[str, Any]]:
+    """Live snapshot for one or more option contract symbols (e.g.
     "AAPL250620C00150000"), via DataClient.option_market_data.
-    get_option_snapshot. Up to 20 symbols per call (Webull SDK limit)."""
+    get_option_snapshot. Up to 20 symbols per call (Webull SDK limit).
+
+    Real response shape confirmed live 2026-09-03: a LIST of per-symbol
+    dicts (not a dict keyed by symbol), each carrying bid/ask/bid_size/
+    ask_size/price (last trade)/volume/open_interest/imp_vol AND real
+    delta/gamma/theta/vega/rho Greeks computed by Webull itself - unlike
+    options/options_brain.py's Yahoo-sourced research data, which has no
+    Greeks and computes its own via Black-Scholes."""
     if not option_symbols:
-        return {}
+        return []
     data_client = _get_data_client(app_key, app_secret)
     response = _call_with_429_retry(
         "option snapshot",
@@ -382,7 +389,8 @@ def get_option_snapshot(app_key: str, app_secret: str, option_symbols: List[str]
     )
     if response.status_code != 200:
         raise ValueError(f"Webull API error (option snapshot): HTTP {response.status_code}")
-    return response.json()
+    payload = response.json()
+    return payload if isinstance(payload, list) else []
 
 
 # Webull's client (webull.core.client.Client.get_response) raises a

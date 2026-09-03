@@ -137,22 +137,24 @@ def test_get_option_contracts_returns_empty_list_on_unrecognized_shape():
 
 
 def test_get_option_snapshot_joins_symbols_and_returns_json():
+    # Real shape confirmed live 2026-09-03: a LIST of per-symbol dicts, not
+    # a dict keyed by symbol - see get_option_snapshot's own docstring.
     response = MagicMock()
     response.status_code = 200
-    response.json.return_value = {"ADBE260918C00420000": {"bid": "4.90", "ask": "5.10"}}
+    response.json.return_value = [{"symbol": "ADBE260918C00420000", "bid": "0.04", "ask": "0.07"}]
     data_client = MagicMock()
     data_client.option_market_data.get_option_snapshot.return_value = response
     with patch.object(webull_api, "_get_data_client", return_value=data_client):
         snapshot = webull_api.get_option_snapshot("key", "secret", ["ADBE260918C00420000", "ADBE260918P00320000"])
-    assert snapshot == {"ADBE260918C00420000": {"bid": "4.90", "ask": "5.10"}}
+    assert snapshot == [{"symbol": "ADBE260918C00420000", "bid": "0.04", "ask": "0.07"}]
     data_client.option_market_data.get_option_snapshot.assert_called_once_with(
         "ADBE260918C00420000,ADBE260918P00320000", category="US_OPTION",
     )
 
 
-def test_get_option_snapshot_returns_empty_dict_for_no_symbols_without_calling_the_broker():
+def test_get_option_snapshot_returns_empty_list_for_no_symbols_without_calling_the_broker():
     data_client = MagicMock()
     with patch.object(webull_api, "_get_data_client", return_value=data_client):
         snapshot = webull_api.get_option_snapshot("key", "secret", [])
-    assert snapshot == {}
+    assert snapshot == []
     data_client.option_market_data.get_option_snapshot.assert_not_called()
