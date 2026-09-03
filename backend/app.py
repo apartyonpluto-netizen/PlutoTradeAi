@@ -12,7 +12,7 @@ import tracemalloc
 import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, wait as futures_wait
 from functools import wraps
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
@@ -92,6 +92,7 @@ if __package__:
     from .integrations.tradingview import get_tradingview_status, save_alert
     from .integrations import webull as webull_api
     from .integrations import alpaca_data
+    from .autonomy.options_selector import select_option_contract
     from .webull_credentials import (
         get_webull_credentials,
         is_webull_configured,
@@ -245,6 +246,7 @@ else:
     from integrations.tradingview import get_tradingview_status, save_alert
     from integrations import webull as webull_api
     from integrations import alpaca_data
+    from autonomy.options_selector import select_option_contract
     from webull_credentials import (
         get_webull_credentials,
         is_webull_configured,
@@ -6471,6 +6473,357 @@ def _poll_fill_and_protect(
         if current_state in ol.TERMINAL_STATES or current_state in (ol.PROTECTION_CONFIRMED_ACTIVE, ol.PROTECTION_FAILED):
             break
     return entry
+
+
+def _parse_option_float(value: object) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _reconcile_option_entry_fill(
+    user_id: str,
+    creds: Dict[str, str],
+    account_id: str,
+    entry_client_order_id: str,
+    entry: Dict[str, object],
+) -> Dict[str, object]:
+    """Options counterpart to _reconcile_entry_fill_and_protection - much
+    simpler because a long option has no separate protective leg to place
+    or resize (see the options plan's "Lifecycle" section): once the entry
+    order is confirmed filled, protection IS the entry itself - risk is
+    already bounded by the premium paid, nothing more to place. Mirrors
+    the equity path's own fill-classification logic
+    (_entry_fill_is_final, filled_quantity checked BEFORE status) exactly,
+    just without the protective-leg machinery that follows it there.
+    Reuses order_lifecycle.py's existing states/VALID_TRANSITIONS
+    unchanged - transitions straight through PROTECTION_PENDING to
+    PROTECTION_CONFIRMED_ACTIVE in the same call, not a new state."""
+    if not entry.get("entry_order_terminal"):
+        detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, entry_client_order_id)
+        fill = ol.summarize_fill(detail)
+        new_filled_quantity = fill["filled_quantity"]
+        status = fill["status"]
+        if fill.get("average_price") is not None:
+            entry["average_entry_fill_price"] = fill["average_price"]
+
+        if _entry_fill_is_final(status):
+            entry["entry_order_terminal"] = True
+            if status != "FILLED" and new_filled_quantity > 0:
+                entry["unfilled_remainder_status"] = status
+
+        current_state = entry.get("lifecycle_state")
+        if current_state == ol.ENTRY_SUBMITTED:
+            if new_filled_quantity > 0:
+                ol.transition(entry, ol.ENTRY_FILLED, filled_quantity=new_filled_quantity)
+            elif entry.get("entry_order_terminal"):
+                ol.transition(entry, ol.ENTRY_FAILED, error=f"option entry order {status.lower()} at the broker", filled_quantity=0)
+                return entry
+            else:
+                entry["filled_quantity"] = new_filled_quantity  # still 0, still resting
+        else:
+            entry["filled_quantity"] = new_filled_quantity
+
+    filled_quantity = float(entry.get("filled_quantity") or 0)
+    current_state = entry.get("lifecycle_state")
+
+    if filled_quantity <= 0:
+        if entry.get("entry_order_terminal") and current_state not in ol.TERMINAL_STATES:
+            ol.transition(entry, ol.ENTRY_FAILED, error="option entry order finished with zero fill", filled_quantity=0)
+        return entry
+
+    if current_state == ol.ENTRY_FILLED:
+        # Real broker-reported average fill price when available; otherwise
+        # falls back to the intended limit price as an ENTRY-BASIS estimate
+        # for sizing exit thresholds (target/stop are percentages OF this
+        # number) - explicitly flagged, never silently treated as
+        # confirmed. This is distinct from _reconcile_position_exit's own
+        # "never invent a fill price for realized P&L" rule, which governs
+        # the EXIT side of the trade, not this entry-basis estimate.
+        average_price = entry.get("average_entry_fill_price")
+        if average_price is not None:
+            entry["premium_paid_per_contract"] = float(average_price)
+            entry["premium_paid_is_estimated"] = False
+        else:
+            entry["premium_paid_per_contract"] = float(entry.get("limit_price") or 0)
+            entry["premium_paid_is_estimated"] = True
+        entry["contracts"] = filled_quantity
+        ol.transition(entry, ol.PROTECTION_PENDING)
+        ol.transition(entry, ol.PROTECTION_CONFIRMED_ACTIVE)
+
+    return entry
+
+
+def _poll_option_fill(
+    user_id: str,
+    creds: Dict[str, str],
+    account_id: str,
+    entry_client_order_id: str,
+    entry: Dict[str, object],
+) -> Dict[str, object]:
+    """Bounded sleep-and-retry wrapper around _reconcile_option_entry_fill,
+    mirroring _poll_fill_and_protect's own reasoning exactly (a fast
+    INITIAL result right after placement, with _monitor_transitional_orders
+    resuming indefinitely afterward if this bounded window isn't enough)."""
+    for attempt in range(ENTRY_FILL_POLL_ATTEMPTS):
+        if attempt > 0:
+            time.sleep(ENTRY_FILL_POLL_INTERVAL_SECONDS)
+        try:
+            entry = _reconcile_option_entry_fill(user_id, creds, account_id, entry_client_order_id, entry)
+        except Exception:  # noqa: BLE001 - transient failure this round; the monitor keeps retrying beyond this bounded window regardless
+            continue
+        current_state = entry.get("lifecycle_state")
+        if current_state in ol.TERMINAL_STATES or current_state == ol.PROTECTION_CONFIRMED_ACTIVE:
+            break
+    return entry
+
+
+def _submit_and_confirm_option_entry(
+    user_id: str,
+    creds: Dict[str, str],
+    account_id: str,
+    ticker: str,
+    option_contract: Dict[str, object],
+    quantity: int,
+    limit_price: float,
+    trading_day: str,
+    entry: Dict[str, object],
+) -> Dict[str, object]:
+    """Options counterpart to _submit_and_protect_entry - places a
+    BUY_TO_OPEN order for the specific contract options_selector.py
+    resolved (option_symbol/strike/expiration_date/option_type), then
+    drives it through fill confirmation via the bounded poll above.
+    Mutates and returns `entry`, same contract as the equity function:
+    entry["lifecycle_state"] == ol.PROTECTION_CONFIRMED_ACTIVE means the
+    position is genuinely filled and (by construction - see the Lifecycle
+    section of the options plan) risk-bounded, not just that a placement
+    call once returned success.
+
+    Splits the placement exception the same way _submit_and_protect_entry
+    does - webull_api.DefiniteOrderRejection (a real, parsed broker
+    rejection) means ENTRY_FAILED; anything else (AmbiguousOrderSubmission,
+    or any unclassified exception) means UNKNOWN_SUBMISSION_STATE, so the
+    caller reserves capital for it rather than risking a silent duplicate."""
+    entry_client_order_id = ol.deterministic_client_order_id(user_id, ticker, trading_day, "option_entry", attempt=1)
+    ol.initialize(
+        entry, ol.ENTRY_SUBMITTED,
+        entry_client_order_id=entry_client_order_id,
+        instrument_type="OPTION",
+        option_symbol=option_contract["option_symbol"],
+        strike=option_contract["strike"],
+        expiration_date=option_contract["expiration_date"],
+        option_type=option_contract["option_type"],
+        limit_price=limit_price,
+        quantity=quantity,
+    )
+    try:
+        webull_api.place_option_order(
+            app_key=creds["app_key"],
+            app_secret=creds["app_secret"],
+            account_id=account_id,
+            symbol=ticker,
+            option_type=option_contract["option_type"],
+            strike_price=option_contract["strike"],
+            expiration_date=option_contract["expiration_date"],
+            side="BUY",
+            quantity=quantity,
+            limit_price=limit_price,
+            client_order_id=entry_client_order_id,
+        )
+    except webull_api.DefiniteOrderRejection as error:
+        ol.transition(entry, ol.ENTRY_FAILED, error=str(error))
+        return entry
+    except Exception as error:  # noqa: BLE001 - AmbiguousOrderSubmission, or anything else not explicitly classified - fail-safe default, see docstring
+        ol.transition(entry, ol.UNKNOWN_SUBMISSION_STATE, error=str(error))
+        return entry
+
+    return _poll_option_fill(user_id, creds, account_id, entry_client_order_id, entry)
+
+
+def _check_and_execute_option_exit(
+    user_id: str,
+    creds: Dict[str, str],
+    account_id: str,
+    ticker: str,
+    trading_day: str,
+    entry: Dict[str, object],
+) -> bool:
+    """The option counterpart to _check_and_execute_target_exit - actively
+    watches the option's OWN live price (via get_option_snapshot, not the
+    underlying's) against premium-percentage-based target/stop thresholds
+    plus a time-based safety net, and executes a SELL_TO_CLOSE when
+    triggered. Simpler than the equity target-exit's cancel-then-sell
+    dance: there is no resting protective order to cancel first (a long
+    option's protection IS the entry - see the options plan's Lifecycle
+    section), so this places the closing sell directly.
+
+    Deliberately does NOT rely on a resting broker-side stop order the way
+    equity's stop leg does - see _check_and_execute_option_exit's sibling
+    finding this session about equity's own DAY-TIF resting stops having
+    no detection/re-arm path once an entry is fully filled and terminal.
+    Every monitor tick actively re-checks the live snapshot instead, so
+    there's no analogous "silently expired and nothing noticed" gap here.
+
+    Returns True only once the exit sell is CONFIRMED FILLED and the trade
+    is recorded CLOSED. Returns False at every earlier step (missing
+    entry fields, no live snapshot, no threshold reached) - never guesses,
+    matching every other check in this file."""
+    option_symbol = entry.get("option_symbol")
+    strike = entry.get("strike")
+    expiration_date = entry.get("expiration_date")
+    option_type = entry.get("option_type")
+    contracts = float(entry.get("contracts") or entry.get("filled_quantity") or 0)
+    premium_paid = _parse_option_float(entry.get("premium_paid_per_contract"))
+    if not option_symbol or not strike or not expiration_date or not option_type or contracts <= 0 or not premium_paid:
+        return False  # entry not fully initialized yet - shouldn't happen for PROTECTION_CONFIRMED_ACTIVE, fail closed
+
+    try:
+        snapshot_rows = webull_api.get_option_snapshot(creds["app_key"], creds["app_secret"], [option_symbol])
+    except Exception:  # noqa: BLE001 - transient data fetch failure, try again next tick
+        return False
+    row = next((r for r in snapshot_rows if str(r.get("symbol", "")) == option_symbol), snapshot_rows[0] if snapshot_rows else None)
+    if not row:
+        return False
+    bid = _parse_option_float(row.get("bid"))
+    if bid is None or bid <= 0:
+        return False  # no live bid to value or exit the position against - fail closed
+
+    autonomy_settings = get_autonomy_status(user_id)
+    target_gain_pct = float(autonomy_settings.get("option_target_gain_percent") or 50.0) / 100.0
+    stop_loss_pct = float(autonomy_settings.get("option_stop_loss_percent") or 50.0) / 100.0
+    close_days_before_expiration = int(autonomy_settings.get("option_close_days_before_expiration") or 3)
+
+    target_value = premium_paid * (1 + target_gain_pct)
+    stop_value = premium_paid * (1 - stop_loss_pct)
+
+    close_reason: Optional[str] = None
+    if bid >= target_value:
+        close_reason = "option_target_reached"
+    elif bid <= stop_value:
+        close_reason = "option_stop_reached"
+    else:
+        try:
+            days_to_expiration = (date.fromisoformat(str(expiration_date)) - _now_utc().date()).days
+        except ValueError:
+            days_to_expiration = None
+        if days_to_expiration is not None and days_to_expiration <= close_days_before_expiration:
+            close_reason = "option_expiration_safety_close"
+
+    if close_reason is None:
+        return False
+
+    next_attempt = int(entry.get("exit_attempt") or 0) + 1
+    entry["exit_attempt"] = next_attempt
+    sell_client_order_id = ol.deterministic_client_order_id(user_id, ticker, trading_day, "option_exit", attempt=next_attempt)
+    # A marketable limit slightly below the live bid, mirroring the
+    # equity target-exit's own slippage-tolerance approach for making a
+    # closing sell reliably fillable rather than resting indefinitely.
+    exit_limit_price = round(bid * (1 - TARGET_EXIT_SLIPPAGE_TOLERANCE), 2)
+    try:
+        webull_api.place_option_order(
+            app_key=creds["app_key"],
+            app_secret=creds["app_secret"],
+            account_id=account_id,
+            symbol=ticker,
+            option_type=option_type,
+            strike_price=strike,
+            expiration_date=expiration_date,
+            side="SELL",
+            quantity=contracts,
+            limit_price=exit_limit_price,
+            client_order_id=sell_client_order_id,
+        )
+    except Exception as error:  # noqa: BLE001 - placement failed outright; nothing was cancelled first (unlike equity), so no unprotected window to restore - just retry next pass
+        raise RuntimeError(f"option exit sell order failed for {ticker} ({close_reason}): {error} - will retry next pass")
+
+    filled_this_sell = 0.0
+    average_exit_price: Optional[float] = None
+    for attempt in range(ENTRY_FILL_POLL_ATTEMPTS):
+        if attempt > 0:
+            time.sleep(ENTRY_FILL_POLL_INTERVAL_SECONDS)
+        try:
+            sell_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, sell_client_order_id)
+            sell_fill = ol.summarize_fill(sell_detail)
+        except Exception:  # noqa: BLE001 - transient lookup failure, try again next attempt
+            continue
+        filled_this_sell = sell_fill["filled_quantity"]
+        average_exit_price = sell_fill.get("average_price")
+        if filled_this_sell >= contracts or _entry_fill_is_final(sell_fill["status"]):
+            break
+
+    if filled_this_sell <= 0:
+        raise RuntimeError(
+            f"option exit sell order for {ticker} has not filled yet after {ENTRY_FILL_POLL_ATTEMPTS} checks - will keep checking"
+        )
+
+    trade_id = str(entry.get("entry_client_order_id") or "")
+    pnl_complete = average_exit_price is not None and not entry.get("premium_paid_is_estimated")
+    # Long option P&L: (exit - entry) * contracts * 100 (the standard
+    # per-contract multiplier - see integrations/webull.py's
+    # get_option_contracts, which confirmed "multiplier": "100" live).
+    gross_pnl = (
+        round(filled_this_sell * (average_exit_price - premium_paid) * 100, 2)
+        if pnl_complete else None
+    )
+    closed_record = {
+        "ticker": ticker,
+        "instrument_type": "OPTION",
+        "side": "BUY",
+        "option_symbol": option_symbol,
+        "strike": strike,
+        "expiration_date": expiration_date,
+        "option_type": option_type,
+        "entry_client_order_id": entry.get("entry_client_order_id"),
+        "exit_client_order_id": sell_client_order_id,
+        "requested_quantity": entry.get("quantity"),
+        "filled_quantity": contracts,
+        "premium_paid_per_contract": premium_paid,
+        "premium_paid_is_estimated": bool(entry.get("premium_paid_is_estimated")),
+        "exit_type": close_reason,
+        "exited_quantity": filled_this_sell,
+        "average_exit_price": average_exit_price,
+        "entry_timestamp": entry.get("logged_at"),
+        "exit_timestamp": _now_utc().isoformat(),
+        "gross_realized_pnl": gross_pnl,
+        "fees": None,
+        "net_realized_pnl": gross_pnl,
+        "pnl_status": "complete" if pnl_complete else "incomplete_missing_fill_price",
+        "strategy": entry.get("strategy"),
+        "close_reason": close_reason,
+        "broker_evidence": {"exited_leg_status": "app_monitored_option_exit"},
+        "reconciled_at": _now_utc().isoformat(),
+    }
+    record_closed_trade(user_id, trade_id, closed_record)
+    ol.transition(entry, ol.CLOSED, closed_trade_id=trade_id, close_reason=close_reason)
+    try:
+        if pnl_complete:
+            add_manual_alert(
+                user_id,
+                {
+                    "type": "position_closed",
+                    "ticker": ticker,
+                    "message": f"{ticker} {option_type} ${strike}: option position closed ({close_reason}, {filled_this_sell:g} contracts). Realized P&L: ${gross_pnl:.2f}.",
+                },
+            )
+        else:
+            add_manual_alert(
+                user_id,
+                {
+                    "type": "position_closed_pnl_incomplete",
+                    "ticker": ticker,
+                    "message": (
+                        f"{ticker} {option_type} ${strike}: option position closed ({close_reason}, {filled_this_sell:g} contracts), "
+                        "but realized P&L could not be computed - the entry premium was estimated and/or the exit fill price wasn't "
+                        "reported. Review this trade's actual fill prices manually."
+                    ),
+                },
+            )
+    except Exception:  # noqa: BLE001
+        pass
+    return True
 
 
 def _parse_trusted_past_timestamp(raw: object, *, now: datetime, default: datetime) -> datetime:

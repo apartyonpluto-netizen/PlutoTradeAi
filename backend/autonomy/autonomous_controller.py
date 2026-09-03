@@ -71,6 +71,20 @@ def _default_settings() -> Dict[str, object]:
         "daily_loss_limit_percent": global_defaults["default_daily_loss_limit_percent"],
         "risk_percent_of_balance": global_defaults["default_risk_percent_of_balance"],
         "max_positions": global_defaults["default_max_positions"],
+        # Options-specific exit thresholds (2026-09-03) - a long option has
+        # no stop-distance the way equity does (see
+        # _compute_option_contract_quantity's docstring), so its exits are
+        # premium-percentage-based instead: close at a gain of
+        # option_target_gain_percent, or a loss of option_stop_loss_percent,
+        # of the premium paid. option_close_days_before_expiration is a
+        # third, time-based safety net with no equity equivalent - force-
+        # close regardless of P&L once this close to expiration, to avoid
+        # pin risk/assignment/illiquid-into-expiry spreads. Reuses
+        # risk_percent_of_balance above (not a new field) for how much
+        # premium to risk per trade - see the scanner's option sizing path.
+        "option_target_gain_percent": 50.0,
+        "option_stop_loss_percent": 50.0,
+        "option_close_days_before_expiration": 3,
         "emergency_stop_enabled": False,
         "last_mode_change": now,
         "mode_change_reason": "Initialization",
@@ -200,6 +214,9 @@ def update_risk_settings(
     daily_loss_limit_percent: float | None = None,
     risk_percent_of_balance: float | None = None,
     max_positions: int | None = None,
+    option_target_gain_percent: float | None = None,
+    option_stop_loss_percent: float | None = None,
+    option_close_days_before_expiration: int | None = None,
 ) -> Dict[str, object]:
     if daily_loss_limit_percent is not None and not (0 <= daily_loss_limit_percent <= 100):
         raise ValueError("Daily loss limit percent must be between 0 and 100.")
@@ -207,6 +224,12 @@ def update_risk_settings(
         raise ValueError("Risk percent of balance must be between 0 and 100.")
     if max_positions is not None and max_positions < 0:
         raise ValueError("Max positions must be zero or positive.")
+    if option_target_gain_percent is not None and option_target_gain_percent <= 0:
+        raise ValueError("Option target gain percent must be positive.")
+    if option_stop_loss_percent is not None and not (0 < option_stop_loss_percent <= 100):
+        raise ValueError("Option stop loss percent must be between 0 (exclusive) and 100.")
+    if option_close_days_before_expiration is not None and option_close_days_before_expiration < 0:
+        raise ValueError("Option close-days-before-expiration must be zero or positive.")
 
     def _mutate(settings: Dict[str, object]) -> None:
         if daily_loss_limit_percent is not None:
@@ -215,6 +238,12 @@ def update_risk_settings(
             settings["risk_percent_of_balance"] = float(risk_percent_of_balance)
         if max_positions is not None:
             settings["max_positions"] = int(max_positions)
+        if option_target_gain_percent is not None:
+            settings["option_target_gain_percent"] = float(option_target_gain_percent)
+        if option_stop_loss_percent is not None:
+            settings["option_stop_loss_percent"] = float(option_stop_loss_percent)
+        if option_close_days_before_expiration is not None:
+            settings["option_close_days_before_expiration"] = int(option_close_days_before_expiration)
 
     return _derived(_locked_read_modify_write(user_id, _mutate))
 
