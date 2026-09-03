@@ -496,7 +496,9 @@ def _classify_server_exception(error: "ServerException", action_label: str) -> E
     return AmbiguousOrderSubmission(f"Webull API error ({action_label}): {error}")
 
 
-def _place_order_with_retry(trade_client, account_id: str, order: Dict[str, Any], action_label: str) -> Dict[str, Any]:
+def _place_order_with_retry(
+    trade_client, account_id: str, order: Dict[str, Any], action_label: str, place_method_name: str = "place_order",
+) -> Dict[str, Any]:
     """Places one order, retrying on rate-limiting, and treating a reused
     client_order_id as success rather than failure - confirmed live against
     the sandbox this session that Webull rejects a repeated client_order_id
@@ -506,6 +508,13 @@ def _place_order_with_retry(trade_client, account_id: str, order: Dict[str, Any]
     crash wants - so it's resolved by looking up and returning the order
     that already exists, not raised as a new failure.
 
+    place_method_name selects which trade_client.order_v2 method actually
+    places the order - "place_order" (the default, every equity caller)
+    hits Webull's stock endpoint; place_option_order passes "place_option"
+    to hit the separate options endpoint instead. Added 2026-09-03 rather
+    than duplicating this whole retry/idempotency/classification block for
+    options.
+
     Every OTHER failure path raises either DefiniteOrderRejection or
     AmbiguousOrderSubmission, never a bare exception - see
     _classify_server_exception. ClientException (a network/SDK-level
@@ -513,10 +522,11 @@ def _place_order_with_retry(trade_client, account_id: str, order: Dict[str, Any]
     always ambiguous: it never proves the broker even received the
     request."""
     client_order_id = order["client_order_id"]
+    place = getattr(trade_client.order_v2, place_method_name)
     last_error: Optional[ServerException] = None
     for attempt in range(3):
         try:
-            response = trade_client.order_v2.place_order(account_id, [order])
+            response = place(account_id, [order])
             result = response.json()
             result["client_order_id"] = client_order_id
             result["idempotent_replay"] = False
@@ -1043,4 +1053,111 @@ def cancel_order(app_key: str, app_secret: str, account_id: str, client_order_id
     response = trade_client.order_v2.cancel_order(account_id, client_order_id)
     if response.status_code != 200:
         raise ValueError(f"Webull API error (cancel order): HTTP {response.status_code} {response.text}")
+    return response.json()
+
+
+def _build_option_order(
+    symbol: str,
+    option_type: str,
+    strike_price: float,
+    expiration_date: str,
+    side: str,
+    quantity: float,
+    limit_price: float,
+    time_in_force: str,
+    client_order_id: str,
+) -> Dict[str, Any]:
+    """Shared order-dict builder for preview_option_order/place_option_order.
+    Shape confirmed live 2026-09-03 against the real sandbox via the
+    order-v2.preview_option endpoint (both a BUY CALL and a BUY PUT
+    accepted, real estimated_cost/estimated_transaction_fee returned) -
+    matches Webull's own official sample (webull-openapi-python-sdk repo,
+    samples/order/order_option_client.py) exactly, not a guess: the leg
+    references the contract by underlying symbol + strike_price +
+    option_expire_date (NOT by the resolved "ADBE260918C00420000"-style
+    option_symbol get_option_contracts returns - that symbol identifies
+    the contract for market-data lookups, not for placing an order leg),
+    and a top-level "option_strategy": "SINGLE" is required alongside the
+    usual order fields. side/quantity are duplicated on both the order and
+    its single leg, matching the working sample."""
+    leg = {
+        "side": side,
+        "quantity": str(quantity),
+        "symbol": symbol,
+        "strike_price": str(strike_price),
+        "option_expire_date": expiration_date,
+        "instrument_type": "OPTION",
+        "option_type": option_type,
+        "market": "US",
+    }
+    return {
+        "combo_type": "NORMAL",
+        "client_order_id": client_order_id,
+        "order_type": "LIMIT",
+        "quantity": str(quantity),
+        "limit_price": str(limit_price),
+        "option_strategy": "SINGLE",
+        "side": side,
+        "time_in_force": time_in_force,
+        "entrust_type": "QTY",
+        "legs": [leg],
+    }
+
+
+def preview_option_order(
+    app_key: str,
+    app_secret: str,
+    account_id: str,
+    symbol: str,
+    option_type: str,
+    strike_price: float,
+    expiration_date: str,
+    side: str,
+    quantity: float,
+    limit_price: float,
+    time_in_force: str = "DAY",
+) -> Dict[str, Any]:
+    trade_client = _get_trade_client(app_key, app_secret)
+    order = _build_option_order(
+        symbol, option_type, strike_price, expiration_date, side, quantity,
+        limit_price, time_in_force, uuid.uuid4().hex,
+    )
+    response = trade_client.order_v2.preview_option(account_id, [order])
+    if response.status_code != 200:
+        raise ValueError(f"Webull API error (preview option order): HTTP {response.status_code} {response.text}")
+    return response.json()
+
+
+def place_option_order(
+    app_key: str,
+    app_secret: str,
+    account_id: str,
+    symbol: str,
+    option_type: str,
+    strike_price: float,
+    expiration_date: str,
+    side: str,
+    quantity: float,
+    limit_price: float,
+    time_in_force: str = "DAY",
+    client_order_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Places a real (sandbox) option order. client_order_id should be
+    deterministic for any caller that might retry this same logical
+    placement after a crash, matching place_stock_order's own contract -
+    a fresh random id is generated only if none is supplied."""
+    trade_client = _get_trade_client(app_key, app_secret)
+    client_order_id = client_order_id or uuid.uuid4().hex
+    order = _build_option_order(
+        symbol, option_type, strike_price, expiration_date, side, quantity,
+        limit_price, time_in_force, client_order_id,
+    )
+    return _place_order_with_retry(trade_client, account_id, order, "place option order", place_method_name="place_option")
+
+
+def cancel_option_order(app_key: str, app_secret: str, account_id: str, client_order_id: str) -> Dict[str, Any]:
+    trade_client = _get_trade_client(app_key, app_secret)
+    response = trade_client.order_v2.cancel_option(account_id, client_order_id)
+    if response.status_code != 200:
+        raise ValueError(f"Webull API error (cancel option order): HTTP {response.status_code} {response.text}")
     return response.json()
