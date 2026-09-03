@@ -1132,6 +1132,52 @@ def api_admin_diagnostic_preview_raw_order():
     return _api_success({"classification": "accepted", "raw": result, "account_id": account_id}, ok=True)
 
 
+@app.route("/api/admin/diagnostic/capital-snapshot", methods=["GET"])
+def api_admin_diagnostic_capital_snapshot():
+    """Read-only: the three individual broker calls _build_capital_snapshot
+    combines (get_account_balance, get_account_positions, get_open_orders)
+    for one account, each reported separately with its own success/error -
+    not the combined, already-collapsed-to-None result the real scan sees
+    when any ONE of them fails. Built live 2026-09-03: the scan's own
+    reason text ("available buying power could not be determined -
+    refusing to size a trade against stale or missing account data")
+    correctly fails closed, but _build_capital_snapshot's own except
+    block only ever logs a server-side warning - there was no way to see
+    WHICH of the three calls was actually failing, or why, without live
+    server/log access this session doesn't have. Permanent, matching
+    order-detail's own precedent, not a one-off - "is the broker
+    currently answering these three calls cleanly" is a reasonable thing
+    to want to check again later."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    target_user_id = str(request.args.get("user_id", "") or _current_user_id())
+    account_id_param = str(request.args.get("account_id", "") or "")
+    creds = get_webull_credentials(target_user_id)
+    account_id = account_id_param
+    if not account_id:
+        try:
+            sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
+        except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than crash
+            return _api_failure(f"get_paper_accounts failed: {error}", status_code=502, error_code="broker_error", ok=False)
+        cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
+        if not cash_account:
+            return _api_failure("No Webull sandbox account found for these credentials.", status_code=404, error_code="not_found", ok=False)
+        account_id = cash_account["account_id"]
+
+    def _try(label: str, call):
+        try:
+            return {label: {"ok": True, "result": call()}}
+        except Exception as error:  # noqa: BLE001 - the whole point is seeing what actually failed
+            return {label: {"ok": False, "error": str(error), "error_type": type(error).__name__}}
+
+    result: Dict[str, object] = {"account_id": account_id}
+    result.update(_try("balance", lambda: webull_api.get_account_balance(creds["app_key"], creds["app_secret"], account_id)))
+    result.update(_try("positions", lambda: webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)))
+    result.update(_try("open_orders", lambda: webull_api.get_open_orders(creds["app_key"], creds["app_secret"], account_id)))
+    return _api_success(result, ok=True)
+
+
 @app.route("/api/admin/diagnostic/order-detail", methods=["GET"])
 def api_admin_diagnostic_order_detail():
     """Read-only: the broker's own CURRENT, LIVE answer for one specific
