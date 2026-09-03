@@ -1171,6 +1171,32 @@ def api_admin_diagnostic_option_contracts():
     return _api_success({"ticker": ticker, "start_date": start_date, "end_date": end_date, "contracts": contracts, "count": len(contracts)}, ok=True)
 
 
+@app.route("/api/admin/diagnostic/option-snapshot", methods=["GET"])
+def api_admin_diagnostic_option_snapshot():
+    """Read-only, permanent (same precedent as option-contracts above).
+    Confirms the real DataClient.option_market_data.get_option_snapshot
+    response shape (bid/ask/last field names) against the sandbox before
+    autonomy/options_selector.py's liquidity check or any premium-based
+    limit pricing assumes a particular key exists.
+
+    Query params: symbols (comma-separated option contract symbols,
+    required, e.g. ADBE260918C00420000), user_id (optional)."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    symbols_raw = str(request.args.get("symbols", "") or "").strip()
+    if not symbols_raw:
+        return _api_failure("symbols is required.", status_code=400, error_code="invalid_request", ok=False)
+    symbols = [s.strip() for s in symbols_raw.split(",") if s.strip()]
+    target_user_id = str(request.args.get("user_id", "") or _current_user_id())
+    creds = get_webull_credentials(target_user_id)
+    try:
+        snapshot = webull_api.get_option_snapshot(creds["app_key"], creds["app_secret"], symbols)
+    except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than crash
+        return _api_failure(f"get_option_snapshot failed: {error}", status_code=502, error_code="broker_error", ok=False)
+    return _api_success({"symbols": symbols, "snapshot": snapshot}, ok=True)
+
+
 @app.route("/api/admin/diagnostic/preview-raw-option-order", methods=["POST"])
 def api_admin_diagnostic_preview_raw_option_order():
     """TEMPORARY - remove once every order shape real options trading
