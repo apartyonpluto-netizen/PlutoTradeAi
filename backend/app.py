@@ -4166,6 +4166,27 @@ def _extract_broker_buying_power(balance: Dict[str, object]) -> Optional[float]:
         return None
 
 
+def _extract_option_buying_power(balance: Dict[str, object]) -> Optional[float]:
+    """Same shape/failure-mode discipline as _extract_broker_buying_power,
+    reading option_buying_power instead of buying_power - a REAL, DISTINCT
+    field confirmed live 2026-09-03 on the margin sandbox account's own
+    balance response (account_currency_assets[0].option_buying_power),
+    separate from cash_balance/day_buying_power - see
+    /api/admin/diagnostic/sandbox-accounts. None (not 0.0) means "couldn't
+    determine it", same reasoning as the equity function."""
+    try:
+        assets = balance.get("account_currency_assets") or [{}]
+        raw = assets[0].get("option_buying_power", None)
+        if raw is None or raw == "":
+            return None
+        value = float(raw)
+        if not math.isfinite(value) or value < 0:
+            return None
+        return value
+    except (TypeError, ValueError, IndexError, AttributeError):
+        return None
+
+
 def _to_decimal(value: float) -> "Decimal":
     """Converts via str(), not Decimal(x) directly, so a float's own binary
     imprecision never enters the Decimal - str() gives the same decimal text
@@ -9374,10 +9395,18 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
     # only the hard buying-power ceiling differs per account.
     margin_broker_buying_power: Optional[float] = None
     margin_snapshot_available_buying_power: Optional[float] = None
+    # The margin account's real option_buying_power - a hard ceiling for an
+    # OPTION candidate specifically, same role margin_broker_buying_power
+    # plays for a short. Read from the SAME margin_balance call, not a
+    # second round-trip. Options draw from this dedicated pool, not
+    # margin_broker_buying_power (equity buying power) - see
+    # _extract_option_buying_power.
+    margin_option_buying_power: Optional[float] = None
     if margin_account_id:
         try:
             margin_balance = webull_api.get_account_balance(creds["app_key"], creds["app_secret"], margin_account_id)
             margin_broker_buying_power = _extract_broker_buying_power(margin_balance)
+            margin_option_buying_power = _extract_option_buying_power(margin_balance)
             margin_real_net_liquidation_value = float(margin_balance.get("total_net_liquidation_value", 0) or 0)
             margin_snapshot_available_buying_power = _build_capital_snapshot(
                 fetch_open_orders=lambda: webull_api.get_open_orders(creds["app_key"], creds["app_secret"], margin_account_id),
@@ -9674,6 +9703,126 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 quantity=0, entry_client_order_id=None,
             )
             continue
+
+        # Real options attempt (2026-09-03) - tried FIRST for every
+        # qualifying candidate, ahead of the equity long/short path below,
+        # matching the user's own stated goal (learn to trade real options,
+        # not just directional equity) while keeping the proven equity
+        # path as the automatic fallback (see the plan's "additive, not a
+        # replacement" decision). Only actually attempts an option trade -
+        # and only then `continue`s past the equity path entirely for this
+        # candidate - when select_option_contract finds a real, liquid,
+        # listed contract AND it sizes to at least one contract; anything
+        # short of that (no margin account, no listed options for this
+        # ticker, no contract within the liquidity/strike/expiration
+        # window, or a premium too large for the risk budget) falls
+        # straight through to the unmodified equity code below, exactly as
+        # if this block didn't exist.
+        if margin_account_id and limit_price > 0:
+            try:
+                option_contract = select_option_contract(
+                    creds["app_key"], creds["app_secret"], ticker,
+                    "PUT" if direction == "short" else "CALL", limit_price,
+                )
+            except Exception as error:  # noqa: BLE001 - a broker/data failure on the OPTIONAL options lookup must never block the proven equity path below; log and fall through
+                logger.warning("select_option_contract failed for %s, falling back to the equity path: %s", ticker, error)
+                option_contract = None
+            if option_contract:
+                # Reuses the SAME account-level reservation pool a short
+                # candidate on this account would use (not a separate
+                # options-only bucket) - deliberately conservative: this
+                # app's own virtual/committed-capital tracking
+                # (margin_snapshot_available_buying_power) represents the
+                # user's OVERALL chosen allocation for this account
+                # regardless of product, so it's correct for options and
+                # shorts to compete for the same pool there. The REAL
+                # broker-side hard ceiling differs by product
+                # (margin_option_buying_power vs margin_broker_buying_power)
+                # and is checked separately below - option_buying_power is
+                # confirmed live as its own distinct balance field (see
+                # _extract_option_buying_power), not aliased to equity
+                # buying power.
+                option_available_buying_power = _compute_available_buying_power_with_reservations(
+                    margin_snapshot_available_buying_power, local_reservations_by_account[margin_account_id]
+                )
+                option_available_broker_buying_power = _compute_available_buying_power_with_reservations(
+                    margin_option_buying_power, local_reservations_by_account[margin_account_id]
+                )
+                option_sizing = _compute_option_contract_quantity(
+                    risk_budget=risk_budget,
+                    ask_price=option_contract["ask"],
+                    available_buying_power=option_available_buying_power,
+                    broker_option_buying_power=option_available_broker_buying_power,
+                    position_exposure_cap=position_exposure_cap,
+                )
+                option_quantity = int(option_sizing["quantity"])
+                if option_quantity >= 1:
+                    option_entry: Dict[str, object] = {
+                        "ticker": ticker,
+                        "confidence": opp.get("confidence"),
+                        "strategy": opp.get("strategy"),
+                        "trade_quality": opp.get("trade_quality"),
+                        "trade_thesis": opp.get("trade_thesis"),
+                        "why_ai_likes_it": opp.get("why_ai_likes_it"),
+                        "invalidation_rule": opp.get("invalidation_rule"),
+                        "risk_warning": opp.get("risk_warning"),
+                        "account_id": margin_account_id,
+                        "status": "pending",
+                        "sizing_constraints": option_sizing["constraints"],
+                        "binding_constraints": option_sizing["binding_constraints"],
+                        "trading_day": today_key,
+                    }
+                    option_limit_price = round(option_contract["ask"], 2)
+                    option_cost_reservation = _to_decimal(option_sizing["cost_per_contract"]) * _to_decimal(option_quantity)
+                    if dry_run:
+                        option_entry["status"] = "preview"
+                        option_entry["instrument_type"] = "OPTION"
+                        option_entry["option_symbol"] = option_contract["option_symbol"]
+                        option_entry["strike"] = option_contract["strike"]
+                        option_entry["expiration_date"] = option_contract["expiration_date"]
+                        option_entry["option_type"] = option_contract["option_type"]
+                        option_entry["limit_price"] = option_limit_price
+                        option_entry["quantity"] = option_quantity
+                        placed.append(option_entry)
+                        local_reservations_by_account[margin_account_id] += option_cost_reservation
+                        continue
+                    try:
+                        _submit_and_confirm_option_entry(
+                            user_id=user_id, creds=creds, account_id=margin_account_id, ticker=ticker,
+                            option_contract=option_contract, quantity=option_quantity,
+                            limit_price=option_limit_price, trading_day=today_key, entry=option_entry,
+                        )
+                        option_lifecycle_state = option_entry.get("lifecycle_state")
+                        if option_lifecycle_state == ol.UNKNOWN_SUBMISSION_STATE:
+                            option_entry["status"] = "unknown_submission_state"
+                            option_entry["error"] = option_entry.get(
+                                "error", "order submission result could not be confirmed (ambiguous broker response)"
+                            )
+                            local_reservations_by_account[margin_account_id] += option_cost_reservation
+                            skipped.append(option_entry)
+                        else:
+                            option_entry["status"] = "failed" if option_lifecycle_state == ol.ENTRY_FAILED else "placed"
+                            if option_entry["status"] == "failed":
+                                option_entry["error"] = option_entry.get("error", "entry order failed")
+                                skipped.append(option_entry)
+                            else:
+                                placed.append(option_entry)
+                                local_reservations_by_account[margin_account_id] += option_cost_reservation
+                    except Exception as error:  # noqa: BLE001 - one bad ticker shouldn't kill the whole batch, same discipline as the equity path below
+                        option_entry["status"] = "failed"
+                        option_entry["error"] = str(error)
+                        skipped.append(option_entry)
+                    record_overnight_order(user_id, option_entry)
+                    _log_research_decision(
+                        ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
+                        raw_confidence=int(opp.get("confidence", 0) or 0),
+                        decision="placed" if option_entry.get("status") == "placed" else "skipped",
+                        reason_skipped=option_entry.get("error") if option_entry.get("status") != "placed" else None,
+                        quantity=option_quantity, entry_client_order_id=option_entry.get("entry_client_order_id"),
+                    )
+                    if option_entry.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE:
+                        break  # same circuit breaker as the equity path - this account's committed capital is no longer confidently known this run
+                    continue
 
         candidate_account_id = margin_account_id if direction == "short" else account_id
         candidate_snapshot_buying_power = margin_snapshot_available_buying_power if direction == "short" else snapshot_available_buying_power
