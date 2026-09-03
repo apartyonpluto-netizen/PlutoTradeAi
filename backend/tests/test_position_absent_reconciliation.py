@@ -287,3 +287,172 @@ def test_resolve_end_to_end_closes_with_unknown_pnl_and_the_admins_reason(user_i
     assert closed[0]["close_reason"] == "manual_reconciliation_position_absent"
     assert closed[0]["resolved_by_admin"] == admin_id
     assert "Confirmed via real Webull sandbox UI" in closed[0]["resolution_reason"]
+
+
+# --- _check_position_absent_while_active ---------------------------------------
+#
+# Found live 2026-09-03: a real PLTR position was closed directly at the
+# broker (not through either tracked leg filling) while PROTECTION_CONFIRMED_ACTIVE -
+# the stop showed CANCELLED, not FILLED, so neither _reconcile_position_exit's
+# fill-based detection nor _reconcile_closed_ticker_exit_orders' broader
+# sweep (which also requires a FILLED leg) could ever explain it, leaving
+# the entry reporting "still open" forever with no path to record its
+# real close. Same detection discipline as the STUCK counterpart above,
+# but deliberately does NOT freeze new entries - the broker confirms zero
+# shares held, so there is no exposure left to protect.
+
+
+def _active_entry(**extra) -> dict:
+    entry: dict = {
+        "ticker": TICKER,
+        "stop": 54.95,
+        "target": 60.0,
+        "trading_day": TRADING_DAY,
+        "quantity": 30,
+        "filled_quantity": 30.0,
+        "average_entry_fill_price": 58.10,
+        "stop_client_order_id": STOP_ID,
+        "stop_leg_quantity": 30.0,
+        "strategy": "Breakout",
+    }
+    ol.initialize(entry, ol.ENTRY_SUBMITTED, entry_client_order_id="pt-entry-active-position-absent")
+    ol.transition(entry, ol.ENTRY_FILLED, filled_quantity=30.0)
+    ol.transition(entry, ol.PROTECTION_PENDING)
+    ol.transition(entry, ol.PROTECTION_CONFIRMED_ACTIVE, protection_confirmed_at="2026-09-03T14:00:00+00:00")
+    entry.update(extra)
+    return entry
+
+
+def test_active_position_still_held_does_not_flag():
+    entry = _active_entry()
+    with patch.object(pluto_app.webull_api, "get_account_positions", return_value=[{"symbol": TICKER, "quantity": "30"}]), \
+         patch.object(pluto_app.webull_api, "get_order_detail") as mock_detail:
+        result = pluto_app._check_position_absent_while_active("user-1", CREDS, ACCOUNT_ID, TICKER, entry)
+    assert result is False
+    assert "position_absent_unexplained" not in entry
+    mock_detail.assert_not_called()
+
+
+def test_active_position_absent_and_stop_cancelled_flags_and_alerts_but_does_not_freeze():
+    entry = _active_entry()
+    with patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
+         patch.object(pluto_app.webull_api, "get_order_detail", return_value=_order_detail("CANCELLED", 30, 0)), \
+         patch.object(pluto_app, "add_manual_alert") as mock_alert:
+        result = pluto_app._check_position_absent_while_active("user-1", CREDS, ACCOUNT_ID, TICKER, entry)
+    assert result is True
+    assert entry["position_absent_unexplained"] is True
+    assert entry["position_absent_evidence"]["stop_status"] == "CANCELLED"
+    alert_payload = mock_alert.call_args.args[1]
+    assert alert_payload["type"] == "position_absent_while_active"
+    # Deliberately "normal", not "critical" - no exposure is actually at
+    # risk (the broker confirms zero shares), unlike the STUCK counterpart.
+    assert alert_payload["priority"] == "normal"
+
+
+def test_active_position_absent_but_stop_filled_defers():
+    entry = _active_entry()
+    with patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
+         patch.object(pluto_app.webull_api, "get_order_detail", return_value=_order_detail("FILLED", 30, 30)):
+        result = pluto_app._check_position_absent_while_active("user-1", CREDS, ACCOUNT_ID, TICKER, entry)
+    assert result is False
+    assert "position_absent_unexplained" not in entry
+
+
+def test_active_already_flagged_short_circuits():
+    entry = _active_entry(position_absent_unexplained=True)
+    with patch.object(pluto_app.webull_api, "get_account_positions") as mock_positions:
+        result = pluto_app._check_position_absent_while_active("user-1", CREDS, ACCOUNT_ID, TICKER, entry)
+    assert result is True
+    mock_positions.assert_not_called()
+
+
+def test_active_short_direction_is_not_yet_supported():
+    # Same unconfirmed-sign-convention reason as the STUCK counterpart.
+    entry = _active_entry(direction="short")
+    with patch.object(pluto_app.webull_api, "get_account_positions") as mock_positions:
+        result = pluto_app._check_position_absent_while_active("user-1", CREDS, ACCOUNT_ID, TICKER, entry)
+    assert result is False
+    mock_positions.assert_not_called()
+
+
+def test_reconcile_position_exit_flags_but_does_not_close_or_freeze(user_id):
+    entry = _active_entry()
+    record_overnight_order(user_id, entry)
+    with patch.object(pluto_app.webull_api, "get_order_detail", return_value=_order_detail("CANCELLED", 30, 0)), \
+         patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
+         patch.object(pluto_app.alpaca_data, "get_latest_trade_price", return_value=None):
+        exited = pluto_app._reconcile_position_exit(user_id, CREDS, ACCOUNT_ID, TICKER, TRADING_DAY, entry)
+
+    assert exited is False  # never auto-closes
+    assert entry["position_absent_unexplained"] is True
+    # Still PROTECTION_CONFIRMED_ACTIVE, not bounced into any frozen state -
+    # this is a pure bookkeeping flag, not a safety condition.
+    assert entry["lifecycle_state"] == ol.PROTECTION_CONFIRMED_ACTIVE
+
+
+# --- the resolution route now also accepts PROTECTION_CONFIRMED_ACTIVE ---------
+
+
+def test_resolve_accepts_a_flagged_active_entry_using_its_own_account_id(user_id):
+    admin_id = _make_admin(user_id[:8] + "f")
+    target_id = _register_target_user(user_id[:8] + "f")
+    entry = _active_entry(position_absent_unexplained=True, account_id="acct-margin-should-be-used")
+    record_overnight_order(target_id, entry)
+
+    with patch.object(pluto_app, "get_webull_credentials", return_value=CREDS), \
+         patch.object(pluto_app, "get_accounts", return_value=[{"platform": "webull", "status": "Connected"}]), \
+         patch.object(pluto_app.webull_api, "get_paper_accounts") as mock_accounts, \
+         patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]) as mock_positions, \
+         patch.object(pluto_app.webull_api, "get_order_detail", return_value=_order_detail("CANCELLED", 30, 0)) as mock_detail:
+        with pluto_app.app.test_client() as client:
+            with client.session_transaction() as sess:
+                sess["user_id"] = admin_id
+            response = client.post(
+                "/api/admin/reconcile-position-absent",
+                json={
+                    "user_id": target_id, "entry_client_order_id": "pt-entry-active-position-absent",
+                    "reason": "Confirmed the user closed this manually outside the app.",
+                    "confirmation": TICKER,
+                },
+            )
+
+    assert response.status_code == 200
+    body = response.get_json()["data"]["entry"]
+    assert body["lifecycle_state"] == ol.CLOSED
+    # Re-verified against the entry's OWN stored account_id - never
+    # re-derived the cash account via get_paper_accounts.
+    mock_accounts.assert_not_called()
+    mock_positions.assert_called_once_with(CREDS["app_key"], CREDS["app_secret"], "acct-margin-should-be-used")
+    mock_detail.assert_called_once_with(CREDS["app_key"], CREDS["app_secret"], "acct-margin-should-be-used", STOP_ID)
+
+    closed = list_closed_trades(target_id)
+    assert len(closed) == 1
+    assert closed[0]["side"] == "BUY"
+
+
+def test_resolve_records_sell_side_for_a_flagged_short_entry(user_id):
+    admin_id = _make_admin(user_id[:8] + "g")
+    target_id = _register_target_user(user_id[:8] + "g")
+    entry = _active_entry(position_absent_unexplained=True, account_id=ACCOUNT_ID, direction="short")
+    record_overnight_order(target_id, entry)
+
+    with patch.object(pluto_app, "get_webull_credentials", return_value=CREDS), \
+         patch.object(pluto_app, "get_accounts", return_value=[{"platform": "webull", "status": "Connected"}]), \
+         patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
+         patch.object(pluto_app.webull_api, "get_order_detail", return_value=_order_detail("CANCELLED", 30, 0)):
+        with pluto_app.app.test_client() as client:
+            with client.session_transaction() as sess:
+                sess["user_id"] = admin_id
+            response = client.post(
+                "/api/admin/reconcile-position-absent",
+                json={
+                    "user_id": target_id, "entry_client_order_id": "pt-entry-active-position-absent",
+                    "reason": "Confirmed the user covered this short manually outside the app.",
+                    "confirmation": TICKER,
+                },
+            )
+
+    assert response.status_code == 200
+    closed = list_closed_trades(target_id)
+    assert len(closed) == 1
+    assert closed[0]["side"] == "SELL"

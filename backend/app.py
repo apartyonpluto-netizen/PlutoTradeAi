@@ -5779,7 +5779,14 @@ def _reconcile_position_exit(
     target_has_exited = target_status is not None and target_filled_quantity > 0
 
     if not stop_has_exited and not target_has_exited:
-        return False  # still fully open and protected - nothing to do
+        # Neither leg's OWN status explains an exit - the normal, primary
+        # conclusion is "still open". But check whether the position is
+        # genuinely gone anyway (closed directly at the broker, outside
+        # any tracked leg - see _check_position_absent_while_active's own
+        # docstring for the real incident this covers) before returning.
+        # Never auto-closes; only flags for admin resolution.
+        _check_position_absent_while_active(user_id, creds, account_id, ticker, entry)
+        return False  # still fully open and protected (or flagged for review) - nothing more to do this pass
 
     if stop_has_exited and target_has_exited:
         _reconcile_both_legs_filled_emergency(
@@ -7489,23 +7496,139 @@ def _check_position_absent_while_stuck(
     return True
 
 
+def _check_position_absent_while_active(
+    user_id: str,
+    creds: Dict[str, str],
+    account_id: str,
+    ticker: str,
+    entry: Dict[str, object],
+) -> bool:
+    """The PROTECTION_CONFIRMED_ACTIVE counterpart to
+    _check_position_absent_while_stuck - same detection logic (position
+    absent from the broker's positions list, corroborated against each
+    tracked leg's own status before concluding anything, per
+    _reconcile_closed_ticker_exit_orders' "position absence alone is
+    never sufficient evidence" discipline), but for an entry the app
+    still believes is healthy and actively protected, not one already
+    stuck. Found live 2026-09-03: a real PLTR position was closed
+    directly at the broker (not through either tracked leg filling) -
+    the stop leg shows CANCELLED, not FILLED, so neither
+    _reconcile_position_exit's own fill-based detection nor
+    _reconcile_closed_ticker_exit_orders' broader sweep (which also
+    requires a FILLED leg before touching anything) could ever explain
+    it, leaving the entry stuck reporting PROTECTION_CONFIRMED_ACTIVE
+    forever with no path to ever record its real close.
+
+    Called from _reconcile_position_exit ONLY after it has already
+    concluded neither leg shows a fill this pass - never races or
+    duplicates that normal, PRIMARY detection path.
+
+    Deliberately does NOT freeze new entries account-wide the way the
+    STUCK counterpart does - that freeze exists because a stuck, failed-
+    protection entry represents genuine live risk (a position that might
+    be open and unprotected); this case is the opposite: the broker
+    confirms zero shares held, so there is no exposure to protect at
+    all. This is a pure bookkeeping/record-keeping gap (no P&L recorded,
+    the trade journal shows a phantom open position), not a safety
+    condition, so blocking otherwise-healthy new entries over it would
+    be needlessly conservative. Flags entry["position_absent_unexplained"] =
+    True (same field _resolve_position_absent_reconciliation already
+    resolves, regardless of which state flagged it), persists evidence,
+    and fires one fixed-content critical alert - never auto-closes or
+    invents a P&L; a human still resolves it via
+    /api/admin/reconcile-position-absent.
+
+    Deliberately does NOT run for direction="short" entries yet, for the
+    identical unconfirmed-sign-convention reason as the STUCK
+    counterpart - see that function's own docstring.
+
+    Returns True if the entry is (now, or already) flagged."""
+    if entry.get("direction") == "short":
+        return False
+    if entry.get("position_absent_unexplained"):
+        return True
+    try:
+        positions = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
+    except Exception:  # noqa: BLE001 - inconclusive, never treated as evidence either way
+        return False
+    live_quantity = next(
+        (float(position.get("quantity", 0) or 0) for position in positions if str(position.get("symbol", "")).upper() == ticker.upper()),
+        0.0,
+    )
+    if live_quantity > 0:
+        return False  # position genuinely still held - not this situation
+
+    stop_client_order_id = entry.get("stop_client_order_id")
+    stop_status: Optional[str] = None
+    if stop_client_order_id:
+        try:
+            stop_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, stop_client_order_id)
+            stop_status = ol.summarize_fill(stop_detail)["status"]
+        except Exception:  # noqa: BLE001
+            stop_status = None
+
+    if stop_status == "FILLED":
+        # A tracked leg DOES explain the exit after all - the caller's
+        # own next pass through the normal fill-based path picks this up
+        # correctly; not this function's job to act on it.
+        return False
+
+    entry["position_absent_unexplained"] = True
+    entry["position_absent_evidence"] = {
+        "checked_at": _now_utc().isoformat(),
+        "stop_client_order_id": stop_client_order_id,
+        "stop_status": stop_status,
+        "live_quantity": live_quantity,
+    }
+    try:
+        add_manual_alert(
+            user_id,
+            {
+                "type": "position_absent_while_active",
+                "ticker": ticker,
+                "priority": "normal",
+                "message": (
+                    f"{ticker}: this app still shows this position as actively protected, but the broker's own "
+                    "positions list shows ZERO shares - and no tracked protective leg confirms a FILLED status "
+                    "that would explain how it closed (most likely closed directly at the broker, outside this "
+                    "app). No P&L has been recorded and new autonomous entries are NOT blocked by this (the "
+                    "broker confirms nothing is actually at risk) - but resolve via "
+                    "/api/admin/reconcile-position-absent when convenient so the trade journal reflects reality."
+                ),
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
 def _resolve_position_absent_reconciliation(
     target_user_id: str, admin_user_id: str, entry_client_order_id: str, reason: str, confirmation: str
 ) -> Dict[str, object]:
     """The ONLY code path allowed to close an entry flagged
     position_absent_unexplained (see _check_position_absent_while_stuck's
-    own docstring for the full evidence trail). Mirrors
+    and _check_position_absent_while_active's own docstrings for the two
+    real incidents this covers - a PROTECTION_FAILED entry whose position
+    turned out already gone, and a PROTECTION_CONFIRMED_ACTIVE entry
+    closed directly at the broker outside any tracked leg). Mirrors
     _resolve_ambiguous_submission's own discipline for the same reason:
-    this is the sole way to unfreeze an account stuck on this specific
-    condition, and an incorrect close here would mean recording invented
-    P&L for a real trade this app never actually confirmed the outcome
-    of - so it never trusts the stored flag or evidence, always
-    re-verifying fresh, right now.
+    an incorrect close here would mean recording invented P&L for a real
+    trade this app never actually confirmed the outcome of - so it never
+    trusts the stored flag or evidence, always re-verifying fresh, right
+    now.
 
     Requires BOTH a typed reason AND a typed confirmation (must exactly
     match the entry's own ticker) - same two-separate-inputs discipline as
     _resolve_ambiguous_submission, for the same reason (a stray click or
     an unread copy-paste must not execute this).
+
+    Re-verifies against the entry's OWN stored account_id, not a freshly
+    re-derived cash account - found live 2026-09-03 alongside the
+    PROTECTION_CONFIRMED_ACTIVE case above: re-deriving the cash account
+    here would silently re-verify a MARGIN-account short entry against
+    the wrong account entirely. Falls back to re-deriving the cash
+    account only for a legacy record that predates account_id always
+    being stamped.
 
     The resulting closed_trade record is explicit about what this is:
     pnl_status="unknown_manual_reconciliation", gross/net_realized_pnl
@@ -7518,7 +7641,7 @@ def _resolve_position_absent_reconciliation(
     entry = next((order for order in orders if order.get("entry_client_order_id") == entry_client_order_id), None)
     if entry is None:
         raise ValidationError(f"No entry found for target_user_id={target_user_id} with entry_client_order_id={entry_client_order_id!r}.")
-    if entry.get("lifecycle_state") != ol.PROTECTION_FAILED or not entry.get("position_absent_unexplained"):
+    if entry.get("lifecycle_state") not in (ol.PROTECTION_FAILED, ol.PROTECTION_CONFIRMED_ACTIVE) or not entry.get("position_absent_unexplained"):
         raise ValidationError(
             f"This entry is not currently flagged position_absent_unexplained (lifecycle_state={entry.get('lifecycle_state')})."
         )
@@ -7533,11 +7656,13 @@ def _resolve_position_absent_reconciliation(
     webull_account = next((account for account in accounts if account.get("platform") == "webull"), None)
     if not webull_account or webull_account.get("status") != "Connected":
         raise ValidationError("This user's Webull account is not connected - cannot re-verify fresh.")
-    sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
-    cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
-    if not cash_account:
-        raise ValidationError("No Webull sandbox account found for this user's credentials.")
-    account_id = cash_account["account_id"]
+    account_id = entry.get("account_id")
+    if not account_id:
+        sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
+        cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
+        if not cash_account:
+            raise ValidationError("No Webull sandbox account found for this user's credentials.")
+        account_id = cash_account["account_id"]
 
     try:
         positions = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
@@ -7566,7 +7691,7 @@ def _resolve_position_absent_reconciliation(
     trade_id = str(entry.get("entry_client_order_id") or "")
     closed_record = {
         "ticker": ticker,
-        "side": "BUY",
+        "side": "SELL" if entry.get("direction") == "short" else "BUY",
         "entry_client_order_id": entry.get("entry_client_order_id"),
         "stop_client_order_id": stop_client_order_id,
         "target_client_order_id": None,
