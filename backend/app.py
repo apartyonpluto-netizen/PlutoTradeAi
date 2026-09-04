@@ -7327,6 +7327,15 @@ def _reconcile_unknown_submission(
     )
 
 
+# See _discover_orphaned_broker_entries's own comment at the guard site
+# for the real 2026-09-04 incident this exists to catch: many long-tracked
+# tickers going "unknown locally" in a single pass is not genuine crash
+# recovery, it's a signal overnight_orders.json may have been transiently
+# or actually reset. A LOW number (1-3) is the ordinary, expected case
+# this function exists for (one crashed placement) and is unaffected.
+ORPHAN_BATCH_ANOMALY_THRESHOLD = 3
+
+
 def _discover_orphaned_broker_entries(user_id: str, creds: Dict[str, str], account_id: str) -> int:
     """Restart recovery for the gap no other reconciliation function
     covers: a broker-ACCEPTED entry order whose local persistence never
@@ -7395,9 +7404,11 @@ def _discover_orphaned_broker_entries(user_id: str, creds: Dict[str, str], accou
 
     Best-effort per row - one malformed history entry doesn't block
     detecting others. Returns the count of NEW orphans recorded this
-    pass (0 if none, or if the history lookup itself failed - the caller
-    treats that the same as "nothing found", matching every other
-    reconciliation function's best-effort posture)."""
+    pass (0 if none, if the history lookup itself failed, or if the
+    ORPHAN_BATCH_ANOMALY_THRESHOLD guard below refused to write a
+    suspiciously large batch - the caller treats all three the same as
+    "nothing found", matching every other reconciliation function's
+    best-effort posture)."""
     try:
         history = webull_api.get_order_history(creds["app_key"], creds["app_secret"], account_id)
     except Exception:  # noqa: BLE001 - inconclusive, not "nothing to recover" - just can't check this tick
@@ -7412,6 +7423,11 @@ def _discover_orphaned_broker_entries(user_id: str, creds: Dict[str, str], accou
     # calendar-day drift, not an attempt to cover an unbounded past.
     candidate_days = [_trading_day_key(_now_utc() - timedelta(days=offset)) for offset in range(0, webull_api.ORDER_HISTORY_LOOKBACK_DAYS + 3)]
 
+    # First pass: identify every STRONGLY-attributed row not already known
+    # locally, without writing anything yet - see the batch-size guard
+    # right below for why this can't just stream-write as it finds them
+    # the way it used to.
+    orphan_rows = []
     for row in history:
         client_order_id = row.get("client_order_id")
         if not client_order_id or not isinstance(client_order_id, str):
@@ -7438,6 +7454,54 @@ def _discover_orphaned_broker_entries(user_id: str, creds: Dict[str, str], accou
         if not attributed:
             continue
 
+        orphan_rows.append((client_order_id, ticker, row))
+
+    # Found live 2026-09-04: a real incident where overnight_orders.json's
+    # entire history (dozens of entries, spanning back through the prior
+    # trading day) appeared to vanish between two ordinary ticks, and this
+    # function then "discovered" SIX previously-well-tracked tickers as
+    # orphans in one single pass - each one had a full lifecycle_history
+    # this app itself had been actively reading and writing for hours.
+    # That pattern - many long-tracked entries ALL going "unknown" in one
+    # shot - cannot be genuine restart-recovery (a real crash orphans
+    # entries one at a time, as they're placed; it does not retroactively
+    # orphan an entry this app had already been successfully monitoring
+    # for hours). It IS exactly consistent with list_overnight_orders
+    # transiently reading an empty/reset file - the same "brief window
+    # where the persistent disk isn't yet mounted when a request lands"
+    # class of incident account_hub.py's _looks_like_an_established_user_dir
+    # was already built to guard against for accounts.json, never ported
+    # here. Writing "recovered" orphans in that state would PERMANENTLY
+    # replace real history with a much smaller rediscovered stub (record_overnight_order's
+    # _atomic_write does not merge, it replaces the file's content on
+    # disk). A handful of genuine orphans (the crash-recovery case this
+    # function exists for) is normal and still written exactly as before;
+    # a sudden batch is the anomaly this guards against.
+    if len(orphan_rows) > ORPHAN_BATCH_ANOMALY_THRESHOLD:
+        try:
+            add_manual_alert(
+                user_id,
+                {
+                    "type": "orphan_discovery_batch_anomaly",
+                    "priority": "critical",
+                    "message": (
+                        f"Order-history reconciliation found {len(orphan_rows)} tickers "
+                        f"({', '.join(sorted({ticker for _, ticker, _ in orphan_rows}))}) simultaneously "
+                        "\"unknown locally\" in one pass - too many at once to be genuine crash recovery, and "
+                        "consistent with overnight_orders.json having been transiently or actually reset. "
+                        "Refusing to write these as fresh orphan records (that would permanently replace any "
+                        "real history still on disk with this much smaller rediscovered list) - this does NOT "
+                        "on its own freeze new autonomous entries, since none of these rows were written to a "
+                        "frozen state. Review overnight_orders.json directly and the Render disk/deploy history "
+                        "as soon as possible."
+                    ),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return 0
+
+    for client_order_id, ticker, row in orphan_rows:
         quantity_raw = row.get("total_quantity")
         limit_price_raw = row.get("limit_price")
         try:

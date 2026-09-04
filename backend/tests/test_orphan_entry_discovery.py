@@ -267,3 +267,75 @@ def test_fast_monitor_endpoint_discovers_an_orphan_with_autonomy_off_and_zero_lo
     # Discovered DESPITE autonomy OFF and zero starting local state -
     # exactly the restart scenario this endpoint change exists for.
     assert pluto_app._has_unresolved_ambiguous_submission_locally(user_id) is True
+
+
+# --- Batch-anomaly guard: real incident 2026-09-04 --------------------------
+# overnight_orders.json's entire history (dozens of entries, hours of real
+# lifecycle) appeared to vanish between two ordinary ticks, and this
+# function then "discovered" six previously well-tracked tickers as
+# orphans in one single pass. That pattern - many long-tracked entries all
+# going "unknown" at once - cannot be genuine crash recovery (a real crash
+# orphans entries one at a time, as they're placed); it IS exactly
+# consistent with list_overnight_orders transiently reading an empty/reset
+# file, the same "brief window where the persistent disk isn't yet
+# mounted when a request lands" class of incident account_hub.py's
+# _looks_like_an_established_user_dir already guards against for
+# accounts.json. Writing "recovered" orphans in that state would have
+# PERMANENTLY replaced real history with a small rediscovered stub -
+# record_overnight_order's _atomic_write replaces the file, it doesn't
+# merge.
+
+
+def test_batch_anomaly_guard_refuses_to_write_when_too_many_orphans_found_at_once(user_id):
+    tickers = ["AAPL", "MSFT", "TSLA", "NVDA"]  # 4 - one over ORPHAN_BATCH_ANOMALY_THRESHOLD (3)
+    rows = [_history_row(_orphan_id(user_id, ticker=t), symbol=t) for t in tickers]
+    with patch.object(pluto_app.webull_api, "get_order_history", return_value=rows):
+        discovered = pluto_app._discover_orphaned_broker_entries(user_id, CREDS, ACCOUNT_ID)
+
+    assert discovered == 0
+    assert list_overnight_orders(user_id) == []  # nothing written - real history (if any) left untouched
+
+    from alerts import load_manual_alerts
+    anomaly_alerts = [a for a in load_manual_alerts(user_id) if a.get("type") == "orphan_discovery_batch_anomaly"]
+    assert len(anomaly_alerts) == 1
+    assert anomaly_alerts[0]["priority"] == "critical"
+    for ticker in tickers:
+        assert ticker in anomaly_alerts[0]["message"]
+    # No per-ticker "orphan_entry_discovered" alerts either - none were
+    # actually recorded.
+    assert [a for a in load_manual_alerts(user_id) if a.get("type") == "orphan_entry_discovered"] == []
+
+
+def test_batch_anomaly_guard_does_not_block_an_ordinary_small_batch(user_id):
+    # Exactly AT the threshold (3) - still the ordinary case this function
+    # exists for, must write normally.
+    tickers = ["AAPL", "MSFT", "TSLA"]
+    rows = [_history_row(_orphan_id(user_id, ticker=t), symbol=t) for t in tickers]
+    with patch.object(pluto_app.webull_api, "get_order_history", return_value=rows):
+        discovered = pluto_app._discover_orphaned_broker_entries(user_id, CREDS, ACCOUNT_ID)
+
+    assert discovered == 3
+    assert len(list_overnight_orders(user_id)) == 3
+    from alerts import load_manual_alerts
+    assert [a for a in load_manual_alerts(user_id) if a.get("type") == "orphan_discovery_batch_anomaly"] == []
+
+
+def test_batch_anomaly_guard_is_idempotent_and_retries_on_a_later_pass(user_id):
+    """The guard only ever skips a single pass's WRITE - it doesn't record
+    anything that would suppress rediscovery, so a later, healthier pass
+    (e.g. once the underlying condition clears) still gets a fair chance
+    to recover the same orphans normally."""
+    tickers = ["AAPL", "MSFT", "TSLA", "NVDA"]
+    rows = [_history_row(_orphan_id(user_id, ticker=t), symbol=t) for t in tickers]
+    with patch.object(pluto_app.webull_api, "get_order_history", return_value=rows):
+        first = pluto_app._discover_orphaned_broker_entries(user_id, CREDS, ACCOUNT_ID)
+    assert first == 0
+    assert list_overnight_orders(user_id) == []
+
+    # A later pass where only ONE of the four still looks orphaned (e.g.
+    # local state genuinely recovered for the other three in the
+    # meantime) is back under the threshold and writes normally.
+    with patch.object(pluto_app.webull_api, "get_order_history", return_value=rows[:1]):
+        second = pluto_app._discover_orphaned_broker_entries(user_id, CREDS, ACCOUNT_ID)
+    assert second == 1
+    assert len(list_overnight_orders(user_id)) == 1
