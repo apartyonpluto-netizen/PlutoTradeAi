@@ -99,13 +99,27 @@ services:
   # currently, a GitHub Actions schedule...)" - a Render Cron Job is a
   # first-party scheduled-invocation primitive on the SAME
   # infrastructure as the web service itself, not a cross-platform
-  # best-effort trigger. The GitHub Actions workflow is deliberately
-  # left in place as a redundant fallback layer, not deleted - same
-  # defense-in-depth precedent already established for
-  # fast-monitor-scheduler.yml. Overlapping triggers from both are safe:
-  # cron-trigger's own per-user user_scan_lock treats a concurrent call
-  # as an ordinary ScanAlreadyRunningError skip, not an error - see
-  # backend/trigger_autonomous_scan.py's own module docstring.
+  # best-effort trigger.
+  #
+  # ALSO the primary trigger for fast-monitor-trigger as of 2026-09-04 -
+  # .github/workflows/fast-monitor-scheduler.yml hit the identical
+  # GitHub-scheduler unreliability (14+ hour gap, workflow still "active",
+  # not a secret/billing issue) that cron-trigger already hit above.
+  # Rather than a second Render Cron Job service (Cron Jobs bill for
+  # runtime, not a flat fee, so a second service would be pure added cost
+  # for no added reliability), backend/trigger_autonomous_scan.py just
+  # makes a second request to fast-monitor-trigger in the same run - see
+  # that script's own module docstring for the full reasoning, including
+  # why giving up the original 2-minute offset between the two schedules
+  # doesn't matter here.
+  #
+  # Both GitHub Actions workflows are deliberately left in place as
+  # redundant fallback layers, not deleted - same defense-in-depth
+  # precedent already established when fast-monitor-scheduler.yml was
+  # first added. Overlapping triggers from any source are safe: both
+  # endpoints' own per-user locks treat a concurrent call as an ordinary
+  # skip, not an error - see backend/trigger_autonomous_scan.py's own
+  # module docstring.
   - type: cron
     name: plutotradeai-autonomous-scan-trigger
     runtime: python
@@ -116,5 +130,7 @@ services:
     envVars:
       - key: CRON_TRIGGER_URL
         value: https://plutotradeai-tqsl.onrender.com/api/autonomy/cron-trigger
+      - key: FAST_MONITOR_TRIGGER_URL
+        value: https://plutotradeai-tqsl.onrender.com/api/autonomy/fast-monitor-trigger
       - key: CRON_SECRET
         sync: false
