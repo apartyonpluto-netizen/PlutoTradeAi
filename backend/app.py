@@ -1706,7 +1706,13 @@ def _build_chart_history_payload(ticker: str) -> Dict[str, object]:
     NaN, which is not valid JSON and would break JSON.parse on the
     receiving end."""
     try:
-        history = alpaca_data.get_bars_single(ticker, period="6mo", interval="1d")
+        # "9mo" - alpaca_data._PERIOD_TO_LOOKBACK_DAYS is a narrow, explicit
+        # allowlist (1d/2d/5d/1mo/9mo only, not a full yfinance-period
+        # emulation) - "6mo" (this function's first guess) raised
+        # ValueError live, confirmed while verifying this very endpoint.
+        # "9mo" is the same value charting_brain.py's build_chart_levels
+        # already uses for its own daily bars.
+        history = alpaca_data.get_bars_single(ticker, period="9mo", interval="1d")
     except Exception as error:  # noqa: BLE001 - a data-fetch failure is a normal, expected outcome for a bad/delisted ticker, not a crash
         return {"ticker": ticker, "candles": [], "error": str(error), "generated_at": _now_utc().isoformat()}
     if history.empty:
