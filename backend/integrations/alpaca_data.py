@@ -74,10 +74,22 @@ _PERIOD_TO_LOOKBACK_DAYS = {
     "9mo": 285,
 }
 
-# yfinance interval string -> Alpaca timeframe string.
+# yfinance-style interval string -> Alpaca timeframe string. Alpaca's real
+# v2 stocks/bars endpoint accepts any "<N><Unit>" combination for Min (1-59)
+# and Hour (1-23), not just a fixed preset list - confirmed against
+# Alpaca's own published API reference (docs.alpaca.markets/reference/
+# stockbars) 2026-09-04 while adding the dashboard chart's own interval
+# selector (1m/5m/10m/15m/30m/1h/1d, matching a real broker's chart
+# granularity options) - so this dict is this APP's own explicit allowlist
+# of what it has actually asked for, not a ceiling Alpaca itself imposes.
 _INTERVAL_TO_ALPACA_TIMEFRAME = {
-    "1d": "1Day",
+    "1m": "1Min",
     "5m": "5Min",
+    "10m": "10Min",
+    "15m": "15Min",
+    "30m": "30Min",
+    "1h": "1Hour",
+    "1d": "1Day",
 }
 
 _REQUIRED_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]

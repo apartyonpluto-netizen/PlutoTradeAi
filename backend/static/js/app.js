@@ -1551,6 +1551,7 @@ const bindMarketOverviewChart = () => {
   const trendLine = document.getElementById("marketOverviewTrendLine");
   const searchForm = document.getElementById("marketOverviewSearchForm");
   const searchInput = document.getElementById("marketOverviewSearchInput");
+  const searchResults = document.getElementById("marketOverviewSearchResults");
   const fullscreenBtn = document.getElementById("marketOverviewFullscreenBtn");
   if (!(panel instanceof HTMLElement) || !(canvas instanceof HTMLElement) || !(trendLine instanceof HTMLElement)) {
     return;
@@ -1614,14 +1615,14 @@ const bindMarketOverviewChart = () => {
   };
 
   let currentMode = "index";
-  let currentRange = "9M";
+  let currentInterval = "1d";
   let customTicker = "";
 
-  // Intraday candles (1D/5D ranges) carry a full ISO timestamp
-  // ("2026-09-04T14:30:00", no offset - Alpaca's bars come back UTC, see
-  // charting_brain.py's own tz_localize("UTC") comment for the same
-  // assumption) so multiple same-day bars plot as distinct points; daily
-  // candles (1M/9M) stay a bare "YYYY-MM-DD". Both need an explicit "Z"
+  // Intraday candles (every interval except "1d") carry a full ISO
+  // timestamp ("2026-09-04T14:30:00", no offset - Alpaca's bars come back
+  // UTC, see charting_brain.py's own tz_localize("UTC") comment for the
+  // same assumption) so multiple same-day bars plot as distinct points;
+  // daily candles stay a bare "YYYY-MM-DD". Both need an explicit "Z"
   // appended before Date() parsing - without it a bare ISO string parses
   // as LOCAL time in the browser, silently shifting every bar by the
   // viewer's own UTC offset.
@@ -1646,14 +1647,14 @@ const bindMarketOverviewChart = () => {
     const ticker = resolveTicker();
     try {
       const [history, levels] = await Promise.all([
-        requestJson(`/api/chart-history/${encodeURIComponent(ticker)}?range=${encodeURIComponent(currentRange)}`),
+        requestJson(`/api/chart-history/${encodeURIComponent(ticker)}?interval=${encodeURIComponent(currentInterval)}`),
         requestJson(`/api/chart-levels/${encodeURIComponent(ticker)}`),
       ]);
 
-      // 1D/5D are intraday (5-minute bars, real timestamps) - show
-      // hour:minute on the time axis instead of just dates, matching how
-      // any real broker's intraday view reads.
-      chart.applyOptions({ timeScale: { timeVisible: currentRange === "1D" || currentRange === "5D" } });
+      // Every interval except daily is intraday (real timestamps, not just
+      // dates) - show hour:minute on the time axis, matching how any real
+      // broker's intraday view reads.
+      chart.applyOptions({ timeScale: { timeVisible: currentInterval !== "1d" } });
 
       const candles = Array.isArray(history.candles) ? history.candles : [];
       if (!candles.length) {
@@ -1703,12 +1704,12 @@ const bindMarketOverviewChart = () => {
     });
   });
 
-  panel.querySelectorAll(".market-overview-toggle-btn[data-range]").forEach((button) => {
+  panel.querySelectorAll(".market-overview-toggle-btn[data-interval]").forEach((button) => {
     button.addEventListener("click", () => {
-      const range = button.dataset.range || "9M";
-      if (range === currentRange) return;
-      currentRange = range;
-      panel.querySelectorAll(".market-overview-toggle-btn[data-range]").forEach((btn) => btn.classList.toggle("is-active", btn === button));
+      const interval = button.dataset.interval || "1d";
+      if (interval === currentInterval) return;
+      currentInterval = interval;
+      panel.querySelectorAll(".market-overview-toggle-btn[data-interval]").forEach((btn) => btn.classList.toggle("is-active", btn === button));
       trendLine.textContent = "Loading real chart data...";
       refresh().catch(() => {});
     });
@@ -1716,16 +1717,124 @@ const bindMarketOverviewChart = () => {
 
   // Any ticker the user wants, not just the AI's suggestion - see this
   // panel's own placeholder text for the exact ask this satisfies.
+  const selectCustomTicker = (symbol) => {
+    const typed = symbol.trim().toUpperCase();
+    if (!typed) return;
+    customTicker = typed;
+    currentMode = "custom";
+    panel.querySelectorAll(".market-overview-toggle-btn[data-mode]").forEach((btn) => btn.classList.remove("is-active"));
+    trendLine.textContent = "Loading real chart data...";
+    refresh().catch(() => {});
+  };
+
   if (searchForm instanceof HTMLFormElement && searchInput instanceof HTMLInputElement) {
     searchForm.addEventListener("submit", (event) => {
       event.preventDefault();
-      const typed = searchInput.value.trim().toUpperCase();
-      if (!typed) return;
-      customTicker = typed;
-      currentMode = "custom";
-      panel.querySelectorAll(".market-overview-toggle-btn[data-mode]").forEach((btn) => btn.classList.remove("is-active"));
-      trendLine.textContent = "Loading real chart data...";
-      refresh().catch(() => {});
+      selectCustomTicker(searchInput.value);
+      if (searchResults instanceof HTMLElement) {
+        searchResults.hidden = true;
+        searchResults.innerHTML = "";
+      }
+    });
+  }
+
+  // Dropdown suggestions while typing - reuses the SAME /api/ticker-search
+  // endpoint (Yahoo-backed, see integrations/alpaca_data.py's own module
+  // docstring for why this one dashboard lookup stays on yfinance rather
+  // than Alpaca: a low-frequency, non-critical autocomplete, not part of
+  // the scan/candidate-discovery path the Alpaca migration was actually
+  // about) the topbar's global ticker search (bindGlobalSearch) already
+  // uses - same debounce/keyboard-nav/click-to-select pattern, just
+  // selecting into this chart instead of navigating to /lookup/<symbol>.
+  if (searchInput instanceof HTMLInputElement && searchResults instanceof HTMLElement) {
+    let debounceTimer = null;
+    let activeIndex = -1;
+    let currentItems = [];
+
+    const closeSuggestions = () => {
+      searchResults.hidden = true;
+      searchResults.innerHTML = "";
+      activeIndex = -1;
+      currentItems = [];
+    };
+
+    const renderSuggestions = (items) => {
+      currentItems = items;
+      activeIndex = -1;
+      if (!items.length) {
+        searchResults.innerHTML = '<div class="global-search-empty">No matching tickers found.</div>';
+        searchResults.hidden = false;
+        return;
+      }
+      searchResults.innerHTML = items
+        .map(
+          (item, index) => `
+        <div class="global-search-result" data-index="${index}" data-symbol="${escapeHtml(item.symbol)}">
+          <b>${escapeHtml(item.symbol)}</b>
+          <span>${escapeHtml(item.name)} · ${escapeHtml(item.exchange)}</span>
+        </div>`
+        )
+        .join("");
+      searchResults.hidden = false;
+    };
+
+    searchInput.addEventListener("input", () => {
+      const query = searchInput.value.trim();
+      if (debounceTimer) window.clearTimeout(debounceTimer);
+      if (query.length < 1) {
+        closeSuggestions();
+        return;
+      }
+      debounceTimer = window.setTimeout(async () => {
+        try {
+          const payload = await requestJson(`/api/ticker-search?q=${encodeURIComponent(query)}`);
+          renderSuggestions(payload.results || []);
+        } catch (_error) {
+          closeSuggestions();
+        }
+      }, 250);
+    });
+
+    searchResults.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const row = target.closest(".global-search-result");
+      if (!(row instanceof HTMLElement) || !row.dataset.symbol) return;
+      searchInput.value = row.dataset.symbol;
+      closeSuggestions();
+      selectCustomTicker(row.dataset.symbol);
+    });
+
+    searchInput.addEventListener("keydown", (event) => {
+      if (searchResults.hidden || !currentItems.length) return;
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        activeIndex = Math.min(activeIndex + 1, currentItems.length - 1);
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        activeIndex = Math.max(activeIndex - 1, 0);
+      } else if (event.key === "Enter") {
+        if (activeIndex >= 0 && currentItems[activeIndex]) {
+          event.preventDefault();
+          searchInput.value = currentItems[activeIndex].symbol;
+          closeSuggestions();
+          selectCustomTicker(currentItems[activeIndex].symbol);
+        }
+        return;
+      } else if (event.key === "Escape") {
+        closeSuggestions();
+        return;
+      } else {
+        return;
+      }
+      Array.from(searchResults.children).forEach((child, index) => {
+        child.classList.toggle("active", index === activeIndex);
+      });
+    });
+
+    document.addEventListener("click", (event) => {
+      if (!(event.target instanceof Node)) return;
+      if (!searchInput.parentElement?.contains(event.target)) closeSuggestions();
     });
   }
 

@@ -175,11 +175,15 @@ def test_unsupported_period_raises_immediately_not_a_bad_request_to_alpaca(monke
 
 
 def test_unsupported_interval_raises_immediately_not_a_bad_request_to_alpaca(monkeypatch):
+    # "1h" was the original example here, but it's a genuinely supported
+    # interval as of 2026-09-04 (added alongside the dashboard chart's own
+    # interval selector - see _INTERVAL_TO_ALPACA_TIMEFRAME) - "3h" is not
+    # in that allowlist and still exercises the same fail-closed behavior.
     monkeypatch.setenv("ALPACA_API_KEY_ID", "key123")
     monkeypatch.setenv("ALPACA_API_SECRET_KEY", "secret456")
     with patch.object(alpaca_data.requests, "get") as mock_get:
         with pytest.raises(ValueError, match="Unsupported interval"):
-            alpaca_data.get_bars(["AAPL"], period="1mo", interval="1h")
+            alpaca_data.get_bars(["AAPL"], period="1mo", interval="3h")
     mock_get.assert_not_called()
 
 
