@@ -485,6 +485,11 @@ PATTERN_CACHE: Dict[str, object] = {"ticker_key": (), "rows": [], "errors": [], 
 OPTIONS_CACHE: Dict[str, Dict[str, object]] = {}
 STRATEGY_CACHE: Dict[str, Dict[str, object]] = {}
 CHART_LEVEL_CACHE: Dict[str, Dict[str, object]] = {}
+# Raw OHLC history for the real dashboard chart (2026-09-04) - a sibling
+# cache to CHART_LEVEL_CACHE, same TTL idiom, kept separate on purpose:
+# single responsibility (candles vs. computed levels), and the two are
+# fetched together by the frontend but don't need to invalidate together.
+CHART_HISTORY_CACHE: Dict[str, Dict[str, object]] = {}
 CACHE_SECONDS = 45
 ANALYTICS_CACHE_SECONDS = 180
 NEWS_CACHE_SECONDS = 120
@@ -492,6 +497,7 @@ PATTERN_CACHE_SECONDS = 180
 OPTIONS_CACHE_SECONDS = 150
 STRATEGY_CACHE_SECONDS = 120
 CHART_LEVEL_CACHE_SECONDS = 120
+CHART_HISTORY_CACHE_SECONDS = 120
 
 NAV_ITEMS = [
     {"label": "Mission Briefing", "path": "/"},
@@ -1685,6 +1691,63 @@ def get_chart_levels_for_ticker(
     CHART_LEVEL_CACHE[normalized_ticker] = {
         "payload": payload,
         "expires_at": _now_utc() + timedelta(seconds=CHART_LEVEL_CACHE_SECONDS),
+    }
+    return payload
+
+
+def _build_chart_history_payload(ticker: str) -> Dict[str, object]:
+    """Raw daily OHLC candles for the real dashboard chart (2026-09-04) -
+    the SAME alpaca_data.get_bars_single call charting_brain.py's
+    build_chart_levels already uses internally (real, Alpaca-sourced, not
+    Yahoo - see that module's own migration comment), just exposed here as
+    plain candles instead of computed levels. A dropped/NaN close (e.g. the
+    most recent bar before today's session has fully settled - observed
+    live this session) is excluded rather than sent to the frontend as
+    NaN, which is not valid JSON and would break JSON.parse on the
+    receiving end."""
+    try:
+        history = alpaca_data.get_bars_single(ticker, period="6mo", interval="1d")
+    except Exception as error:  # noqa: BLE001 - a data-fetch failure is a normal, expected outcome for a bad/delisted ticker, not a crash
+        return {"ticker": ticker, "candles": [], "error": str(error), "generated_at": _now_utc().isoformat()}
+    if history.empty:
+        return {"ticker": ticker, "candles": [], "error": "No historical data available.", "generated_at": _now_utc().isoformat()}
+
+    candles: List[Dict[str, object]] = []
+    for index, row in history.iterrows():
+        close = row.get("Close")
+        if close is None or (isinstance(close, float) and math.isnan(close)):
+            continue
+        candles.append(
+            {
+                "date": index.strftime("%Y-%m-%d"),
+                "open": round(float(row["Open"]), 2),
+                "high": round(float(row["High"]), 2),
+                "low": round(float(row["Low"]), 2),
+                "close": round(float(close), 2),
+                "volume": int(row.get("Volume", 0) or 0),
+            }
+        )
+    return {"ticker": ticker, "candles": candles, "error": "", "generated_at": _now_utc().isoformat()}
+
+
+def get_chart_history_for_ticker(ticker: str, force_refresh: bool = False) -> Dict[str, object]:
+    normalized_ticker = ticker.strip().upper()
+    if not normalized_ticker:
+        raise ValueError("Ticker is required.")
+
+    cached_item = CHART_HISTORY_CACHE.get(normalized_ticker)
+    if (
+        not force_refresh
+        and isinstance(cached_item, dict)
+        and isinstance(cached_item.get("expires_at"), datetime)
+        and cached_item["expires_at"] > _now_utc()
+    ):
+        return cached_item["payload"]
+
+    payload = _build_chart_history_payload(normalized_ticker)
+    CHART_HISTORY_CACHE[normalized_ticker] = {
+        "payload": payload,
+        "expires_at": _now_utc() + timedelta(seconds=CHART_HISTORY_CACHE_SECONDS),
     }
     return payload
 
@@ -3525,6 +3588,18 @@ def api_chart_levels_ticker(ticker: str):
     force_refresh = request.args.get("refresh", "false").lower() == "true"
     payload = get_chart_levels_for_ticker(ticker=ticker, force_refresh=force_refresh)
     return _api_success(payload, chart_levels=payload, ok=True)
+
+
+@app.route("/api/chart-history/<ticker>", methods=["GET"])
+@api_guard
+def api_chart_history_ticker(ticker: str):
+    """Raw OHLC candles for the real dashboard chart (2026-09-04) - paired
+    with /api/chart-levels/<ticker> above by the frontend (candles here,
+    computed support/resistance/EMA/VWAP there), kept as two separate
+    single-responsibility endpoints rather than one combined payload."""
+    force_refresh = request.args.get("refresh", "false").lower() == "true"
+    payload = get_chart_history_for_ticker(ticker=ticker, force_refresh=force_refresh)
+    return _api_success(payload, chart_history=payload, ok=True)
 
 
 @app.route("/api/reversal-map", methods=["GET"])

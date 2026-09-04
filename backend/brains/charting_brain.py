@@ -107,6 +107,158 @@ def _zone(center: float | None, width_pct: float = 0.004) -> Dict[str, float] | 
     }
 
 
+# Trend/consolidation flag detection (2026-09-04) - a direct port of
+# analytics.py's detect_early_trends, moved onto Alpaca daily bars instead
+# of Yahoo (analytics.py's own fetch_price_history uses yf.Ticker(...) -
+# the same source charting_brain.py itself already migrated away from, per
+# the migration comment on build_chart_levels below). This is a PORT, not a
+# refactor: analytics.py's own detect_early_trends is untouched and still
+# used by its existing callers - the logic below is reproduced against the
+# same `daily` OHLCV frame build_chart_levels already fetched, so this adds
+# zero extra API calls.
+
+
+def _is_strictly_rising(series: pd.Series) -> bool:
+    values = series.dropna().tolist()
+    return len(values) >= 3 and all(values[index] > values[index - 1] for index in range(1, len(values)))
+
+
+def _is_strictly_falling(series: pd.Series) -> bool:
+    values = series.dropna().tolist()
+    return len(values) >= 3 and all(values[index] < values[index - 1] for index in range(1, len(values)))
+
+
+def _moving_average(series: pd.Series, window: int) -> float:
+    dropped = series.dropna()
+    if len(dropped) < window:
+        return float(dropped.mean()) if not dropped.empty else 0.0
+    return float(dropped.tail(window).mean())
+
+
+def _candle_reversal_signal(history: pd.DataFrame, support: float, resistance: float) -> bool:
+    if len(history) < 2:
+        return False
+
+    latest = history.iloc[-1]
+    previous = history.iloc[-2]
+    body = abs(float(latest["Close"]) - float(latest["Open"]))
+    range_size = max(0.0001, float(latest["High"]) - float(latest["Low"]))
+    lower_wick = min(float(latest["Open"]), float(latest["Close"])) - float(latest["Low"])
+    upper_wick = float(latest["High"]) - max(float(latest["Open"]), float(latest["Close"]))
+
+    bullish_engulfing = (
+        float(previous["Close"]) < float(previous["Open"])
+        and float(latest["Close"]) > float(latest["Open"])
+        and float(latest["Open"]) < float(previous["Close"])
+        and float(latest["Close"]) > float(previous["Open"])
+    )
+    bearish_engulfing = (
+        float(previous["Close"]) > float(previous["Open"])
+        and float(latest["Close"]) < float(latest["Open"])
+        and float(latest["Open"]) > float(previous["Close"])
+        and float(latest["Close"]) < float(previous["Open"])
+    )
+
+    hammer_like = lower_wick > body * 1.8 and lower_wick > upper_wick * 1.2 and body / range_size < 0.5
+    rejection_like = upper_wick > body * 1.8 and upper_wick > lower_wick * 1.2 and body / range_size < 0.5
+
+    near_support = abs(float(latest["Close"]) - support) / support <= 0.015 if support else False
+    near_resistance = abs(float(latest["Close"]) - resistance) / resistance <= 0.015 if resistance else False
+
+    return (near_support and (bullish_engulfing or hammer_like)) or (
+        near_resistance and (bearish_engulfing or rejection_like)
+    )
+
+
+def detect_trend_flags(daily: pd.DataFrame, support: float, resistance: float) -> Dict[str, object]:
+    """Alpaca-sourced trend/consolidation classification - see the module
+    comment above for why this is a port, not new analysis. `support`/
+    `resistance` are meant to be the NEAREST actionable levels to current
+    price (build_chart_levels passes breakdown_level/breakout_level, the
+    same role analytics.py's build_reversal_map's simple support/resistance
+    played for the original), not the full major/minor level lists.
+    Surfaced on the dashboard as plain trend labels (e.g. "higher highs,
+    higher lows - uptrend intact"), not literal drawn chart shapes - see
+    static/js/app.js's bindMarketOverviewChart for how these booleans get
+    turned into that label text."""
+    if daily.empty:
+        return {}
+
+    recent = daily.tail(40)
+    if len(recent) < 2:
+        return {}
+    latest = recent.iloc[-1]
+    prev = recent.iloc[-2]
+    avg_volume = float(recent["Volume"].tail(20).mean()) if "Volume" in recent else 0.0
+    latest_volume = float(latest["Volume"]) if "Volume" in recent else 0.0
+
+    volume_expansion = avg_volume > 0 and latest_volume >= avg_volume * 1.5
+    volume_compression = avg_volume > 0 and latest_volume <= avg_volume * 0.7
+    unusual_volume = avg_volume > 0 and latest_volume >= avg_volume * 2.2
+
+    higher_lows = _is_strictly_rising(recent["Low"].tail(4))
+    lower_highs = _is_strictly_falling(recent["High"].tail(4))
+    higher_highs = _is_strictly_rising(recent["High"].tail(4))
+    lower_lows = _is_strictly_falling(recent["Low"].tail(4))
+
+    latest_close = float(latest["Close"])
+    prev_close = float(prev["Close"])
+    latest_open = float(latest["Open"])
+    latest_high = float(latest["High"])
+    latest_low = float(latest["Low"])
+
+    trend_continuation = higher_highs and higher_lows and latest_close > prev_close
+    trend_reversal = (higher_lows and latest_close > latest_open and prev_close < latest_open) or (
+        lower_highs and latest_close < latest_open and prev_close > latest_open
+    )
+    breakout_forming = higher_lows and latest_close < resistance and resistance > 0 and (resistance - latest_close) / resistance <= 0.015
+    failed_breakout = prev_close > resistance and latest_close < resistance
+    failed_breakdown = prev_close < support and latest_close > support
+    candle_reversal = _candle_reversal_signal(recent, support=support, resistance=resistance)
+
+    body = abs(latest_close - latest_open)
+    range_size = max(0.0001, latest_high - latest_low)
+    upper_wick = latest_high - max(latest_open, latest_close)
+    lower_wick = min(latest_open, latest_close) - latest_low
+
+    bull_flag = trend_continuation and volume_compression and latest_close > _moving_average(recent["Close"], 20)
+    bear_flag = lower_lows and volume_compression and latest_close < _moving_average(recent["Close"], 20)
+    gap_up = latest_low > float(prev["High"])
+    gap_down = latest_high < float(prev["Low"])
+    institutional_buying = volume_expansion and latest_close > latest_open and latest_close >= latest_high - (range_size * 0.2)
+    sector_momentum = latest_close > _moving_average(recent["Close"], 8) > _moving_average(recent["Close"], 21)
+    relative_strength = latest_close > _moving_average(recent["Close"], 14)
+    # Consolidation: neither trending up nor down, and volume has dried up -
+    # no equivalent flag existed in the original analytics.py version, but
+    # this is exactly what the user asked to see called out.
+    consolidating = not (higher_highs or lower_lows or trend_continuation) and volume_compression
+
+    return {
+        "volume_expansion": volume_expansion,
+        "volume_compression": volume_compression,
+        "higher_highs": higher_highs,
+        "higher_lows": higher_lows,
+        "lower_highs": lower_highs,
+        "lower_lows": lower_lows,
+        "bull_flag": bull_flag,
+        "bear_flag": bear_flag,
+        "failed_breakout": failed_breakout,
+        "failed_breakdown": failed_breakdown,
+        "trend_continuation": trend_continuation,
+        "trend_reversal": trend_reversal or candle_reversal,
+        "institutional_buying": institutional_buying,
+        "sector_momentum": sector_momentum,
+        "relative_strength": relative_strength,
+        "gap_up": gap_up,
+        "gap_down": gap_down,
+        "unusual_volume": unusual_volume,
+        "breakout_forming": breakout_forming,
+        "candle_reversal_near_support_resistance": candle_reversal,
+        "consolidating": consolidating,
+        "spinning_top": body / range_size <= 0.25 and upper_wick > body and lower_wick > body,
+    }
+
+
 def build_chart_levels(ticker: str, extended_hours: Dict[str, object] | None = None) -> Dict[str, object]:
     normalized = ticker.strip().upper()
     if not normalized:
@@ -155,6 +307,7 @@ def build_chart_levels(ticker: str, extended_hours: Dict[str, object] | None = N
 
     breakout_level = _pick_nearest_above(major_resistance + minor_resistance, current_price) or max(major_resistance)
     breakdown_level = _pick_nearest_below(major_support + minor_support, current_price) or min(major_support)
+    trend_flags = detect_trend_flags(daily, support=float(breakdown_level), resistance=float(breakout_level))
 
     if intraday.index.tz is None:
         intraday.index = intraday.index.tz_localize("UTC")
@@ -224,6 +377,7 @@ def build_chart_levels(ticker: str, extended_hours: Dict[str, object] | None = N
         "breakdown_level": _round_level(float(breakdown_level)),
         "reversal_zone": reversal_zone,
         "invalidation_level": invalidation_level,
+        "trend_flags": trend_flags,
         "ai_chart_marks": ai_chart_marks,
         "levels_to_manually_mark": ai_chart_marks,
         "research_only": True,
