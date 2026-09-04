@@ -1,6 +1,9 @@
 {% extends "base.html" %}
 {% block title %}PlutoTrade AI · Mission Control{% endblock %}
 {% block body_class %}mission-control-page{% endblock %}
+{% block head_extras %}
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.2.1/dist/lightweight-charts.standalone.production.js"></script>
+{% endblock %}
 
 {% block content %}
 <section class="glass-panel account-balance-topbar">
@@ -169,12 +172,16 @@
                     <div><time>16:00</time><span>Market Close</span></div>
                 </div>
             </article>
-            <article class="glass-panel mini-panel">
-                <div class="panel-head"><h3>Market Overview Chart</h3><span>Intraday</span></div>
-                <div class="chart-line" aria-hidden="true"><span></span></div>
-                <ul class="chart-labels">
-                    <li>9:30</li><li>11:00</li><li>1:00</li><li>3:30</li>
-                </ul>
+            <article class="glass-panel mini-panel market-overview-panel" data-market-overview-chart data-top-candidate-ticker="{{ upcoming_opportunities[0].ticker if upcoming_opportunities else '' }}">
+                <div class="panel-head">
+                    <h3>Market Overview Chart</h3>
+                    <div class="market-overview-toggle" role="group" aria-label="Chart symbol">
+                        <button type="button" class="market-overview-toggle-btn is-active" data-mode="index">SPY</button>
+                        <button type="button" class="market-overview-toggle-btn" data-mode="candidate">Top candidate</button>
+                    </div>
+                </div>
+                <div class="market-overview-chart-canvas" id="marketOverviewChartCanvas" aria-label="Real price chart with support, resistance, and trend levels"></div>
+                <p class="market-overview-trend-line muted" id="marketOverviewTrendLine">Loading real chart data...</p>
             </article>
         </section>
 

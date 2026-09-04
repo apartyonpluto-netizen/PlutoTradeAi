@@ -1515,6 +1515,172 @@ const bindLiveDataStatusCard = () => {
   }, 30000);
 };
 
+const TREND_FLAG_LABELS = [
+  ["consolidating", "Consolidating - range-bound, volume drying up"],
+  ["bull_flag", "Bull flag - continuation setup forming"],
+  ["bear_flag", "Bear flag - continuation setup forming"],
+  ["failed_breakout", "Failed breakout - reversed back below resistance"],
+  ["failed_breakdown", "Failed breakdown - reversed back above support"],
+  ["breakout_forming", "Breakout forming near resistance"],
+  ["trend_continuation", "Higher highs, higher lows - uptrend intact"],
+  ["trend_reversal", "Possible reversal signal at a key level"],
+  ["gap_up", "Gapped up from the prior session"],
+  ["gap_down", "Gapped down from the prior session"],
+  ["unusual_volume", "Unusual volume today"],
+];
+
+const describeTrendFlags = (flags) => {
+  if (!flags || typeof flags !== "object") return "";
+  const match = TREND_FLAG_LABELS.find(([key]) => flags[key] === true);
+  return match ? match[1] : "No notable pattern flagged right now.";
+};
+
+// Real dashboard chart (2026-09-04) - replaces the old decorative
+// .chart-line placeholder with a genuine candlestick chart via
+// lightweight-charts (TradingView's open-source library, loaded on the
+// dashboard page only - see templates/dashboard.html's head_extras
+// block), overlaid with real support/resistance/EMA/VWAP levels from
+// /api/chart-levels/<ticker> (brains/charting_brain.py, Alpaca-sourced).
+// Defaults to SPY ("Market Overview"), toggles to the scanner's current
+// top-confidence candidate (its ticker is server-rendered into the
+// panel's own data-top-candidate-ticker attribute - no extra endpoint
+// needed just to expose one string).
+const bindMarketOverviewChart = () => {
+  const panel = document.querySelector("[data-market-overview-chart]");
+  const canvas = document.getElementById("marketOverviewChartCanvas");
+  const trendLine = document.getElementById("marketOverviewTrendLine");
+  if (!(panel instanceof HTMLElement) || !(canvas instanceof HTMLElement) || !(trendLine instanceof HTMLElement)) {
+    return;
+  }
+  if (!window.LightweightCharts) {
+    trendLine.textContent = "Chart library failed to load.";
+    return;
+  }
+
+  const styles = getComputedStyle(document.documentElement);
+  const colorVar = (name, fallback) => (styles.getPropertyValue(name) || "").trim() || fallback;
+  const textPrimary = colorVar("--text-primary", "#f8f4ff");
+  const textMuted = colorVar("--text-muted", "#8a7d9d");
+  const borderColor = colorVar("--border", "rgba(150, 114, 196, 0.22)");
+  const positive = colorVar("--positive", "#58d8a8");
+  const negative = colorVar("--negative", "#e2564f");
+  const accent = colorVar("--accent", "#bb82ff");
+
+  const { createChart, CandlestickSeries } = window.LightweightCharts;
+  const chart = createChart(canvas, {
+    autoSize: true,
+    layout: { background: { color: "transparent" }, textColor: textMuted, fontSize: 11 },
+    grid: { vertLines: { visible: false }, horzLines: { color: borderColor } },
+    rightPriceScale: { borderColor },
+    timeScale: { borderColor, timeVisible: false },
+    crosshair: { mode: 0 },
+  });
+  const series = chart.addSeries(CandlestickSeries, {
+    upColor: positive,
+    downColor: negative,
+    borderVisible: false,
+    wickUpColor: positive,
+    wickDownColor: negative,
+  });
+  let priceLines = [];
+
+  const clearPriceLines = () => {
+    priceLines.forEach((line) => {
+      try {
+        series.removePriceLine(line);
+      } catch (_error) {
+        // already gone - nothing to do
+      }
+    });
+    priceLines = [];
+  };
+
+  const addLevelLine = (price, color, title, dashed = false) => {
+    const value = Number(price);
+    if (!Number.isFinite(value) || value <= 0) return;
+    priceLines.push(
+      series.createPriceLine({
+        price: value,
+        color,
+        lineWidth: 1,
+        lineStyle: dashed ? 2 : 0,
+        axisLabelVisible: true,
+        title,
+      })
+    );
+  };
+
+  let currentMode = "index";
+
+  const resolveTicker = () => {
+    if (currentMode === "candidate") {
+      const ticker = (panel.dataset.topCandidateTicker || "").trim().toUpperCase();
+      return ticker || "SPY";
+    }
+    return "SPY";
+  };
+
+  const refresh = async () => {
+    const ticker = resolveTicker();
+    try {
+      const [history, levels] = await Promise.all([
+        requestJson(`/api/chart-history/${encodeURIComponent(ticker)}`),
+        requestJson(`/api/chart-levels/${encodeURIComponent(ticker)}`),
+      ]);
+
+      const candles = Array.isArray(history.candles) ? history.candles : [];
+      if (!candles.length) {
+        trendLine.textContent = history.error || `No chart data available for ${ticker} right now.`;
+        series.setData([]);
+        clearPriceLines();
+        return;
+      }
+
+      series.setData(
+        candles.map((candle) => ({
+          time: Math.floor(new Date(`${candle.date}T00:00:00Z`).getTime() / 1000),
+          open: candle.open,
+          high: candle.high,
+          low: candle.low,
+          close: candle.close,
+        }))
+      );
+      chart.timeScale().fitContent();
+
+      clearPriceLines();
+      if (!levels.insufficient_data) {
+        addLevelLine(levels.breakout_level, positive, "Breakout");
+        addLevelLine(levels.breakdown_level, negative, "Breakdown");
+        (levels.major_resistance_levels || []).forEach((level) => addLevelLine(level, positive, "Resistance", true));
+        (levels.major_support_levels || []).forEach((level) => addLevelLine(level, negative, "Support", true));
+        addLevelLine(levels.ema_20, accent, "EMA20", true);
+        addLevelLine(levels.vwap, textMuted, "VWAP", true);
+      }
+
+      const trendSummary = describeTrendFlags(levels.trend_flags);
+      trendLine.textContent = `${ticker}: ${trendSummary}`;
+    } catch (error) {
+      trendLine.textContent = `Chart data unavailable: ${error.message}`;
+    }
+  };
+
+  panel.querySelectorAll(".market-overview-toggle-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      const mode = button.dataset.mode === "candidate" ? "candidate" : "index";
+      if (mode === currentMode) return;
+      currentMode = mode;
+      panel.querySelectorAll(".market-overview-toggle-btn").forEach((btn) => btn.classList.toggle("is-active", btn === button));
+      trendLine.textContent = "Loading real chart data...";
+      refresh().catch(() => {});
+    });
+  });
+
+  refresh().catch(() => {});
+  window.setInterval(() => {
+    refresh().catch(() => {});
+  }, 60000);
+};
+
 const paperTradePnlCell = (trade) => {
   if (trade.pnl === "" || trade.pnl === undefined || trade.pnl === null) return "<td>—</td>";
   const pnl = Number(trade.pnl);
@@ -2107,6 +2273,7 @@ onReady(() => {
   bindNotificationsPage();
   bindMissionControlEffects();
   bindLiveDataStatusCard();
+  bindMarketOverviewChart();
   bindMissionAlertFloater();
   refreshRelativeTimes();
   window.setInterval(refreshRelativeTimes, 30000);
