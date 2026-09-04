@@ -2440,6 +2440,62 @@ select:focus {
     color: var(--text-primary);
 }
 
+.market-overview-fullscreen-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    line-height: 1;
+    padding: 4px 8px;
+    cursor: pointer;
+}
+
+.market-overview-fullscreen-btn:hover {
+    border-color: var(--accent);
+    color: var(--text-primary);
+}
+
+.market-overview-search {
+    display: flex;
+    gap: 6px;
+    margin: 8px 0;
+}
+
+.market-overview-search-input {
+    flex: 1;
+    background: var(--bg-elevated-soft);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: 0.75rem;
+    padding: 5px 10px;
+    min-width: 0;
+}
+
+.market-overview-search-input::placeholder {
+    color: var(--text-muted);
+}
+
+.market-overview-search-btn {
+    background: var(--accent-soft);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: 0.72rem;
+    padding: 5px 12px;
+    cursor: pointer;
+}
+
+.market-overview-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+
 .market-overview-chart-canvas {
     height: 260px;
     border-radius: var(--radius-sm);
@@ -2449,6 +2505,22 @@ select:focus {
 .market-overview-trend-line {
     margin: 8px 0 0;
     font-size: 0.72rem;
+}
+
+/* Real browser Fullscreen API (element.requestFullscreen()), not a CSS-only
+   modal - the panel itself becomes the fullscreen element, so it needs an
+   opaque background and a taller canvas while active; lightweight-charts'
+   own autoSize:true handles resizing the plot itself via ResizeObserver. */
+.market-overview-panel:fullscreen {
+    background: var(--bg-base);
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+}
+
+.market-overview-panel:fullscreen .market-overview-chart-canvas {
+    height: auto;
+    flex: 1;
 }
 
 .lookup-chart-svg {

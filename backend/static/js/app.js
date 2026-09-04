@@ -1549,6 +1549,9 @@ const bindMarketOverviewChart = () => {
   const panel = document.querySelector("[data-market-overview-chart]");
   const canvas = document.getElementById("marketOverviewChartCanvas");
   const trendLine = document.getElementById("marketOverviewTrendLine");
+  const searchForm = document.getElementById("marketOverviewSearchForm");
+  const searchInput = document.getElementById("marketOverviewSearchInput");
+  const fullscreenBtn = document.getElementById("marketOverviewFullscreenBtn");
   if (!(panel instanceof HTMLElement) || !(canvas instanceof HTMLElement) || !(trendLine instanceof HTMLElement)) {
     return;
   }
@@ -1611,8 +1614,27 @@ const bindMarketOverviewChart = () => {
   };
 
   let currentMode = "index";
+  let currentRange = "9M";
+  let customTicker = "";
+
+  // Intraday candles (1D/5D ranges) carry a full ISO timestamp
+  // ("2026-09-04T14:30:00", no offset - Alpaca's bars come back UTC, see
+  // charting_brain.py's own tz_localize("UTC") comment for the same
+  // assumption) so multiple same-day bars plot as distinct points; daily
+  // candles (1M/9M) stay a bare "YYYY-MM-DD". Both need an explicit "Z"
+  // appended before Date() parsing - without it a bare ISO string parses
+  // as LOCAL time in the browser, silently shifting every bar by the
+  // viewer's own UTC offset.
+  const parseCandleTime = (dateStr) => {
+    const hasClock = dateStr.includes("T");
+    const iso = hasClock ? (/[Zz]$|[+-]\d\d:?\d\d$/.test(dateStr) ? dateStr : `${dateStr}Z`) : `${dateStr}T00:00:00Z`;
+    return Math.floor(new Date(iso).getTime() / 1000);
+  };
 
   const resolveTicker = () => {
+    if (currentMode === "custom") {
+      return customTicker || "SPY";
+    }
     if (currentMode === "candidate") {
       const ticker = (panel.dataset.topCandidateTicker || "").trim().toUpperCase();
       return ticker || "SPY";
@@ -1624,9 +1646,14 @@ const bindMarketOverviewChart = () => {
     const ticker = resolveTicker();
     try {
       const [history, levels] = await Promise.all([
-        requestJson(`/api/chart-history/${encodeURIComponent(ticker)}`),
+        requestJson(`/api/chart-history/${encodeURIComponent(ticker)}?range=${encodeURIComponent(currentRange)}`),
         requestJson(`/api/chart-levels/${encodeURIComponent(ticker)}`),
       ]);
+
+      // 1D/5D are intraday (5-minute bars, real timestamps) - show
+      // hour:minute on the time axis instead of just dates, matching how
+      // any real broker's intraday view reads.
+      chart.applyOptions({ timeScale: { timeVisible: currentRange === "1D" || currentRange === "5D" } });
 
       const candles = Array.isArray(history.candles) ? history.candles : [];
       if (!candles.length) {
@@ -1638,7 +1665,7 @@ const bindMarketOverviewChart = () => {
 
       series.setData(
         candles.map((candle) => ({
-          time: Math.floor(new Date(`${candle.date}T00:00:00Z`).getTime() / 1000),
+          time: parseCandleTime(candle.date),
           open: candle.open,
           high: candle.high,
           low: candle.low,
@@ -1664,16 +1691,66 @@ const bindMarketOverviewChart = () => {
     }
   };
 
-  panel.querySelectorAll(".market-overview-toggle-btn").forEach((button) => {
+  panel.querySelectorAll(".market-overview-toggle-btn[data-mode]").forEach((button) => {
     button.addEventListener("click", () => {
       const mode = button.dataset.mode === "candidate" ? "candidate" : "index";
       if (mode === currentMode) return;
       currentMode = mode;
-      panel.querySelectorAll(".market-overview-toggle-btn").forEach((btn) => btn.classList.toggle("is-active", btn === button));
+      panel.querySelectorAll(".market-overview-toggle-btn[data-mode]").forEach((btn) => btn.classList.toggle("is-active", btn === button));
+      if (searchInput instanceof HTMLInputElement) searchInput.value = "";
       trendLine.textContent = "Loading real chart data...";
       refresh().catch(() => {});
     });
   });
+
+  panel.querySelectorAll(".market-overview-toggle-btn[data-range]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const range = button.dataset.range || "9M";
+      if (range === currentRange) return;
+      currentRange = range;
+      panel.querySelectorAll(".market-overview-toggle-btn[data-range]").forEach((btn) => btn.classList.toggle("is-active", btn === button));
+      trendLine.textContent = "Loading real chart data...";
+      refresh().catch(() => {});
+    });
+  });
+
+  // Any ticker the user wants, not just the AI's suggestion - see this
+  // panel's own placeholder text for the exact ask this satisfies.
+  if (searchForm instanceof HTMLFormElement && searchInput instanceof HTMLInputElement) {
+    searchForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const typed = searchInput.value.trim().toUpperCase();
+      if (!typed) return;
+      customTicker = typed;
+      currentMode = "custom";
+      panel.querySelectorAll(".market-overview-toggle-btn[data-mode]").forEach((btn) => btn.classList.remove("is-active"));
+      trendLine.textContent = "Loading real chart data...";
+      refresh().catch(() => {});
+    });
+  }
+
+  // Real browser Fullscreen API - this is a production page, not a
+  // sandboxed embed, so the actual element.requestFullscreen() works
+  // normally (unlike an iframe-embedded widget, which can't use it).
+  // autoSize:true on the chart (see createChart above) already resizes
+  // the plot itself via ResizeObserver once the panel's own dimensions
+  // change entering/exiting fullscreen - no manual chart.resize() needed.
+  if (fullscreenBtn instanceof HTMLButtonElement && document.fullscreenEnabled) {
+    fullscreenBtn.addEventListener("click", () => {
+      if (document.fullscreenElement === panel) {
+        document.exitFullscreen().catch(() => {});
+      } else {
+        panel.requestFullscreen().catch(() => {});
+      }
+    });
+    document.addEventListener("fullscreenchange", () => {
+      const isFullscreen = document.fullscreenElement === panel;
+      fullscreenBtn.textContent = isFullscreen ? "✕" : "⛶";
+      fullscreenBtn.setAttribute("aria-label", isFullscreen ? "Exit full screen" : "Expand chart to full screen");
+    });
+  } else if (fullscreenBtn instanceof HTMLButtonElement) {
+    fullscreenBtn.style.display = "none";
+  }
 
   refresh().catch(() => {});
   window.setInterval(() => {

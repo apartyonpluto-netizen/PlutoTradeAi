@@ -175,9 +175,22 @@
             <article class="glass-panel mini-panel market-overview-panel" data-market-overview-chart data-top-candidate-ticker="{{ upcoming_opportunities[0].ticker if upcoming_opportunities else '' }}">
                 <div class="panel-head">
                     <h3>Market Overview Chart</h3>
+                    <button type="button" class="market-overview-fullscreen-btn" id="marketOverviewFullscreenBtn" aria-label="Expand chart to full screen" title="Full screen">⛶</button>
+                </div>
+                <form class="market-overview-search" id="marketOverviewSearchForm" role="search" aria-label="Look up a ticker">
+                    <input type="text" class="market-overview-search-input" id="marketOverviewSearchInput" placeholder="Search any ticker (e.g. AAPL)" autocomplete="off" spellcheck="false" maxlength="10">
+                    <button type="submit" class="market-overview-search-btn">Go</button>
+                </form>
+                <div class="market-overview-controls">
                     <div class="market-overview-toggle" role="group" aria-label="Chart symbol">
                         <button type="button" class="market-overview-toggle-btn is-active" data-mode="index">SPY</button>
                         <button type="button" class="market-overview-toggle-btn" data-mode="candidate">Top candidate</button>
+                    </div>
+                    <div class="market-overview-toggle market-overview-range-toggle" role="group" aria-label="Chart time range">
+                        <button type="button" class="market-overview-toggle-btn" data-range="1D">1D</button>
+                        <button type="button" class="market-overview-toggle-btn" data-range="5D">5D</button>
+                        <button type="button" class="market-overview-toggle-btn" data-range="1M">1M</button>
+                        <button type="button" class="market-overview-toggle-btn is-active" data-range="9M">9M</button>
                     </div>
                 </div>
                 <div class="market-overview-chart-canvas" id="marketOverviewChartCanvas" aria-label="Real price chart with support, resistance, and trend levels"></div>

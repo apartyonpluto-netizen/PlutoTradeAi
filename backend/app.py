@@ -1695,9 +1695,27 @@ def get_chart_levels_for_ticker(
     return payload
 
 
-def _build_chart_history_payload(ticker: str) -> Dict[str, object]:
-    """Raw daily OHLC candles for the real dashboard chart (2026-09-04) -
-    the SAME alpaca_data.get_bars_single call charting_brain.py's
+# Maps a user-facing chart range (2026-09-04 - "different time intervals to
+# get a more in-depth look") to a (period, interval) pair alpaca_data.
+# get_bars_single actually accepts - _PERIOD_TO_LOOKBACK_DAYS/
+# _INTERVAL_TO_ALPACA_TIMEFRAME in integrations/alpaca_data.py are narrow,
+# explicit allowlists (1d/2d/5d/1mo/9mo periods; 1d/5m intervals only, not a
+# full yfinance-style range emulation), so every entry here is deliberately
+# one of those already-confirmed-valid combinations - no new alpaca_data
+# code needed. "9M" is the pre-existing default (unchanged for any caller
+# that doesn't pass ?range=).
+CHART_RANGE_TO_PERIOD_INTERVAL: Dict[str, Tuple[str, str]] = {
+    "1D": ("1d", "5m"),
+    "5D": ("5d", "5m"),
+    "1M": ("1mo", "1d"),
+    "9M": ("9mo", "1d"),
+}
+DEFAULT_CHART_RANGE = "9M"
+
+
+def _build_chart_history_payload(ticker: str, chart_range: str = DEFAULT_CHART_RANGE) -> Dict[str, object]:
+    """Raw OHLC candles for the real dashboard chart (2026-09-04) - the
+    SAME alpaca_data.get_bars_single call charting_brain.py's
     build_chart_levels already uses internally (real, Alpaca-sourced, not
     Yahoo - see that module's own migration comment), just exposed here as
     plain candles instead of computed levels. A dropped/NaN close (e.g. the
@@ -1705,19 +1723,15 @@ def _build_chart_history_payload(ticker: str) -> Dict[str, object]:
     live this session) is excluded rather than sent to the frontend as
     NaN, which is not valid JSON and would break JSON.parse on the
     receiving end."""
+    period, interval = CHART_RANGE_TO_PERIOD_INTERVAL.get(chart_range, CHART_RANGE_TO_PERIOD_INTERVAL[DEFAULT_CHART_RANGE])
     try:
-        # "9mo" - alpaca_data._PERIOD_TO_LOOKBACK_DAYS is a narrow, explicit
-        # allowlist (1d/2d/5d/1mo/9mo only, not a full yfinance-period
-        # emulation) - "6mo" (this function's first guess) raised
-        # ValueError live, confirmed while verifying this very endpoint.
-        # "9mo" is the same value charting_brain.py's build_chart_levels
-        # already uses for its own daily bars.
-        history = alpaca_data.get_bars_single(ticker, period="9mo", interval="1d")
+        history = alpaca_data.get_bars_single(ticker, period=period, interval=interval)
     except Exception as error:  # noqa: BLE001 - a data-fetch failure is a normal, expected outcome for a bad/delisted ticker, not a crash
-        return {"ticker": ticker, "candles": [], "error": str(error), "generated_at": _now_utc().isoformat()}
+        return {"ticker": ticker, "range": chart_range, "candles": [], "error": str(error), "generated_at": _now_utc().isoformat()}
     if history.empty:
-        return {"ticker": ticker, "candles": [], "error": "No historical data available.", "generated_at": _now_utc().isoformat()}
+        return {"ticker": ticker, "range": chart_range, "candles": [], "error": "No historical data available.", "generated_at": _now_utc().isoformat()}
 
+    intraday = interval != "1d"
     candles: List[Dict[str, object]] = []
     for index, row in history.iterrows():
         close = row.get("Close")
@@ -1725,7 +1739,11 @@ def _build_chart_history_payload(ticker: str) -> Dict[str, object]:
             continue
         candles.append(
             {
-                "date": index.strftime("%Y-%m-%d"),
+                # Intraday bars need a real timestamp (lightweight-charts
+                # plots multiple same-day bars distinctly only with one) -
+                # daily bars keep the plain date string every existing
+                # caller of this endpoint already expects.
+                "date": index.isoformat() if intraday else index.strftime("%Y-%m-%d"),
                 "open": round(float(row["Open"]), 2),
                 "high": round(float(row["High"]), 2),
                 "low": round(float(row["Low"]), 2),
@@ -1733,15 +1751,19 @@ def _build_chart_history_payload(ticker: str) -> Dict[str, object]:
                 "volume": int(row.get("Volume", 0) or 0),
             }
         )
-    return {"ticker": ticker, "candles": candles, "error": "", "generated_at": _now_utc().isoformat()}
+    return {"ticker": ticker, "range": chart_range, "candles": candles, "error": "", "generated_at": _now_utc().isoformat()}
 
 
-def get_chart_history_for_ticker(ticker: str, force_refresh: bool = False) -> Dict[str, object]:
+def get_chart_history_for_ticker(ticker: str, chart_range: str = DEFAULT_CHART_RANGE, force_refresh: bool = False) -> Dict[str, object]:
     normalized_ticker = ticker.strip().upper()
     if not normalized_ticker:
         raise ValueError("Ticker is required.")
+    normalized_range = chart_range.strip().upper() if chart_range else DEFAULT_CHART_RANGE
+    if normalized_range not in CHART_RANGE_TO_PERIOD_INTERVAL:
+        normalized_range = DEFAULT_CHART_RANGE
 
-    cached_item = CHART_HISTORY_CACHE.get(normalized_ticker)
+    cache_key = f"{normalized_ticker}:{normalized_range}"
+    cached_item = CHART_HISTORY_CACHE.get(cache_key)
     if (
         not force_refresh
         and isinstance(cached_item, dict)
@@ -1750,8 +1772,8 @@ def get_chart_history_for_ticker(ticker: str, force_refresh: bool = False) -> Di
     ):
         return cached_item["payload"]
 
-    payload = _build_chart_history_payload(normalized_ticker)
-    CHART_HISTORY_CACHE[normalized_ticker] = {
+    payload = _build_chart_history_payload(normalized_ticker, normalized_range)
+    CHART_HISTORY_CACHE[cache_key] = {
         "payload": payload,
         "expires_at": _now_utc() + timedelta(seconds=CHART_HISTORY_CACHE_SECONDS),
     }
@@ -3602,9 +3624,15 @@ def api_chart_history_ticker(ticker: str):
     """Raw OHLC candles for the real dashboard chart (2026-09-04) - paired
     with /api/chart-levels/<ticker> above by the frontend (candles here,
     computed support/resistance/EMA/VWAP there), kept as two separate
-    single-responsibility endpoints rather than one combined payload."""
+    single-responsibility endpoints rather than one combined payload.
+
+    ?range= (added 2026-09-04, "different time intervals to get a more
+    in-depth look") selects one of CHART_RANGE_TO_PERIOD_INTERVAL's keys
+    (1D/5D/1M/9M) - defaults to 9M (this endpoint's original, only
+    behavior) for any caller that doesn't pass it."""
     force_refresh = request.args.get("refresh", "false").lower() == "true"
-    payload = get_chart_history_for_ticker(ticker=ticker, force_refresh=force_refresh)
+    chart_range = request.args.get("range", DEFAULT_CHART_RANGE)
+    payload = get_chart_history_for_ticker(ticker=ticker, chart_range=chart_range, force_refresh=force_refresh)
     return _api_success(payload, chart_history=payload, ok=True)
 
 
