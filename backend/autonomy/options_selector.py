@@ -25,18 +25,55 @@ option-snapshot routes, not assumed from documentation."""
 # own short-horizon signal, and keeps premium cost from ballooning with
 # extra extrinsic value for time this app's signal doesn't actually predict.
 DEFAULT_MIN_DAYS_OUT = 7
-DEFAULT_MAX_DAYS_OUT = 21
+
+# Loosened 21 -> 35 (2026-09-09) - a full live trading day produced ZERO
+# options trades despite qualifying candidates and a wired, working
+# selector (see the options_attempted/option_contract_found funnel
+# counters added the same day - app.py's _run_autonomous_trade_scan_locked
+# and autonomy/efficiency_report.py). The leading suspect: most
+# single-name tickers only list MONTHLY expirations (~4-5 weeks apart), so
+# a 7-21 day window can land in a dead zone between cycles and return zero
+# contracts even though the ticker has a perfectly normal, liquid chain 25
+# or 30 days out. 35 reliably covers one full monthly cycle from any scan
+# day. DEFAULT_MIN_DAYS_OUT is untouched - it's a risk floor (0DTE/gamma
+# pin), not implicated by "found nothing," so there's no reason to trade
+# away that safety margin on the same hunch.
+#
+# This is a deliberate, reasoned exception to this feature's own "measure,
+# don't guess" plan (see the trading-efficiency funnel work landed the
+# same day) - applied on the user's explicit go-ahead rather than waiting
+# for that report to accumulate real production days. Revisit with real
+# option_attempted/option_contract_found numbers once they exist; if the
+# funnel report shows contracts are still not being found within 35 days,
+# the days-out window was not the actual bottleneck and this should be
+# reconsidered rather than loosened further blind.
+DEFAULT_MAX_DAYS_OUT = 35
 
 # Strike search band around the current price - contracts outside this are
-# not considered "near the money" for this selector's purposes.
-DEFAULT_STRIKE_BAND_PCT = 0.05
+# not considered "near the money" for this selector's purposes. Widened
+# 0.05 -> 0.08 (2026-09-09, same reasoning as DEFAULT_MAX_DAYS_OUT above) -
+# still a tight, genuinely near-the-money band (an 8% move either side of
+# the current price), but gives the listed-strike grid (commonly $5-$10
+# apart for a $100-400 underlying) more room to actually contain a strike,
+# rather than a $95-$105 window on a $100 stock that can come up empty
+# depending on where the exchange's strike grid happens to fall.
+DEFAULT_STRIKE_BAND_PCT = 0.08
 
 # A contract whose bid-ask spread (relative to the mid price) is wider than
 # this is skipped - not tradeable cleanly regardless of direction
 # confidence. Deep-OTM/illiquid contracts (see the $0.04/$0.07 ADBE example
-# found live during this feature's own discovery pass) can have enormous
-# relative spreads on a tiny premium.
-DEFAULT_MAX_SPREAD_PCT = 0.25
+# found live during this feature's own discovery pass, ~54% spread) can
+# have enormous relative spreads on a tiny premium - that pathological
+# case is still rejected well under the loosened threshold below.
+#
+# Loosened 0.25 -> 0.35 (2026-09-09, same reasoning as the two thresholds
+# above) - a real, tradeable market on a single-name (non-mega-cap)
+# underlying routinely runs a wider spread than a 25% cap allows,
+# especially a few strikes from the money; 35% still excludes genuinely
+# illiquid/untradeable markets like the ADBE example above by a wide
+# margin, while giving up less on execution quality than accepting zero
+# fills does.
+DEFAULT_MAX_SPREAD_PCT = 0.35
 
 
 def _parse_float(value: Any) -> Optional[float]:
