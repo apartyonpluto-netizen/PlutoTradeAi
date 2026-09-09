@@ -175,6 +175,34 @@ def build_strategy_intelligence(
         vwap = float((typical_price * intraday_volume).cumsum().iloc[-1] / intraday_volume.cumsum().iloc[-1])
 
     current_price = float(closes.iloc[-1])
+    price_source = "daily_close"
+    # The daily bar's own close lags real price action during the trading
+    # day it's still forming - found live 2026-09-03 investigating a real
+    # candidate (MSTR) whose EMA stack sat wildly far from its own quoted
+    # entry price (see backend/scripts/diag_mstr_ema.py, the diagnostic
+    # this fix came from): every signal below (day_change_pct,
+    # near_support/near_resistance/near_vwap, in_uptrend/in_downtrend,
+    # confidence scoring) reads current_price, so a stale anchor here
+    # silently degrades all of them at once - not a cosmetic display
+    # value. This is very likely why the LLM-reasoning veto step (app.py)
+    # keeps independently flagging "the EMA stack looks stale/mis-synced
+    # relative to current price" on otherwise-plausible candidates: it's
+    # correctly catching a real data problem one step downstream, at the
+    # cost of a wasted candidate each time.
+    #
+    # NEVER during backtest_mode - see backtest_engine.py's own real
+    # caller (build_strategy_intelligence(..., backtest_mode=True) with a
+    # historically-sliced `daily` frame): substituting TODAY's real-time
+    # price into a PAST day's evaluation would be genuine look-ahead bias,
+    # not a fix.
+    if not backtest_mode:
+        try:
+            realtime_price = alpaca_data.get_latest_trade_price(normalized)
+        except Exception:  # noqa: BLE001 - best-effort upgrade; the daily close is still a valid (if stale) fallback
+            realtime_price = None
+        if realtime_price is not None and realtime_price > 0:
+            current_price = float(realtime_price)
+            price_source = "realtime"
     previous_close = float(closes.iloc[-2])
     today_open = float(opens.iloc[-1])
     today_high = float(highs.iloc[-1])
@@ -382,6 +410,7 @@ def build_strategy_intelligence(
         "live_or_delayed": "Delayed",
         "market_context": {
             "current_price": round(current_price, 2),
+            "price_source": price_source,
             "day_change_percent": round(day_change_pct, 2),
             "gap_percent": round(gap_pct, 2),
             "extended_gap_percent": round(extended_gap, 2),

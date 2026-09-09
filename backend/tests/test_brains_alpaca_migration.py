@@ -89,6 +89,102 @@ def test_strategy_brain_produces_a_real_result_from_a_realistic_alpaca_response(
     assert isinstance(result["strategy_confidence"], int)
 
 
+# --- market_context.current_price: real-time price, not the stale daily
+# close (2026-09-04, root-caused via backend/scripts/diag_mstr_ema.py - a
+# real candidate whose EMA stack sat wildly far from its own quoted entry
+# price, traced back to current_price being the last DAILY bar's close,
+# not a fresh quote) ---------------------------------------------------
+
+
+def test_current_price_uses_the_real_time_quote_when_available():
+    daily = _daily_frame(120, start_price=100.0)  # last daily close ~100
+    intraday = _intraday_frame(60, start_price=100.0)
+
+    with patch.object(strategy_brain.alpaca_data, "get_bars_single", side_effect=[daily, intraday]), \
+         patch.object(strategy_brain.alpaca_data, "get_latest_trade_price", return_value=142.50):
+        result = strategy_brain.build_strategy_intelligence("AAPL")
+
+    market_context = result["market_context"]
+    assert market_context["current_price"] == 142.50
+    assert market_context["price_source"] == "realtime"
+
+
+def test_current_price_falls_back_to_daily_close_when_realtime_returns_none():
+    daily = _daily_frame(120)
+    intraday = _intraday_frame(60)
+    expected_close = round(float(daily["Close"].iloc[-1]), 2)
+
+    with patch.object(strategy_brain.alpaca_data, "get_bars_single", side_effect=[daily, intraday]), \
+         patch.object(strategy_brain.alpaca_data, "get_latest_trade_price", return_value=None):
+        result = strategy_brain.build_strategy_intelligence("AAPL")
+
+    market_context = result["market_context"]
+    assert market_context["current_price"] == expected_close
+    assert market_context["price_source"] == "daily_close"
+
+
+def test_current_price_falls_back_to_daily_close_when_realtime_raises():
+    daily = _daily_frame(120)
+    intraday = _intraday_frame(60)
+    expected_close = round(float(daily["Close"].iloc[-1]), 2)
+
+    with patch.object(strategy_brain.alpaca_data, "get_bars_single", side_effect=[daily, intraday]), \
+         patch.object(strategy_brain.alpaca_data, "get_latest_trade_price", side_effect=RuntimeError("rate limited")):
+        result = strategy_brain.build_strategy_intelligence("AAPL")
+
+    market_context = result["market_context"]
+    assert market_context["current_price"] == expected_close
+    assert market_context["price_source"] == "daily_close"
+
+
+def test_current_price_falls_back_when_realtime_is_zero_or_negative():
+    """A zero/negative price is never a valid real-time quote - treated
+    the same as "couldn't get one", not blindly trusted."""
+    daily = _daily_frame(120)
+    intraday = _intraday_frame(60)
+    expected_close = round(float(daily["Close"].iloc[-1]), 2)
+
+    with patch.object(strategy_brain.alpaca_data, "get_bars_single", side_effect=[daily, intraday]), \
+         patch.object(strategy_brain.alpaca_data, "get_latest_trade_price", return_value=0.0):
+        result = strategy_brain.build_strategy_intelligence("AAPL")
+
+    assert result["market_context"]["current_price"] == expected_close
+    assert result["market_context"]["price_source"] == "daily_close"
+
+
+def test_backtest_mode_never_calls_get_latest_trade_price():
+    """Critical look-ahead-bias guard: backtest_engine.py evaluates a PAST
+    day using a historically-sliced `daily` frame - substituting TODAY's
+    real-time price into that evaluation would leak future information
+    into a historical decision, not fix anything."""
+    daily = _daily_frame(120)
+    empty_intraday = _empty_frame()
+
+    with patch.object(strategy_brain.alpaca_data, "get_latest_trade_price") as mock_realtime:
+        result = strategy_brain.build_strategy_intelligence(
+            "AAPL", daily=daily, intraday=empty_intraday, backtest_mode=True
+        )
+
+    mock_realtime.assert_not_called()
+    assert result["market_context"]["price_source"] == "daily_close"
+
+
+def test_day_change_percent_reflects_the_realtime_price_not_the_stale_one():
+    """The whole point: every downstream signal reads current_price, so a
+    fresher price must actually change what's computed from it, not just
+    display differently."""
+    daily = _daily_frame(120, start_price=100.0)
+    intraday = _intraday_frame(60, start_price=100.0)
+    previous_close = float(daily["Close"].iloc[-2])
+
+    with patch.object(strategy_brain.alpaca_data, "get_bars_single", side_effect=[daily, intraday]), \
+         patch.object(strategy_brain.alpaca_data, "get_latest_trade_price", return_value=142.50):
+        result = strategy_brain.build_strategy_intelligence("AAPL")
+
+    expected_day_change = round((142.50 - previous_close) / previous_close * 100, 2)
+    assert result["market_context"]["day_change_percent"] == expected_day_change
+
+
 # --- charting_brain ------------------------------------------------------
 
 
