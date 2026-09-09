@@ -9840,6 +9840,18 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
 
     placed: List[Dict[str, object]] = []
     skipped: List[Dict[str, object]] = []
+    # Options-path funnel counters (2026-09-09) - tracked independently of
+    # placed/skipped because a found-but-too-small-to-size option contract
+    # falls straight through to the equity path with no placed/skipped
+    # record of its own (see the "additive, not a replacement" comment
+    # above the options-attempt block below) - without these counters that
+    # attempt would be invisible to the new efficiency report entirely.
+    # option_attempted counts every candidate for which a contract lookup
+    # was actually made (margin account + valid price); option_contract_found
+    # counts how many of those lookups returned a real, listed contract,
+    # regardless of what happened after (sized to zero, submitted, failed).
+    option_attempted = 0
+    option_contract_found = 0
 
     # Leading market-regime SHADOW signal (VIX) - fetched/computed ONCE per
     # scan tick, before ANY candidate is evaluated, so every research-log
@@ -9976,18 +9988,23 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         surface_in_summary = False
         if not entries_allowed and opp_was_qualifying:
             reason = new_entries_blocked_reason
+            skip_category = "entries_blocked"
         elif opp_was_qualifying:
             reason = f"max_positions limit reached ({open_position_count}/{max_positions} open)" if max_positions > 0 else "no position slots available"
             surface_in_summary = True
+            skip_category = "max_positions"
         elif str(opp.get("recommendation", "")).upper() in ("CALL", "PUT"):
             reason = f"confidence {opp.get('confidence')} below {OVERNIGHT_MIN_CONFIDENCE} threshold"
+            skip_category = "confidence_threshold"
         else:
             reason = f"recommendation is {opp.get('recommendation')}, only CALL/PUT setups auto-order tonight"
+            skip_category = "not_call_or_put"
         skip_record = {
             "ticker": opp.get("ticker"),
             "recommendation": opp.get("recommendation"),
             "confidence": opp.get("confidence"),
             "reason_skipped": reason,
+            "skip_category": skip_category,
         }
         if surface_in_summary:
             skip_record["was_qualifying"] = True
@@ -10015,7 +10032,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             # account, which the broker would reject anyway.
             reason = "no margin account available for a PUT/short entry"
             skipped.append(
-                {"ticker": ticker, "recommendation": opp.get("recommendation"), "confidence": opp.get("confidence"), "reason_skipped": reason, "was_qualifying": True}
+                {"ticker": ticker, "recommendation": opp.get("recommendation"), "confidence": opp.get("confidence"), "reason_skipped": reason, "was_qualifying": True, "skip_category": "no_margin_account"}
             )
             _log_research_decision(
                 ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
@@ -10039,6 +10056,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         # straight through to the unmodified equity code below, exactly as
         # if this block didn't exist.
         if margin_account_id and limit_price > 0:
+            option_attempted += 1
             try:
                 option_contract = select_option_contract(
                     creds["app_key"], creds["app_secret"], ticker,
@@ -10048,6 +10066,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 logger.warning("select_option_contract failed for %s, falling back to the equity path: %s", ticker, error)
                 option_contract = None
             if option_contract:
+                option_contract_found += 1
                 # Reuses the SAME account-level reservation pool a short
                 # candidate on this account would use (not a separate
                 # options-only bucket) - deliberately conservative: this
@@ -10091,12 +10110,21 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                         "sizing_constraints": option_sizing["constraints"],
                         "binding_constraints": option_sizing["binding_constraints"],
                         "trading_day": today_key,
+                        # Stamped here, not per-branch below, so every
+                        # eventual outcome (preview/placed/failed/
+                        # unknown_submission_state) carries it uniformly -
+                        # see the option_attempted/option_contract_found
+                        # counters above for the funnel-level view of this
+                        # same signal. True unconditionally here because
+                        # this dict only gets built once select_option_contract
+                        # has already returned a real, non-None contract.
+                        "instrument_type": "OPTION",
+                        "option_contract_found": True,
                     }
                     option_limit_price = round(option_contract["ask"], 2)
                     option_cost_reservation = _to_decimal(option_sizing["cost_per_contract"]) * _to_decimal(option_quantity)
                     if dry_run:
                         option_entry["status"] = "preview"
-                        option_entry["instrument_type"] = "OPTION"
                         option_entry["option_symbol"] = option_contract["option_symbol"]
                         option_entry["strike"] = option_contract["strike"]
                         option_entry["expiration_date"] = option_contract["expiration_date"]
@@ -10118,12 +10146,14 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                             option_entry["error"] = option_entry.get(
                                 "error", "order submission result could not be confirmed (ambiguous broker response)"
                             )
+                            option_entry["skip_category"] = "unknown_submission_state"
                             local_reservations_by_account[margin_account_id] += option_cost_reservation
                             skipped.append(option_entry)
                         else:
                             option_entry["status"] = "failed" if option_lifecycle_state == ol.ENTRY_FAILED else "placed"
                             if option_entry["status"] == "failed":
                                 option_entry["error"] = option_entry.get("error", "entry order failed")
+                                option_entry["skip_category"] = "entry_failed"
                                 skipped.append(option_entry)
                             else:
                                 placed.append(option_entry)
@@ -10131,6 +10161,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                     except Exception as error:  # noqa: BLE001 - one bad ticker shouldn't kill the whole batch, same discipline as the equity path below
                         option_entry["status"] = "failed"
                         option_entry["error"] = str(error)
+                        option_entry["skip_category"] = "entry_failed"
                         skipped.append(option_entry)
                     record_overnight_order(user_id, option_entry)
                     _log_research_decision(
@@ -10202,6 +10233,8 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                     # zero shares showed up as "N qualifying, 0 placed" with
                     # no trace of why anywhere a human could see it.
                     "was_qualifying": True,
+                    "skip_category": "sizing_too_small",
+                    "instrument_type": "EQUITY",
                 }
             )
             _log_research_decision(
@@ -10247,6 +10280,11 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             # stop/target client_order_ids this entry would have used - see
             # order_lifecycle.deterministic_client_order_id.
             "trading_day": today_key,
+            # Stamped here, not per-branch below, so every eventual outcome
+            # (preview/llm_veto/price_drift/placed/failed/
+            # unknown_submission_state) carries it uniformly - mirrors the
+            # same field on option_entry above.
+            "instrument_type": "EQUITY",
         }
 
         # Leading market-regime SHADOW observation (VIX, see regime.py and
@@ -10287,6 +10325,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 # See the sizing-rejection skip's own comment above - same
                 # "surface it in the scan-run reason text" reasoning.
                 entry["was_qualifying"] = True
+                entry["skip_category"] = "llm_veto"
                 skipped.append(entry)
                 if not dry_run:
                     record_overnight_order(user_id, entry)
@@ -10353,6 +10392,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 entry["status"] = "skipped"
                 entry["reason_skipped"] = drift_reason
                 entry["was_qualifying"] = True
+                entry["skip_category"] = "price_drift"
                 skipped.append(entry)
                 record_overnight_order(user_id, entry)
                 _log_research_decision(
@@ -10389,6 +10429,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 entry["error"] = entry.get(
                     "error", "order submission result could not be confirmed (ambiguous broker response)"
                 )
+                entry["skip_category"] = "unknown_submission_state"
                 # Conservative: reserve the full attempted notional exactly
                 # like a confirmed placement - the broker may well have
                 # accepted this order even though the response was lost, and
@@ -10419,6 +10460,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 entry["status"] = "failed" if lifecycle_state == ol.ENTRY_FAILED else "placed"
                 if entry["status"] == "failed":
                     entry["error"] = entry.get("error", "entry order failed")
+                    entry["skip_category"] = "entry_failed"
                     skipped.append(entry)
                 else:
                     placed.append(entry)
@@ -10431,6 +10473,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         except Exception as error:  # noqa: BLE001 - one bad ticker shouldn't kill the whole batch
             entry["status"] = "failed"
             entry["error"] = str(error)
+            entry["skip_category"] = "entry_failed"
             skipped.append(entry)
         if isinstance(entry.get("regime_shadow"), dict):
             # Backfilled here, not at construction time - entry_client_order_id
@@ -10475,6 +10518,11 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         "candidates_qualifying": len(qualifying),
         "entries_allowed": entries_allowed,
         "new_entries_blocked_reason": new_entries_blocked_reason,
+        # Funnel-level options stats (2026-09-09) - see the counters'
+        # own comment near their initialization for why these can't be
+        # fully reconstructed from placed/skipped alone.
+        "option_attempted": option_attempted,
+        "option_contract_found": option_contract_found,
         "guardrail": "DAY limit orders in the Webull sandbox only. Session auto-selected by time of day.",
     }
 
@@ -10640,12 +10688,39 @@ def _summarize_scan_result_for_run_log(scan_result: Dict[str, object]) -> Dict[s
         details = "; ".join(f"{e.get('ticker', '?')} ({e['reason_skipped']})" for e in silently_skipped)
         reason_parts.append(f"not submitted - {details}")
 
+    # Trading-efficiency funnel (2026-09-09) - tallies the skip_category
+    # field stamped at every skip site in _run_autonomous_trade_scan_locked
+    # (see that function's per-candidate loop) into per-category counts for
+    # this one tick, so autonomy/efficiency_report.py can sum them across a
+    # window without re-parsing free-text reason strings. A record written
+    # before skip_category existed simply has no entries here - not an
+    # error, just "no category data for this tick" (see
+    # SCAN_RUN_LOG_SCHEMA_VERSION's own "additive fields" convention).
+    skip_categories: Dict[str, int] = {}
+    for entry in skipped:
+        if not isinstance(entry, dict):
+            continue
+        category = entry.get("skip_category")
+        if category:
+            skip_categories[category] = skip_categories.get(category, 0) + 1
+
+    # Mirrors option_attempted/option_contract_found from the scan result
+    # itself (counted independently of placed/skipped - see those counters'
+    # own comment in _run_autonomous_trade_scan_locked for why a found-but-
+    # too-small-to-size option contract would otherwise be invisible here).
+    option_stats = {
+        "attempted": int(scan_result.get("option_attempted") or 0),
+        "contract_found": int(scan_result.get("option_contract_found") or 0),
+    }
+
     return {
         "candidates_found": candidates_found,
         "candidates_qualifying": candidates_qualifying,
         "orders_attempted": len(submission_attempted),
         "orders_outcomes": outcomes,
         "reason": " | ".join(reason_parts),
+        "skip_categories": skip_categories,
+        "option_stats": option_stats,
     }
 
 

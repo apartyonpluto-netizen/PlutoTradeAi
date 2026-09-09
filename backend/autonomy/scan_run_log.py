@@ -32,7 +32,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
 USER_DATA_ROOT = DATA_DIR / "users"
 
-SCAN_RUN_LOG_SCHEMA_VERSION = 1
+SCAN_RUN_LOG_SCHEMA_VERSION = 2
 
 # Records are kept per-user forever by default in overnight_orders.py and
 # research_log.py, but a scan-run record is written on EVERY cron tick for
