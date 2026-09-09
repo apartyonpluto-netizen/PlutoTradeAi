@@ -111,6 +111,7 @@ if __package__:
     from .autonomy.closed_trades import get_closed_trade, list_closed_trades, record_closed_trade
     from .autonomy.performance_report import build_performance_report
     from .autonomy.daily_digest import build_daily_digest
+    from .autonomy.efficiency_report import build_efficiency_report
     from .fast_monitor_heartbeat import (
         get_heartbeat_status as get_fast_monitor_heartbeat_status,
         record_run_completed as record_fast_monitor_run_completed,
@@ -265,6 +266,7 @@ else:
     from autonomy.closed_trades import get_closed_trade, list_closed_trades, record_closed_trade
     from autonomy.performance_report import build_performance_report
     from autonomy.daily_digest import build_daily_digest
+    from autonomy.efficiency_report import build_efficiency_report
     from fast_monitor_heartbeat import (
         get_heartbeat_status as get_fast_monitor_heartbeat_status,
         record_run_completed as record_fast_monitor_run_completed,
@@ -10588,6 +10590,23 @@ def api_autonomy_scan_runs():
     limit = max(1, min(limit, 200))
     runs = list_scan_runs(user_id, limit=limit)
     return _api_success({"scan_runs": runs}, ok=True, scan_runs=runs)
+
+
+@app.route("/api/autonomy/efficiency-report", methods=["GET"])
+@api_guard
+def api_autonomy_efficiency_report():
+    """Authenticated, per-session, same conventions as
+    /api/autonomy/scan-runs just above. Wraps
+    autonomy/efficiency_report.py's build_efficiency_report - the
+    conversion-funnel (found -> qualifying -> placed), ranked skip-reason
+    breakdown, and options attempted-vs-found stats behind the "Trading
+    Efficiency" dashboard panel. See that module's own docstring for why
+    this is reporting-only and never feeds back into the live scan."""
+    user_id = _current_user_id()
+    days = request.args.get("days", default=7, type=int)
+    days = max(1, min(days, 90))
+    report = build_efficiency_report(user_id, days=days)
+    return _api_success(report, ok=True, efficiency_report=report)
 
 
 def _webull_secret_values_for_redaction(user_id: str) -> List[str]:

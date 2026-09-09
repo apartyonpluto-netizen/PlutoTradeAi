@@ -1515,6 +1515,85 @@ const bindLiveDataStatusCard = () => {
   }, 30000);
 };
 
+// Trading-efficiency funnel panel (2026-09-09) - found -> qualifying ->
+// placed conversion, a ranked skip-reason breakdown, and options
+// attempted-vs-found, backed by /api/autonomy/efficiency-report (see
+// autonomy/efficiency_report.py). Mirrors bindLiveDataStatusCard's own
+// guard-then-fetch-then-poll structure exactly.
+const SKIP_CATEGORY_LABELS = {
+  confidence_threshold: "Below confidence threshold",
+  max_positions: "Max positions reached",
+  entries_blocked: "New entries blocked this tick",
+  not_call_or_put: "Not a CALL/PUT setup",
+  no_margin_account: "No margin account for a short/PUT",
+  sizing_too_small: "Sized to zero shares/contracts",
+  llm_veto: "LLM reasoning vetoed",
+  price_drift: "Price drifted before submission",
+  entry_failed: "Order submission failed",
+  unknown_submission_state: "Ambiguous broker response",
+};
+
+const describeSkipCategory = (category) => SKIP_CATEGORY_LABELS[category] || category;
+
+const bindTradingEfficiencyPanel = () => {
+  const foundNode = document.getElementById("tradingEfficiencyFound");
+  const qualifyingNode = document.getElementById("tradingEfficiencyQualifying");
+  const placedNode = document.getElementById("tradingEfficiencyPlaced");
+  const conversionNode = document.getElementById("tradingEfficiencyConversionRate");
+  const categoriesNode = document.getElementById("tradingEfficiencySkipCategories");
+  const optionStatsNode = document.getElementById("tradingEfficiencyOptionStats");
+  if (
+    !(foundNode instanceof HTMLElement) ||
+    !(qualifyingNode instanceof HTMLElement) ||
+    !(placedNode instanceof HTMLElement) ||
+    !(conversionNode instanceof HTMLElement) ||
+    !(categoriesNode instanceof HTMLElement) ||
+    !(optionStatsNode instanceof HTMLElement)
+  ) {
+    return;
+  }
+
+  const renderSkipCategories = (topSkipCategories = []) => {
+    if (!topSkipCategories.length) {
+      categoriesNode.innerHTML = '<p class="muted">No skipped candidates in this window.</p>';
+      return;
+    }
+    categoriesNode.innerHTML = topSkipCategories
+      .map(
+        (row) =>
+          `<div><span>${describeSkipCategory(row.category)}</span><b>${row.count}</b></div>`
+      )
+      .join("");
+  };
+
+  const refresh = async () => {
+    try {
+      const payload = await requestJson("/api/autonomy/efficiency-report?days=7");
+      foundNode.textContent = String(payload.candidates_found ?? 0);
+      qualifyingNode.textContent = String(payload.candidates_qualifying ?? 0);
+      placedNode.textContent = String(payload.placed ?? 0);
+      conversionNode.textContent =
+        payload.conversion_rate_percent === null || payload.conversion_rate_percent === undefined
+          ? "--"
+          : `${payload.conversion_rate_percent}%`;
+      renderSkipCategories(payload.top_skip_categories);
+      const optionStats = payload.option_stats || {};
+      const attempted = optionStats.attempted ?? 0;
+      const contractFound = optionStats.contract_found ?? 0;
+      optionStatsNode.textContent = attempted
+        ? `Options: ${contractFound} contract(s) found out of ${attempted} attempted`
+        : "Options: no attempts in this window";
+    } catch (_error) {
+      categoriesNode.innerHTML = '<p class="muted">Efficiency report unavailable right now.</p>';
+    }
+  };
+
+  refresh().catch(() => {});
+  window.setInterval(() => {
+    refresh().catch(() => {});
+  }, 60000);
+};
+
 const TREND_FLAG_LABELS = [
   ["consolidating", "Consolidating - range-bound, volume drying up"],
   ["bull_flag", "Bull flag - continuation setup forming"],
@@ -2459,6 +2538,7 @@ onReady(() => {
   bindNotificationsPage();
   bindMissionControlEffects();
   bindLiveDataStatusCard();
+  bindTradingEfficiencyPanel();
   bindMarketOverviewChart();
   bindMissionAlertFloater();
   refreshRelativeTimes();

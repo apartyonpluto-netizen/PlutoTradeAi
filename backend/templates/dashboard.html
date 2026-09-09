@@ -379,6 +379,20 @@
     </div>
 </section>
 
+<section class="panel" id="tradingEfficiencyPanel">
+    <div class="panel-head"><h3>Trading Efficiency</h3><span id="tradingEfficiencyWindowLabel">Last 7 days</span></div>
+    <div class="price-map-grid">
+        <div><small>Found</small><b id="tradingEfficiencyFound">--</b></div>
+        <div><small>Qualifying</small><b id="tradingEfficiencyQualifying">--</b></div>
+        <div><small>Placed</small><b id="tradingEfficiencyPlaced">--</b></div>
+        <div><small>Conversion Rate</small><b id="tradingEfficiencyConversionRate">--</b></div>
+    </div>
+    <div class="brief-list" id="tradingEfficiencySkipCategories" style="margin-top: 12px;">
+        <p class="muted">Loading skip-reason breakdown...</p>
+    </div>
+    <p class="muted" id="tradingEfficiencyOptionStats" style="margin-top: 8px;">Options: --</p>
+</section>
+
 <div class="mission-brief-overlay {% if not mission_brief_should_show %}dismissed{% endif %}" id="missionBriefOverlay">
     <article class="mission-brief-card">
         <div class="panel-head">
