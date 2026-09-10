@@ -2248,8 +2248,33 @@ def _build_page_context(
         support = (chart.get("major_support_levels") or [breakdown_level])[0]
         resistance = (chart.get("major_resistance_levels") or [breakout_level])[0]
         current_price = float(scanner_row.get("price", strategy.get("market_context", {}).get("current_price", 0)) or 0)
+        ideal_entry = round(breakout_level * 1.001, 2) if bias == "CALL" else round(breakdown_level * 0.999, 2)
         target = round(breakout_level * 1.02, 2) if bias == "CALL" else round(breakdown_level * 0.98, 2)
         stop = round(breakdown_level * 0.997, 2) if bias == "CALL" else round(breakout_level * 1.003, 2)
+
+        # A CALL/PUT call is only actually tradeable if its chart
+        # breakout/breakdown levels produced a usable protective structure:
+        # entry, stop and target all > 0 and on the right sides (long:
+        # stop < entry < target; short: the mirror). When
+        # get_chart_levels_for_ticker returns 0 for a level it couldn't
+        # identify, these zero out - and a candidate that reaches
+        # _run_autonomous_trade_scan_locked like that is now rejected there
+        # (skip_category="unprotectable_levels", 2026-09-10, the root-cause
+        # fix for the 2026-09-04 orphan cascade). It should never have
+        # looked tradeable on the dashboard / mission queue in the first
+        # place either. Downgrade it to WAIT - the ticker stays visible
+        # with its real confidence score, it just isn't presented as an
+        # actionable directional entry.
+        levels_unavailable = False
+        if bias in ("CALL", "PUT"):
+            structure_ok = (
+                ideal_entry > 0 and stop > 0 and target > 0
+                and (stop < ideal_entry < target if bias == "CALL" else target < ideal_entry < stop)
+            )
+            if not structure_ok:
+                levels_unavailable = True
+                bias = "WAIT"
+
         trade_quality = "A" if confidence >= 85 else "B" if confidence >= 72 else "C"
         expiration_suggestions = options_payload.get("expiration_suggestions", ["Data unavailable"] * 3)
         upcoming_opportunities.append(
@@ -2259,17 +2284,23 @@ def _build_page_context(
                 "recommendation": bias,
                 "confidence": confidence,
                 "trade_quality": trade_quality,
-                "ideal_entry": round(breakout_level * 1.001, 2) if bias == "CALL" else round(breakdown_level * 0.999, 2),
+                "ideal_entry": ideal_entry,
                 "support": support,
                 "resistance": resistance,
                 "breakout_level": breakout_level,
                 "breakdown_level": breakdown_level,
                 "target": target,
                 "stop": stop,
+                "levels_unavailable": levels_unavailable,
                 "expected_hold_time": strategy.get("expected_hold_time", "Unknown"),
                 "expected_move": options_payload.get("expected_move", "Data unavailable"),
                 "strategy": strategy.get("best_strategy", strategy.get("recommended_strategy", "Unknown")),
-                "trade_thesis": strategy.get("why_this_strategy_fits", "Data unavailable"),
+                "trade_thesis": (
+                    f"Engine sees a {strategy.get('recommendation', '')} setup (confidence {confidence}) but the chart "
+                    "breakout/breakdown levels needed to place a protected trade aren't available - shown as WAIT until they are."
+                    if levels_unavailable
+                    else strategy.get("why_this_strategy_fits", "Data unavailable")
+                ),
                 "bull_case": f"Holds above support {support} and clears breakout {breakout_level}.",
                 "bear_case": f"Fails below support {support} and invalidates at {strategy.get('what_invalidates_trade', strategy.get('invalidation_rule', 'n/a'))}.",
                 "options_expirations": {
