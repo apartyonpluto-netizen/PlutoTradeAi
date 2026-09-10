@@ -1526,6 +1526,7 @@ const SKIP_CATEGORY_LABELS = {
   entries_blocked: "New entries blocked this tick",
   not_call_or_put: "Not a CALL/PUT setup",
   no_margin_account: "No margin account for a short/PUT",
+  unprotectable_levels: "No usable stop/target levels",
   sizing_too_small: "Sized to zero shares/contracts",
   llm_veto: "LLM reasoning vetoed",
   price_drift: "Price drifted before submission",

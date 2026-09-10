@@ -10023,7 +10023,58 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         ticker = str(opp.get("ticker", ""))
         limit_price = float(opp.get("ideal_entry") or 0)
         stop_price_for_sizing = float(opp.get("stop") or 0)
+        target_price_for_check = float(opp.get("target") or 0)
         direction = "short" if str(opp.get("recommendation", "")).upper() == "PUT" else "long"
+
+        # An entry that has no computable stop or target can never be
+        # placed as a *protected* trade - the protective legs have nothing
+        # to attach to. Submitting it anyway is exactly what produced the
+        # 2026-09-04 orphan cascade: five entries went in with stop=0/
+        # target=0 (their chart breakout/breakdown levels came back 0 from
+        # get_chart_levels_for_ticker), the fills leaked through an
+        # ambiguous broker response, the protective orders had no price to
+        # use, and all five ended up as naked "orphan" positions the
+        # monitor then had to hunt down and reconcile - blocking every new
+        # autonomous entry for days in the process. Reject it here, before
+        # a single broker call, rather than downstream: _compute_position_
+        # quantity would also fail this (stop_price<=0 -> quantity 0) but
+        # reports it as "sizing_too_small", which is misleading - this is a
+        # data-quality problem with the candidate, not a capital one.
+        # Directional sanity too: a long (CALL) needs stop < entry < target
+        # and a short (PUT) the mirror; inverted/garbage levels are just as
+        # unprotectable as a zero.
+        levels_ok = (
+            limit_price > 0
+            and stop_price_for_sizing > 0
+            and target_price_for_check > 0
+            and (
+                (stop_price_for_sizing < limit_price < target_price_for_check)
+                if direction == "long"
+                else (target_price_for_check < limit_price < stop_price_for_sizing)
+            )
+        )
+        if not levels_ok:
+            reason = (
+                f"candidate has no usable protective levels "
+                f"(entry {limit_price}, stop {stop_price_for_sizing}, target {target_price_for_check}) - "
+                "cannot be placed as a protected trade, skipping rather than risking an unprotected fill"
+            )
+            skipped.append(
+                {
+                    "ticker": ticker,
+                    "recommendation": opp.get("recommendation"),
+                    "confidence": opp.get("confidence"),
+                    "reason_skipped": reason,
+                    "was_qualifying": True,
+                    "skip_category": "unprotectable_levels",
+                }
+            )
+            _log_research_decision(
+                ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
+                raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=reason,
+                quantity=0, entry_client_order_id=None,
+            )
+            continue
 
         if direction == "short" and not margin_account_id:
             # A genuine margin account is required to hold a short position
