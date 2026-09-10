@@ -8327,6 +8327,89 @@ def _alert_if_entry_newly_stuck(user_id: str, order: Dict[str, object]) -> None:
         pass
 
 
+# A fill can take longer than a few seconds to appear in Webull's own
+# positions list. Found live 2026-09-04 (MU): the position-absent check ran
+# ~9 seconds after an orphan entry filled, the broker's positions endpoint
+# hadn't caught up, the check read ZERO shares and flagged
+# position_absent_unexplained (a sticky flag that then stops the monitor
+# from ever protecting the entry) - the 1-share MU position was, and still
+# is, genuinely held and unprotected. So an absent reading is not acted on
+# until it has ALSO been seen absent on an earlier pass, at least this long
+# ago - long enough that post-fill propagation lag cannot explain it.
+POSITION_ABSENT_CONFIRM_SECONDS = 180
+
+
+def _position_quantity_at_broker(creds: Dict[str, str], account_id: str, ticker: str) -> Optional[float]:
+    """Live share count the broker reports for `ticker` on `account_id`,
+    or None when the lookup itself failed (network/broker error) - None
+    means "could not verify", never "zero". Long-only sign convention (a
+    held position reads positive), same as the callers that use it."""
+    try:
+        positions = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
+    except Exception:  # noqa: BLE001 - inconclusive, never treated as evidence either way
+        return None
+    return next(
+        (float(position.get("quantity", 0) or 0) for position in positions if str(position.get("symbol", "")).upper() == ticker.upper()),
+        0.0,
+    )
+
+
+def _clear_stale_position_absent_flag(user_id: str, ticker: str, entry: Dict[str, object]) -> None:
+    """Self-heal: an entry flagged position_absent_unexplained whose shares
+    the broker now confirms ARE held. The flag was wrong - almost always a
+    positions-list lag right after the fill (see
+    POSITION_ABSENT_CONFIRM_SECONDS). Leaving it set keeps the monitor from
+    ever protecting a real, live position, which is the exact risk this
+    whole subsystem exists to prevent - so clear it and let normal
+    protection handling resume, with an alert so the correction is
+    visible."""
+    entry.pop("position_absent_unexplained", None)
+    entry.pop("position_absent_evidence", None)
+    entry.pop("position_absent_first_seen_at", None)
+    entry["position_absent_flag_cleared_at"] = _now_utc().isoformat()
+    entry["position_absent_flag_cleared_reason"] = (
+        "broker positions list now shows the shares held - the earlier absent reading was wrong "
+        "(most likely the positions list lagging the fill); resuming normal protection handling"
+    )
+    try:
+        add_manual_alert(
+            user_id,
+            {
+                "type": "position_absent_flag_cleared",
+                "ticker": ticker,
+                "priority": "normal",
+                "message": (
+                    f"{ticker}: an earlier 'position absent' flag on this entry has been cleared - the broker's "
+                    "positions list now confirms the shares ARE held. The flag was most likely a positions-list "
+                    "lag right after the fill. Normal protection handling resumes. If this entry never had usable "
+                    "stop/target levels (an orphan-recovered entry), the app still cannot auto-protect it - "
+                    "close the position or supply a stop manually at the broker."
+                ),
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _absence_corroborated_across_passes(entry: Dict[str, object]) -> bool:
+    """True only once an absent reading has persisted: seen absent on a
+    prior pass too, and first seen absent at least
+    POSITION_ABSENT_CONFIRM_SECONDS ago. The first absent sighting only
+    records a timestamp and returns False - a single read is never enough,
+    matching this subsystem's own 'position absence alone is never
+    sufficient evidence' discipline."""
+    now = _now_utc()
+    first_seen_raw = entry.get("position_absent_first_seen_at")
+    if not first_seen_raw:
+        entry["position_absent_first_seen_at"] = now.isoformat()
+        return False
+    try:
+        first_seen = datetime.fromisoformat(str(first_seen_raw))
+    except ValueError:
+        first_seen = now
+    return (now - first_seen).total_seconds() >= POSITION_ABSENT_CONFIRM_SECONDS
+
+
 def _check_position_absent_while_stuck(
     user_id: str,
     creds: Dict[str, str],
@@ -8379,18 +8462,27 @@ def _check_position_absent_while_stuck(
     behavior."""
     if entry.get("direction") == "short":
         return False
-    if entry.get("position_absent_unexplained"):
-        return True
-    try:
-        positions = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
-    except Exception:  # noqa: BLE001 - inconclusive, never treated as evidence either way
-        return False
-    live_quantity = next(
-        (float(position.get("quantity", 0) or 0) for position in positions if str(position.get("symbol", "")).upper() == ticker.upper()),
-        0.0,
-    )
+
+    live_quantity = _position_quantity_at_broker(creds, account_id, ticker)
+    if live_quantity is None:
+        # Could not verify this pass - keep whatever the entry already
+        # concluded (a set flag stays set and short-circuits; an unflagged
+        # entry stays unflagged), never turn an inconclusive read into
+        # evidence either way.
+        return bool(entry.get("position_absent_unexplained"))
+
     if live_quantity > 0:
-        return False  # position genuinely still held - not this situation
+        # Position IS held right now. If this entry was previously flagged
+        # position_absent_unexplained, that flag was wrong - self-heal it
+        # so the monitor resumes protecting the (real) position.
+        if entry.get("position_absent_unexplained"):
+            _clear_stale_position_absent_flag(user_id, ticker, entry)
+        else:
+            entry.pop("position_absent_first_seen_at", None)
+        return False
+
+    if entry.get("position_absent_unexplained"):
+        return True  # already confirmed absent on an earlier pass, still absent
 
     stop_client_order_id = entry.get("stop_client_order_id")
     stop_status: Optional[str] = None
@@ -8407,11 +8499,20 @@ def _check_position_absent_while_stuck(
         # the stop non-active, and _reconcile_position_exit-style handling
         # is the right place for a genuine FILLED-leg exit, not a guess
         # made here.
+        entry.pop("position_absent_first_seen_at", None)
+        return False
+
+    if not _absence_corroborated_across_passes(entry):
+        # Absent this pass, but not yet on a prior pass / not long enough
+        # to rule out post-fill positions-list lag (see
+        # POSITION_ABSENT_CONFIRM_SECONDS). Re-verify next pass rather than
+        # flag now.
         return False
 
     entry["position_absent_unexplained"] = True
     entry["position_absent_evidence"] = {
         "checked_at": _now_utc().isoformat(),
+        "first_seen_absent_at": entry.get("position_absent_first_seen_at"),
         "stop_client_order_id": stop_client_order_id,
         "stop_status": stop_status,
         "live_quantity": live_quantity,
@@ -8487,18 +8588,20 @@ def _check_position_absent_while_active(
     Returns True if the entry is (now, or already) flagged."""
     if entry.get("direction") == "short":
         return False
-    if entry.get("position_absent_unexplained"):
-        return True
-    try:
-        positions = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
-    except Exception:  # noqa: BLE001 - inconclusive, never treated as evidence either way
-        return False
-    live_quantity = next(
-        (float(position.get("quantity", 0) or 0) for position in positions if str(position.get("symbol", "")).upper() == ticker.upper()),
-        0.0,
-    )
+
+    live_quantity = _position_quantity_at_broker(creds, account_id, ticker)
+    if live_quantity is None:
+        return bool(entry.get("position_absent_unexplained"))
+
     if live_quantity > 0:
-        return False  # position genuinely still held - not this situation
+        if entry.get("position_absent_unexplained"):
+            _clear_stale_position_absent_flag(user_id, ticker, entry)
+        else:
+            entry.pop("position_absent_first_seen_at", None)
+        return False
+
+    if entry.get("position_absent_unexplained"):
+        return True  # already confirmed absent on an earlier pass, still absent
 
     stop_client_order_id = entry.get("stop_client_order_id")
     stop_status: Optional[str] = None
@@ -8513,11 +8616,16 @@ def _check_position_absent_while_active(
         # A tracked leg DOES explain the exit after all - the caller's
         # own next pass through the normal fill-based path picks this up
         # correctly; not this function's job to act on it.
+        entry.pop("position_absent_first_seen_at", None)
         return False
+
+    if not _absence_corroborated_across_passes(entry):
+        return False  # see the STUCK counterpart / POSITION_ABSENT_CONFIRM_SECONDS
 
     entry["position_absent_unexplained"] = True
     entry["position_absent_evidence"] = {
         "checked_at": _now_utc().isoformat(),
+        "first_seen_absent_at": entry.get("position_absent_first_seen_at"),
         "stop_client_order_id": stop_client_order_id,
         "stop_status": stop_status,
         "live_quantity": live_quantity,

@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from unittest.mock import patch
 
 import app as pluto_app
 import order_lifecycle as ol
 from autonomy.closed_trades import list_closed_trades
 from autonomy.overnight_orders import list_overnight_orders, record_overnight_order
+
+
+def _corroborated_first_seen() -> str:
+    """A position_absent_first_seen_at far enough in the past that the
+    next absent read counts as corroborated (see
+    POSITION_ABSENT_CONFIRM_SECONDS). Most of these tests care about what
+    happens *after* an absence is already established, not the one-pass
+    delay itself, so they seed this rather than call the checker twice."""
+    return (pluto_app._now_utc() - timedelta(seconds=pluto_app.POSITION_ABSENT_CONFIRM_SECONDS + 30)).isoformat()
 
 """Found live 2026-08-31: after the stale-cancelled-stop replacement fix
 (d9ae01e) correctly detected and cleared a dead stop leg, replacing it hit
@@ -96,8 +106,32 @@ def test_position_still_held_does_not_flag(user_id):
     mock_detail.assert_not_called()  # no need to check the stop leg if the position is still there
 
 
-def test_position_absent_and_stop_cancelled_flags_and_alerts():
+def test_a_single_absent_read_does_not_flag_yet_only_records_it():
+    """The 2026-09-04 MU bug: an absent read ~9s after an orphan fill (the
+    positions list just hadn't caught up) permanently flagged a position
+    that is genuinely held. One absent read is never enough now."""
     entry = _stuck_entry()
+    with patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
+         patch.object(pluto_app.webull_api, "get_order_detail", return_value=_order_detail("CANCELLED", 30, 0)), \
+         patch.object(pluto_app, "add_manual_alert") as mock_alert:
+        result = pluto_app._check_position_absent_while_stuck("user-1", CREDS, ACCOUNT_ID, TICKER, entry)
+    assert result is False
+    assert "position_absent_unexplained" not in entry
+    assert entry["position_absent_first_seen_at"]  # recorded for the next pass
+    mock_alert.assert_not_called()
+
+
+def test_a_reappearing_position_clears_the_pending_absent_marker():
+    entry = _stuck_entry(position_absent_first_seen_at=_corroborated_first_seen())
+    with patch.object(pluto_app.webull_api, "get_account_positions", return_value=[{"symbol": TICKER, "quantity": "30"}]):
+        result = pluto_app._check_position_absent_while_stuck("user-1", CREDS, ACCOUNT_ID, TICKER, entry)
+    assert result is False
+    assert "position_absent_first_seen_at" not in entry
+    assert "position_absent_unexplained" not in entry
+
+
+def test_position_absent_and_stop_cancelled_flags_and_alerts_once_corroborated():
+    entry = _stuck_entry(position_absent_first_seen_at=_corroborated_first_seen())
     with patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
          patch.object(pluto_app.webull_api, "get_order_detail", return_value=_order_detail("CANCELLED", 30, 0)), \
          patch.object(pluto_app, "add_manual_alert") as mock_alert:
@@ -111,6 +145,39 @@ def test_position_absent_and_stop_cancelled_flags_and_alerts():
     assert alert_payload["priority"] == "critical"
 
 
+def test_absent_read_too_soon_after_the_first_sighting_still_does_not_flag():
+    entry = _stuck_entry(position_absent_first_seen_at=pluto_app._now_utc().isoformat())  # just now
+    with patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
+         patch.object(pluto_app.webull_api, "get_order_detail", return_value=_order_detail("CANCELLED", 30, 0)):
+        result = pluto_app._check_position_absent_while_stuck("user-1", CREDS, ACCOUNT_ID, TICKER, entry)
+    assert result is False
+    assert "position_absent_unexplained" not in entry
+
+
+def test_a_flag_is_self_healed_when_the_broker_shows_the_shares_are_held():
+    """The exact MU deadlock: an entry wrongly flagged position_absent_
+    unexplained whose shares ARE held. The stale flag stops the monitor
+    from ever protecting a real, live position - so a later pass that sees
+    the shares must clear it."""
+    entry = _stuck_entry(position_absent_unexplained=True, position_absent_evidence={"live_quantity": 0.0})
+    with patch.object(pluto_app.webull_api, "get_account_positions", return_value=[{"symbol": TICKER, "quantity": "1"}]), \
+         patch.object(pluto_app, "add_manual_alert") as mock_alert:
+        result = pluto_app._check_position_absent_while_stuck("user-1", CREDS, ACCOUNT_ID, TICKER, entry)
+    assert result is False  # flag cleared, resume normal protection handling
+    assert "position_absent_unexplained" not in entry
+    assert "position_absent_evidence" not in entry
+    assert entry["position_absent_flag_cleared_at"]
+    assert mock_alert.call_args.args[1]["type"] == "position_absent_flag_cleared"
+
+
+def test_a_flag_is_kept_when_the_verification_read_itself_fails():
+    entry = _stuck_entry(position_absent_unexplained=True)
+    with patch.object(pluto_app.webull_api, "get_account_positions", side_effect=RuntimeError("broker down")):
+        result = pluto_app._check_position_absent_while_stuck("user-1", CREDS, ACCOUNT_ID, TICKER, entry)
+    assert result is True  # can't verify -> keep trusting the existing flag
+    assert entry["position_absent_unexplained"] is True
+
+
 def test_position_absent_but_stop_filled_defers_not_this_functions_job():
     # A FILLED leg DOES explain the exit - this function's whole point is
     # only acting when NOTHING explains it.
@@ -122,12 +189,18 @@ def test_position_absent_but_stop_filled_defers_not_this_functions_job():
     assert "position_absent_unexplained" not in entry
 
 
-def test_already_flagged_short_circuits_without_new_broker_calls():
+def test_already_flagged_stays_flagged_when_the_position_is_still_absent():
+    # The flag is now re-verified against the broker each pass (see the
+    # self-heal test above), but a position that is genuinely still gone
+    # keeps the flag - no stop-leg re-check needed, that already happened
+    # on the pass that set it.
     entry = _stuck_entry(position_absent_unexplained=True)
-    with patch.object(pluto_app.webull_api, "get_account_positions") as mock_positions:
+    with patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]) as mock_positions, \
+         patch.object(pluto_app.webull_api, "get_order_detail") as mock_detail:
         result = pluto_app._check_position_absent_while_stuck("user-1", CREDS, ACCOUNT_ID, TICKER, entry)
     assert result is True
-    mock_positions.assert_not_called()
+    mock_positions.assert_called_once()
+    mock_detail.assert_not_called()
 
 
 def test_positions_lookup_failure_is_inconclusive_not_a_flag():
@@ -142,7 +215,7 @@ def test_positions_lookup_failure_is_inconclusive_not_a_flag():
 
 
 def test_monitor_skips_resize_once_position_confirmed_absent(user_id):
-    entry = _stuck_entry()
+    entry = _stuck_entry(position_absent_first_seen_at=_corroborated_first_seen())
     record_overnight_order(user_id, entry)
     with patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
          patch.object(pluto_app.webull_api, "get_order_detail", return_value=_order_detail("CANCELLED", 30, 0)), \
@@ -333,8 +406,30 @@ def test_active_position_still_held_does_not_flag():
     mock_detail.assert_not_called()
 
 
-def test_active_position_absent_and_stop_cancelled_flags_and_alerts_but_does_not_freeze():
+def test_active_a_single_absent_read_does_not_flag_yet():
     entry = _active_entry()
+    with patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
+         patch.object(pluto_app.webull_api, "get_order_detail", return_value=_order_detail("CANCELLED", 30, 0)), \
+         patch.object(pluto_app, "add_manual_alert") as mock_alert:
+        result = pluto_app._check_position_absent_while_active("user-1", CREDS, ACCOUNT_ID, TICKER, entry)
+    assert result is False
+    assert "position_absent_unexplained" not in entry
+    assert entry["position_absent_first_seen_at"]
+    mock_alert.assert_not_called()
+
+
+def test_active_self_heals_a_stale_flag_when_the_shares_are_held():
+    entry = _active_entry(position_absent_unexplained=True)
+    with patch.object(pluto_app.webull_api, "get_account_positions", return_value=[{"symbol": TICKER, "quantity": "30"}]), \
+         patch.object(pluto_app, "add_manual_alert") as mock_alert:
+        result = pluto_app._check_position_absent_while_active("user-1", CREDS, ACCOUNT_ID, TICKER, entry)
+    assert result is False
+    assert "position_absent_unexplained" not in entry
+    assert mock_alert.call_args.args[1]["type"] == "position_absent_flag_cleared"
+
+
+def test_active_position_absent_and_stop_cancelled_flags_and_alerts_but_does_not_freeze():
+    entry = _active_entry(position_absent_first_seen_at=_corroborated_first_seen())
     with patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
          patch.object(pluto_app.webull_api, "get_order_detail", return_value=_order_detail("CANCELLED", 30, 0)), \
          patch.object(pluto_app, "add_manual_alert") as mock_alert:
@@ -358,12 +453,12 @@ def test_active_position_absent_but_stop_filled_defers():
     assert "position_absent_unexplained" not in entry
 
 
-def test_active_already_flagged_short_circuits():
+def test_active_already_flagged_stays_flagged_when_still_absent():
     entry = _active_entry(position_absent_unexplained=True)
-    with patch.object(pluto_app.webull_api, "get_account_positions") as mock_positions:
+    with patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]) as mock_positions:
         result = pluto_app._check_position_absent_while_active("user-1", CREDS, ACCOUNT_ID, TICKER, entry)
     assert result is True
-    mock_positions.assert_not_called()
+    mock_positions.assert_called_once()  # re-verified against the broker, still gone
 
 
 def test_active_short_direction_is_not_yet_supported():
@@ -376,7 +471,7 @@ def test_active_short_direction_is_not_yet_supported():
 
 
 def test_reconcile_position_exit_flags_but_does_not_close_or_freeze(user_id):
-    entry = _active_entry()
+    entry = _active_entry(position_absent_first_seen_at=_corroborated_first_seen())
     record_overnight_order(user_id, entry)
     with patch.object(pluto_app.webull_api, "get_order_detail", return_value=_order_detail("CANCELLED", 30, 0)), \
          patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
