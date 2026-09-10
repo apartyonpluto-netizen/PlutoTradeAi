@@ -6,7 +6,9 @@ goes up, not a feeling. Sums the per-tick skip_categories/option_stats
 tallies _summarize_scan_result_for_run_log (app.py) now attaches to every
 persisted "processed" scan-run record (scan_run_log.py) across a rolling
 window into one found -> qualifying -> placed funnel, a ranked skip-
-reason breakdown, and options-path attempt/found stats.
+reason breakdown, and options-path attempt/found stats - plus a per-day
+breakdown (added 2026-09-10) so a change landed on a given day can be
+watched taking effect against the days before it.
 
 Same "reporting only, never feeds back into the live scan" boundary as
 performance_report.py/daily_digest.py - nothing here influences
@@ -47,6 +49,48 @@ def _within_window(raw_timestamp: object, since: datetime) -> bool:
     return parsed is not None and parsed >= since
 
 
+def _blank_funnel() -> Dict[str, Any]:
+    return {
+        "ticks": 0,
+        "candidates_found": 0,
+        "candidates_qualifying": 0,
+        "placed": 0,
+        "failed": 0,
+        "unknown_submission_state": 0,
+        "skip_categories": {},
+        "option_attempted": 0,
+        "option_contract_found": 0,
+    }
+
+
+def _add_run_to_funnel(funnel: Dict[str, Any], run: Dict[str, Any]) -> None:
+    funnel["ticks"] += 1
+    funnel["candidates_found"] += int(run.get("candidates_found") or 0)
+    funnel["candidates_qualifying"] += int(run.get("candidates_qualifying") or 0)
+    outcomes = run.get("orders_outcomes") or {}
+    funnel["placed"] += int(outcomes.get("placed") or 0)
+    funnel["failed"] += int(outcomes.get("failed") or 0)
+    funnel["unknown_submission_state"] += int(outcomes.get("unknown_submission_state") or 0)
+    # A record written before skip_categories/option_stats existed
+    # (pre-schema-version-2) simply has neither key - contributes nothing
+    # here, not an error (see SCAN_RUN_LOG_SCHEMA_VERSION's own "additive
+    # fields" convention in scan_run_log.py).
+    for category, count in (run.get("skip_categories") or {}).items():
+        funnel["skip_categories"][category] = funnel["skip_categories"].get(category, 0) + int(count or 0)
+    option_stats = run.get("option_stats") or {}
+    funnel["option_attempted"] += int(option_stats.get("attempted") or 0)
+    funnel["option_contract_found"] += int(option_stats.get("contract_found") or 0)
+
+
+def _conversion_rate_percent(placed: int, qualifying: int) -> Optional[float]:
+    # placed / qualifying, not placed / found - a candidate that never even
+    # qualified (below the confidence floor, or a non-CALL/PUT
+    # recommendation) was never a real trade opportunity to begin with, so
+    # counting it against conversion would make the rate look artificially
+    # low for reasons that have nothing to do with execution efficiency.
+    return round(placed / qualifying * 100, 1) if qualifying else None
+
+
 def build_efficiency_report(user_id: str, days: int = DEFAULT_WINDOW_DAYS, now: Optional[datetime] = None) -> Dict[str, Any]:
     """now is accepted (not just datetime.now() internally) purely for
     deterministic tests - mirrors build_daily_digest's own signature."""
@@ -69,59 +113,59 @@ def build_efficiency_report(user_id: str, days: int = DEFAULT_WINDOW_DAYS, now: 
         if run.get("status") == "processed" and _within_window(run.get("actual_start_time"), since)
     ]
 
-    candidates_found = 0
-    candidates_qualifying = 0
-    placed = 0
-    failed = 0
-    unknown_submission_state = 0
-    skip_categories: Dict[str, int] = {}
-    option_attempted = 0
-    option_contract_found = 0
+    window = _blank_funnel()
+    by_day_funnels: Dict[str, Dict[str, Any]] = {}
 
     for run in processed_runs:
-        candidates_found += int(run.get("candidates_found") or 0)
-        candidates_qualifying += int(run.get("candidates_qualifying") or 0)
-        outcomes = run.get("orders_outcomes") or {}
-        placed += int(outcomes.get("placed") or 0)
-        failed += int(outcomes.get("failed") or 0)
-        unknown_submission_state += int(outcomes.get("unknown_submission_state") or 0)
-        # A record written before skip_categories/option_stats existed
-        # (pre-schema-version-2) simply has neither key - contributes
-        # nothing here, not an error (see SCAN_RUN_LOG_SCHEMA_VERSION's
-        # own "additive fields" convention in scan_run_log.py).
-        for category, count in (run.get("skip_categories") or {}).items():
-            skip_categories[category] = skip_categories.get(category, 0) + int(count or 0)
-        option_stats = run.get("option_stats") or {}
-        option_attempted += int(option_stats.get("attempted") or 0)
-        option_contract_found += int(option_stats.get("contract_found") or 0)
+        _add_run_to_funnel(window, run)
+        started = _parse_timestamp(run.get("actual_start_time"))
+        if started is None:
+            continue
+        day_key = started.astimezone(timezone.utc).date().isoformat()
+        _add_run_to_funnel(by_day_funnels.setdefault(day_key, _blank_funnel()), run)
+
+    # Oldest day first - this list is meant to be read/plotted left to
+    # right as a trend ("did conversion go up after the change on the
+    # 9th"), the opposite of list_scan_runs' newest-first raw-log order.
+    # Days with no processed tick are simply absent, not zero-filled - the
+    # scanner not running is not a "0% conversion day".
+    by_day: List[Dict[str, Any]] = []
+    for day_key in sorted(by_day_funnels):
+        funnel = by_day_funnels[day_key]
+        by_day.append({
+            "date": day_key,
+            "ticks": funnel["ticks"],
+            "candidates_found": funnel["candidates_found"],
+            "candidates_qualifying": funnel["candidates_qualifying"],
+            "placed": funnel["placed"],
+            "conversion_rate_percent": _conversion_rate_percent(funnel["placed"], funnel["candidates_qualifying"]),
+            "option_attempted": funnel["option_attempted"],
+            "option_contract_found": funnel["option_contract_found"],
+        })
 
     top_skip_categories: List[Dict[str, Any]] = [
         {"category": category, "count": count}
-        for category, count in sorted(skip_categories.items(), key=lambda item: item[1], reverse=True)
+        for category, count in sorted(window["skip_categories"].items(), key=lambda item: item[1], reverse=True)
     ][:TOP_SKIP_CATEGORIES_LIMIT]
 
     return {
         "window_days": days,
-        "ticks_processed": len(processed_runs),
-        "candidates_found": candidates_found,
-        "candidates_qualifying": candidates_qualifying,
-        "placed": placed,
-        "failed": failed,
-        "unknown_submission_state": unknown_submission_state,
-        # placed / qualifying, not placed / found - a candidate that never
-        # even qualified (below the confidence floor, or a non-CALL/PUT
-        # recommendation) was never a real trade opportunity to begin
-        # with, so counting it against conversion would make the rate
-        # look artificially low for reasons that have nothing to do with
-        # execution efficiency.
-        "conversion_rate_percent": round(placed / candidates_qualifying * 100, 1) if candidates_qualifying else None,
-        "skip_categories": skip_categories,
+        "ticks_processed": window["ticks"],
+        "candidates_found": window["candidates_found"],
+        "candidates_qualifying": window["candidates_qualifying"],
+        "placed": window["placed"],
+        "failed": window["failed"],
+        "unknown_submission_state": window["unknown_submission_state"],
+        "conversion_rate_percent": _conversion_rate_percent(window["placed"], window["candidates_qualifying"]),
+        "skip_categories": window["skip_categories"],
         "top_skip_categories": top_skip_categories,
         "option_stats": {
-            "attempted": option_attempted,
-            "contract_found": option_contract_found,
+            "attempted": window["option_attempted"],
+            "contract_found": window["option_contract_found"],
             "contract_found_rate_percent": (
-                round(option_contract_found / option_attempted * 100, 1) if option_attempted else None
+                round(window["option_contract_found"] / window["option_attempted"] * 100, 1)
+                if window["option_attempted"] else None
             ),
         },
+        "by_day": by_day,
     }

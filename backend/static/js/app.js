@@ -1542,13 +1542,15 @@ const bindTradingEfficiencyPanel = () => {
   const conversionNode = document.getElementById("tradingEfficiencyConversionRate");
   const categoriesNode = document.getElementById("tradingEfficiencySkipCategories");
   const optionStatsNode = document.getElementById("tradingEfficiencyOptionStats");
+  const byDayNode = document.getElementById("tradingEfficiencyByDay");
   if (
     !(foundNode instanceof HTMLElement) ||
     !(qualifyingNode instanceof HTMLElement) ||
     !(placedNode instanceof HTMLElement) ||
     !(conversionNode instanceof HTMLElement) ||
     !(categoriesNode instanceof HTMLElement) ||
-    !(optionStatsNode instanceof HTMLElement)
+    !(optionStatsNode instanceof HTMLElement) ||
+    !(byDayNode instanceof HTMLElement)
   ) {
     return;
   }
@@ -1566,6 +1568,27 @@ const bindTradingEfficiencyPanel = () => {
       .join("");
   };
 
+  const renderByDay = (byDay = []) => {
+    if (!byDay.length) {
+      byDayNode.innerHTML = '<p class="muted">No scans in this window yet.</p>';
+      return;
+    }
+    // Oldest-first from the API - render newest at the top so the most
+    // recent day (the one a just-shipped change would affect) is what the
+    // eye lands on first.
+    byDayNode.innerHTML = byDay
+      .slice()
+      .reverse()
+      .map((row) => {
+        const rate =
+          row.conversion_rate_percent === null || row.conversion_rate_percent === undefined
+            ? "--"
+            : `${row.conversion_rate_percent}%`;
+        return `<div><span>${row.date}</span><b>${row.placed}/${row.candidates_qualifying} · ${rate}</b></div>`;
+      })
+      .join("");
+  };
+
   const refresh = async () => {
     try {
       const payload = await requestJson("/api/autonomy/efficiency-report?days=7");
@@ -1577,6 +1600,7 @@ const bindTradingEfficiencyPanel = () => {
           ? "--"
           : `${payload.conversion_rate_percent}%`;
       renderSkipCategories(payload.top_skip_categories);
+      renderByDay(payload.by_day);
       const optionStats = payload.option_stats || {};
       const attempted = optionStats.attempted ?? 0;
       const contractFound = optionStats.contract_found ?? 0;
@@ -1585,6 +1609,7 @@ const bindTradingEfficiencyPanel = () => {
         : "Options: no attempts in this window";
     } catch (_error) {
       categoriesNode.innerHTML = '<p class="muted">Efficiency report unavailable right now.</p>';
+      byDayNode.innerHTML = "";
     }
   };
 

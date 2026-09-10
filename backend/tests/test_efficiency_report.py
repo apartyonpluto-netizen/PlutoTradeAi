@@ -209,6 +209,88 @@ def test_window_days_parameter_is_respected(user_id):
     assert build_efficiency_report(user_id, days=3, now=NOW)["ticks_processed"] == 1
 
 
+# --- by_day breakdown (2026-09-10) ----------------------------------------
+
+
+def test_by_day_groups_ticks_by_calendar_day_oldest_first(user_id):
+    # Two ticks on the 8th, one on the 9th, one on the 10th (NOW's day).
+    record_scan_run(user_id, _processed_record(
+        actual_start_time=datetime(2026, 9, 8, 14, 0, tzinfo=timezone.utc),
+        candidates_found=4, candidates_qualifying=2, placed=0,
+    ))
+    record_scan_run(user_id, _processed_record(
+        actual_start_time=datetime(2026, 9, 8, 18, 0, tzinfo=timezone.utc),
+        candidates_found=6, candidates_qualifying=2, placed=0,
+    ))
+    record_scan_run(user_id, _processed_record(
+        actual_start_time=datetime(2026, 9, 9, 15, 0, tzinfo=timezone.utc),
+        candidates_found=5, candidates_qualifying=4, placed=1,
+    ))
+    record_scan_run(user_id, _processed_record(
+        actual_start_time=datetime(2026, 9, 10, 13, 0, tzinfo=timezone.utc),
+        candidates_found=3, candidates_qualifying=2, placed=2,
+    ))
+
+    by_day = build_efficiency_report(user_id, days=7, now=NOW)["by_day"]
+    assert [d["date"] for d in by_day] == ["2026-09-08", "2026-09-09", "2026-09-10"]
+
+    # 8th: two ticks merged, 0 placed / 4 qualifying -> 0.0%
+    assert by_day[0]["ticks"] == 2
+    assert by_day[0]["candidates_found"] == 10
+    assert by_day[0]["candidates_qualifying"] == 4
+    assert by_day[0]["placed"] == 0
+    assert by_day[0]["conversion_rate_percent"] == 0.0
+
+    # the trend the panel is meant to show: conversion climbing day over day
+    assert by_day[1]["conversion_rate_percent"] == 25.0   # 1 / 4
+    assert by_day[2]["conversion_rate_percent"] == 100.0  # 2 / 2
+
+
+def test_by_day_conversion_rate_is_none_for_a_day_with_no_qualifying_candidates(user_id):
+    record_scan_run(user_id, _processed_record(
+        actual_start_time=datetime(2026, 9, 9, 15, 0, tzinfo=timezone.utc),
+        candidates_found=8, candidates_qualifying=0, placed=0,
+    ))
+
+    by_day = build_efficiency_report(user_id, days=7, now=NOW)["by_day"]
+    assert len(by_day) == 1
+    assert by_day[0]["conversion_rate_percent"] is None
+
+
+def test_by_day_only_lists_days_that_had_a_processed_tick(user_id):
+    # A gap day (the 9th) between two active days must simply be absent -
+    # the scanner not running is not a "0% conversion day".
+    record_scan_run(user_id, _processed_record(
+        actual_start_time=datetime(2026, 9, 8, 15, 0, tzinfo=timezone.utc),
+        candidates_qualifying=1, placed=1,
+    ))
+    record_scan_run(user_id, _processed_record(
+        actual_start_time=datetime(2026, 9, 10, 15, 0, tzinfo=timezone.utc),
+        candidates_qualifying=1, placed=1,
+    ))
+    record_scan_run(user_id, _skipped_record(datetime(2026, 9, 9, 15, 0, tzinfo=timezone.utc)))
+
+    by_day = build_efficiency_report(user_id, days=7, now=NOW)["by_day"]
+    assert [d["date"] for d in by_day] == ["2026-09-08", "2026-09-10"]
+
+
+def test_by_day_is_empty_for_an_empty_window(user_id):
+    assert build_efficiency_report(user_id, days=7, now=NOW)["by_day"] == []
+
+
+def test_by_day_totals_reconcile_with_the_window_totals(user_id):
+    for day, found, qualifying, placed in [(6, 4, 2, 0), (7, 5, 3, 1), (8, 6, 4, 2)]:
+        record_scan_run(user_id, _processed_record(
+            actual_start_time=datetime(2026, 9, day, 15, 0, tzinfo=timezone.utc),
+            candidates_found=found, candidates_qualifying=qualifying, placed=placed,
+        ))
+
+    report = build_efficiency_report(user_id, days=14, now=NOW)
+    assert sum(d["candidates_found"] for d in report["by_day"]) == report["candidates_found"] == 15
+    assert sum(d["candidates_qualifying"] for d in report["by_day"]) == report["candidates_qualifying"] == 9
+    assert sum(d["placed"] for d in report["by_day"]) == report["placed"] == 3
+
+
 # --- authenticated /api/autonomy/efficiency-report endpoint -----------------------------
 
 
