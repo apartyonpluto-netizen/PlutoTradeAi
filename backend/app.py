@@ -8441,6 +8441,35 @@ def _absence_corroborated_across_passes(entry: Dict[str, object]) -> bool:
     return (now - first_seen).total_seconds() >= POSITION_ABSENT_CONFIRM_SECONDS
 
 
+def _alert_unprotected_orphan_needs_action(user_id: str, order: Dict[str, object]) -> None:
+    """One-shot (content-hash deduped, same pattern as
+    _alert_if_entry_newly_stuck) alert for a recovered orphan the app can
+    never auto-protect - it filled with no known stop/target, so it just
+    sits at PROTECTION_FAILED. The app will not invent a stop; a human has
+    to close the position or attach one at the broker. Fixed message per
+    ticker so add_manual_alert's own dedup makes it fire once, not every
+    monitor pass."""
+    ticker = str(order.get("ticker", "?"))
+    quantity = order.get("filled_quantity") or order.get("quantity") or "?"
+    try:
+        add_manual_alert(
+            user_id,
+            {
+                "type": "unprotected_orphan_needs_action",
+                "ticker": ticker,
+                "priority": "critical",
+                "message": (
+                    f"{ticker}: {quantity} share(s) are held from a recovered orphan entry that never had a "
+                    "stop/target, so this app cannot protect it automatically and will stop retrying. Close the "
+                    "position at the broker (Trading Portfolio -> Close), or place a stop there yourself. This "
+                    "alert will not repeat."
+                ),
+            },
+        )
+    except Exception:  # noqa: BLE001 - never let alerting itself break the monitor tick
+        pass
+
+
 def _check_position_absent_while_stuck(
     user_id: str,
     creds: Dict[str, str],
@@ -8960,6 +8989,23 @@ def _monitor_transitional_orders(user_id: str, creds: Dict[str, str], account_id
                     _check_and_rearm_dead_stop(user_id, creds, account_id, ticker, trading_day, order)
             elif state_before == ol.PROTECTION_FAILED and _check_position_absent_while_stuck(user_id, creds, account_id, ticker, order):
                 pass  # flagged position_absent_unexplained this pass or already - skip the pointless resize attempt, see the function's own docstring
+            elif (
+                state_before == ol.PROTECTION_FAILED
+                and order.get("orphan_recovered")
+                and order.get("entry_order_terminal")
+                and float(order.get("stop") or 0) <= 0
+            ):
+                # A recovered orphan whose stop/target were never known
+                # (see _resolve_orphan_recovered_entry): its unfilled
+                # remainder was already cancelled, its critical unprotected-
+                # position alert already fired, and it is already terminal.
+                # _reconcile_entry_fill_and_protection can do nothing here -
+                # its leg_price <= 0 guard rejects every attempt - so
+                # calling it every monitor pass just churns PROTECTION_PENDING
+                # -> PROTECTION_FAILED forever and floods the lifecycle
+                # history and the alert drawer. Leave it for a human to
+                # close or attach a stop to; re-surface once (deduped).
+                _alert_unprotected_orphan_needs_action(user_id, order)
             else:
                 _reconcile_entry_fill_and_protection(
                     user_id=user_id,

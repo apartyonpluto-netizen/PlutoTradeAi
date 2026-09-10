@@ -214,6 +214,29 @@ def test_positions_lookup_failure_is_inconclusive_not_a_flag():
 # --- wiring into the monitor: no more pointless stop-replacement attempts -----
 
 
+def test_monitor_stops_churning_on_an_unprotectable_recovered_orphan_that_is_held(user_id):
+    """After the position-absent self-heal (af7bf2f), a recovered orphan
+    with stop=0 whose shares ARE held would otherwise get
+    _reconcile_entry_fill_and_protection called every monitor pass - and
+    fail its leg_price<=0 guard every time, flooding the lifecycle history
+    and alerts. The monitor should recognise it as human-action-only and
+    leave it alone after one deduped alert."""
+    entry = _stuck_entry(stop=0, target=0, orphan_recovered=True)
+    record_overnight_order(user_id, entry)
+    with patch.object(pluto_app.webull_api, "get_account_positions", return_value=[{"symbol": TICKER, "quantity": "1"}]), \
+         patch.object(pluto_app.webull_api, "place_stop_loss_order") as mock_place_stop, \
+         patch.object(pluto_app, "_reconcile_entry_fill_and_protection") as mock_reconcile, \
+         patch.object(pluto_app, "add_manual_alert") as mock_alert, \
+         patch.object(pluto_app, "time"):
+        pluto_app._monitor_transitional_orders(user_id, CREDS, ACCOUNT_ID)
+
+    mock_place_stop.assert_not_called()
+    mock_reconcile.assert_not_called()  # no more churn
+    assert mock_alert.call_args.args[1]["type"] == "unprotected_orphan_needs_action"
+    stored = list_overnight_orders(user_id)[0]
+    assert stored["lifecycle_state"] == ol.PROTECTION_FAILED  # left as-is for a human
+
+
 def test_monitor_skips_resize_once_position_confirmed_absent(user_id):
     entry = _stuck_entry(position_absent_first_seen_at=_corroborated_first_seen())
     record_overnight_order(user_id, entry)
