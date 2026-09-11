@@ -2858,6 +2858,44 @@ def performance_page() -> str:
 # running right now" evidence, not so many the page is slow to render.
 AGENT_MAP_RECENT_RECORDS = 25
 
+# A node on the Agent Map's radial diagram counts as "active" (pulsing)
+# if the signal it depends on is newer than this. The autonomous scan's
+# own cadence is ~5 minutes (see settings_payload.scanner_frequency_seconds,
+# default 20s poll but a real candidate re-evaluation cycle is minutes,
+# not seconds) - 30 minutes gives real headroom for a slow tick or a
+# markets-closed gap without the map falsely reading "dead".
+AGENT_MAP_ACTIVITY_WINDOW_MINUTES = 30
+# Calibration updates on a much slower cadence (every 10 closed trades, or
+# a manual admin trigger) - a separate, longer window so it doesn't read
+# as "idle" between real recalibrations that are working exactly as designed.
+AGENT_MAP_CALIBRATION_WINDOW_HOURS = 48
+
+
+def _agent_map_is_recent(timestamp: str, window: timedelta) -> bool:
+    if not timestamp:
+        return False
+    try:
+        parsed = datetime.fromisoformat(str(timestamp))
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (_now_utc() - parsed) <= window
+
+
+def _agent_map_feed_description(record: Dict[str, object]) -> str:
+    """A short, human-readable line for the Pulse Feed - reuses
+    reason_skipped, which every skip site in _run_autonomous_trade_scan_locked
+    already writes as a real sentence (e.g. "confidence 20 below 55
+    threshold"), rather than re-deriving new copy from skip_category."""
+    if record.get("decision") == "placed":
+        quantity = record.get("quantity")
+        return f"Entry placed{f' — {quantity} shares/contracts' if quantity else ''}"
+    reason = str(record.get("reason_skipped") or "").strip()
+    if reason:
+        return reason if len(reason) <= 110 else reason[:107] + "..."
+    return "Evaluated, no further detail recorded"
+
 
 @app.route("/agent-map")
 def agent_map_page() -> str:
@@ -2878,20 +2916,27 @@ def agent_map_page() -> str:
 
     # Newest first - list_research_decisions returns oldest-first append order.
     recent_records = list(reversed(list_research_decisions(user_id)))[:AGENT_MAP_RECENT_RECORDS]
-    memory_feed = []
+    pulse_feed = []
     signal_snapshot_populated_count = 0
+    llm_touched_recently = False
+    option_touched_recently = False
     for record in recent_records:
         snapshot = record.get("signal_snapshot")
         market_context = snapshot.get("market_context") if isinstance(snapshot, dict) else None
         has_memory = isinstance(market_context, dict) and bool(market_context)
         if has_memory:
             signal_snapshot_populated_count += 1
-        memory_feed.append({
-            "ticker": record.get("ticker"),
-            "decision": record.get("decision"),
-            "skip_category": record.get("skip_category"),
-            "has_signal_snapshot": has_memory,
+        skip_category = record.get("skip_category")
+        if skip_category == "llm_veto":
+            llm_touched_recently = True
+        if skip_category in ("sizing_too_small", "unprotectable_levels") or record.get("decision") == "placed":
+            option_touched_recently = True  # every candidate attempts the real-option path first, win or lose
+        pulse_feed.append({
+            "ticker": record.get("ticker") or "—",
+            "description": _agent_map_feed_description(record),
             "logged_at": record.get("logged_at"),
+            "is_placed": record.get("decision") == "placed",
+            "has_signal_snapshot": has_memory,
         })
 
     calibration = get_calibration()
@@ -2916,8 +2961,60 @@ def agent_map_page() -> str:
     validated_brains = set(context.get("autonomy_status", {}).get("validated_brains") or [])
     brain_validation = [{"name": name, "validated": name in validated_brains} for name in SHADOW_ONLY_BRAINS]
 
+    most_recent_logged_at = recent_records[0].get("logged_at") if recent_records else ""
+    scan_is_active = _agent_map_is_recent(most_recent_logged_at, timedelta(minutes=AGENT_MAP_ACTIVITY_WINDOW_MINUTES))
+    calibration_is_active = _agent_map_is_recent(
+        calibration.get("real_outcomes_generated_at") or calibration.get("generated_at") or "",
+        timedelta(hours=AGENT_MAP_CALIBRATION_WINDOW_HOURS),
+    )
+
+    # The radial diagram's nodes - every one maps to a real module traced in
+    # docs/AGENT_ARCHITECTURE.md, grouped the same way that doc groups them
+    # (feeds a live decision / shadow-mode by design / display-only
+    # research). "active" drives the pulse animation; it is never invented -
+    # each one is tied to a real signal computed above, and a shadow/
+    # display-only node is ALWAYS static, because it structurally never
+    # feeds signal_snapshot no matter how recently the scan ran (see
+    # research_log.py's own docstring on why candle_brain/pattern_brain/
+    # neural_engine aren't captured yet).
+    pulse_nodes = [
+        {"id": "strategy", "label": "Strategy Engine", "icon": "◆", "category": "live",
+         "detail": "strategy_brain + charting_brain + extended_hours_brain", "active": scan_is_active},
+        {"id": "scanner", "label": "Market Scanner", "icon": "⌁", "category": "live",
+         "detail": "picks which tickers get deep-analyzed", "active": scan_is_active},
+        {"id": "llm", "label": "LLM Veto", "icon": "✎", "category": "live",
+         "detail": "optional - only if a Claude key is configured", "active": scan_is_active and llm_touched_recently},
+        {"id": "options", "label": "Options Selector", "icon": "◈", "category": "live",
+         "detail": "the only path that calls the broker for a real option", "active": scan_is_active and option_touched_recently},
+        {"id": "pricecheck", "label": "Price Cross-Check", "icon": "⇄", "category": "live",
+         "detail": "Alpaca vs. Webull's own quote, added 9/11", "active": scan_is_active},
+        {"id": "calibration", "label": "Calibration", "icon": "⚖", "category": "live",
+         "detail": "real outcomes preferred over backtest", "active": calibration_is_active},
+        {"id": "outcomes", "label": "Outcomes Analysis", "icon": "⟐", "category": "support",
+         "detail": "reporting only, computed on page load", "active": False},
+        {"id": "regime", "label": "Regime (VIX)", "icon": "◐", "category": "shadow",
+         "detail": "shadow-mode by design, never gates a trade", "active": False},
+        {"id": "candlepattern", "label": "Candle + Pattern", "icon": "◌", "category": "shadow",
+         "detail": "still yfinance-backed, not in signal_snapshot yet", "active": False},
+        {"id": "neural", "label": "Neural Engine", "icon": "◎", "category": "shadow",
+         "detail": "feeds the dashboard stat card only", "active": False},
+        {"id": "optionsresearch", "label": "Options Brain", "icon": "⌬", "category": "shadow",
+         "detail": "legacy research page, no execution", "active": False},
+        {"id": "tradingview", "label": "TradingView", "icon": "⌖", "category": "shadow",
+         "detail": "inbound webhook, logged only", "active": False},
+    ]
+    # Positions every node on an ellipse around the central Memory hub -
+    # computed here rather than in the template because Jinja has no trig
+    # of its own; center/radii chosen to fit the diagram's own viewBox
+    # (see agent_map.html) with room for labels below each node.
+    hub_x, hub_y, ellipse_rx, ellipse_ry = 460.0, 280.0, 230.0, 185.0
+    node_count = len(pulse_nodes)
+    for index, node in enumerate(pulse_nodes):
+        angle = math.radians(-90 + (360.0 / node_count) * index)
+        node["x"] = round(hub_x + ellipse_rx * math.cos(angle), 1)
+        node["y"] = round(hub_y + ellipse_ry * math.sin(angle), 1)
+
     context["agent_map"] = {
-        "memory_feed": memory_feed,
         "memory_feed_total": len(recent_records),
         "memory_feed_populated": signal_snapshot_populated_count,
         "calibration_status": calibration.get("status", "never_run"),
@@ -2928,6 +3025,12 @@ def agent_map_page() -> str:
         "min_trades_to_trust": MIN_TRADES_TO_TRUST,
         "outcomes": build_outcomes_analysis(user_id),
         "brain_validation": brain_validation,
+        "pulse_nodes": pulse_nodes,
+        "pulse_feed": pulse_feed,
+        "scan_is_active": scan_is_active,
+        "most_recent_logged_at": most_recent_logged_at,
+        "hub_x": hub_x,
+        "hub_y": hub_y,
     }
     return render_template("agent_map.html", **context)
 

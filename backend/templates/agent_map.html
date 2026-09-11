@@ -10,70 +10,79 @@
         <span>Live, this account</span>
     </div>
     <p class="muted">
-        The in-app counterpart to the architecture doc &mdash; not a diagram of what the code
-        <em>could</em> do, but real evidence of what it's actually doing right now: whether the memory
-        layer (<code>research_log.py</code>'s <code>signal_snapshot</code>) is genuinely being fed on
-        every scan tick, which strategy-score source calibration is actually using, what the real-outcomes
-        evidence says so far, and which currently-silent brains (if any) have been promoted to live scoring.
-        Nothing on this page changes a live decision &mdash; it's the same reporting-only boundary as
-        Performance and Daily Digest.
+        Every engine below stays lit and feeds the shared memory at the center &mdash; a solid ring pulses
+        while it's genuinely running against fresh candidates; a dim ring means shadow-mode or
+        display-only by design, not broken. Nothing here changes a live decision &mdash; the same
+        reporting-only boundary as Performance and Daily Digest.
     </p>
-    <div class="price-map-grid">
-        <div>
-            <small>Signal snapshots fed</small>
-            <b class="{{ 'tone-positive' if map.memory_feed_total and map.memory_feed_populated == map.memory_feed_total else 'tone-caution' if map.memory_feed_populated else 'tone-negative' if map.memory_feed_total else '' }}">
-                {{ map.memory_feed_populated }}/{{ map.memory_feed_total }}
-            </b>
-        </div>
-        <div>
-            <small>Trades to next auto-recalibration</small>
-            <b>{{ map.closed_trades_since_last_real_recalibration }}/{{ map.real_outcomes_recalibration_interval }}</b>
-        </div>
-        <div>
-            <small>Strategies on real-outcomes data</small>
-            <b>{{ map.calibration_rows|selectattr("active_source", "equalto", "real")|list|length }}/{{ map.calibration_rows|length }}</b>
-        </div>
-        <div>
-            <small>Brains promoted to live</small>
-            <b>{{ map.brain_validation|selectattr("validated")|list|length }}/{{ map.brain_validation|length }}</b>
+    <p class="agent-map-status">
+        <span class="agent-map-status-dot {{ 'is-active' if map.scan_is_active else '' }}" aria-hidden="true"></span>
+        {% if map.scan_is_active %}
+        Active &mdash; last scan tick <time class="alert-time" data-timestamp="{{ map.most_recent_logged_at }}">recently</time>,
+        {{ map.memory_feed_populated }}/{{ map.memory_feed_total }} recent signal snapshots populated
+        {% else %}
+        Idle &mdash; watching for the next scan tick
+        {% endif %}
+    </p>
+</section>
+
+<div class="dashboard-grid agent-map-grid">
+<section class="panel">
+    <div class="panel-head">
+        <h3>Signal Path</h3>
+        <span>{{ map.pulse_nodes|selectattr("active")|list|length }} pulsing</span>
+    </div>
+    <div class="agent-map-diagram-wrap">
+        <svg class="agent-map-svg" viewBox="0 0 920 560" role="img" aria-label="A radial diagram of every engine PlutoTradeAI runs, connected to a central Memory hub. Engines that feed a live decision pulse when they've run recently; engines that are shadow-mode or display-only by design stay dim.">
+            {% for node in map.pulse_nodes %}
+            <line x1="{{ map.hub_x }}" y1="{{ map.hub_y }}" x2="{{ node.x }}" y2="{{ node.y }}"
+                  class="agent-map-link {{ 'is-active' if node.active else '' }}"/>
+            {% endfor %}
+            {% for node in map.pulse_nodes %}
+            <g class="agent-map-node agent-map-node--{{ node.category }} {{ 'is-active' if node.active else '' }}">
+                <circle class="agent-map-node-glow" cx="{{ node.x }}" cy="{{ node.y }}" r="30"/>
+                <circle class="agent-map-node-ring" cx="{{ node.x }}" cy="{{ node.y }}" r="22"/>
+                <text class="agent-map-node-icon" x="{{ node.x }}" y="{{ node.y }}" text-anchor="middle" dominant-baseline="central">{{ node.icon }}</text>
+                <text class="agent-map-node-label" x="{{ node.x }}" y="{{ node.y + 40 }}" text-anchor="middle">{{ node.label }}</text>
+                <title>{{ node.label }} &mdash; {{ node.detail }}</title>
+            </g>
+            {% endfor %}
+            <circle class="agent-map-hub-glow {{ 'is-active' if map.scan_is_active else '' }}" cx="{{ map.hub_x }}" cy="{{ map.hub_y }}" r="52"/>
+            <circle class="agent-map-hub-ring" cx="{{ map.hub_x }}" cy="{{ map.hub_y }}" r="38"/>
+            <text class="agent-map-hub-icon" x="{{ map.hub_x }}" y="{{ map.hub_y - 4 }}" text-anchor="middle" dominant-baseline="central">✦</text>
+            <text class="agent-map-hub-label" x="{{ map.hub_x }}" y="{{ map.hub_y + 20 }}" text-anchor="middle">Memory</text>
+        </svg>
+        <div class="agent-map-legend">
+            <span><i class="agent-map-legend-dot agent-map-node--live"></i>Feeds a live decision</span>
+            <span><i class="agent-map-legend-dot agent-map-node--support"></i>Reporting, on demand</span>
+            <span><i class="agent-map-legend-dot agent-map-node--shadow"></i>Shadow / display only</span>
         </div>
     </div>
 </section>
 
-<section class="panel panel-table">
+<section class="panel panel-table agent-map-pulse-feed">
     <div class="panel-head">
-        <h3>Recent Research Log &mdash; Memory Feed</h3>
-        <span>Last {{ map.memory_feed_total }} evaluated</span>
+        <h3>Pulse Feed</h3>
+        <span>Last {{ map.pulse_feed|length }}</span>
     </div>
-    <p class="muted">
-        Every candidate the scan evaluates gets a durable record here, placed or skipped, with a
-        <code>signal_snapshot</code> of strategy_brain's own reading at that moment. If <b>Memory</b> is
-        blank for recent rows, the scan isn't running or isn't reaching this code path &mdash; that's the
-        thing to investigate first.
-    </p>
-    <table>
-        <thead><tr><th>Ticker</th><th>Decision</th><th>Skip Category</th><th>Memory</th><th>Logged</th></tr></thead>
-        <tbody>
-        {% for row in map.memory_feed %}
-        <tr>
-            <td>{{ row.ticker or "—" }}</td>
-            <td>{{ row.decision or "—" }}</td>
-            <td>{{ row.skip_category or "—" }}</td>
-            <td>
-                {% if row.has_signal_snapshot %}
-                <span class="status-pill status-buy">FED</span>
-                {% else %}
-                <span class="status-pill status-watch">MISSING</span>
-                {% endif %}
-            </td>
-            <td class="alert-time" data-timestamp="{{ row.logged_at or '' }}">--</td>
-        </tr>
+    <ul class="agent-map-feed-list">
+        {% for item in map.pulse_feed %}
+        <li>
+            <span class="agent-map-feed-dot {{ 'is-placed' if item.is_placed else '' }} {{ 'is-fed' if item.has_signal_snapshot else '' }}" aria-hidden="true"></span>
+            <div class="agent-map-feed-body">
+                <div class="agent-map-feed-head">
+                    <b>{{ item.ticker }}</b>
+                    <time class="alert-time" data-timestamp="{{ item.logged_at or '' }}">--</time>
+                </div>
+                <p>{{ item.description }}{% if not item.has_signal_snapshot %} <span class="muted">&mdash; no signal_snapshot</span>{% endif %}</p>
+            </div>
+        </li>
         {% else %}
-        <tr><td colspan="5" class="muted">No research_log records yet &mdash; nothing has been evaluated by the autonomous scan for this account.</td></tr>
+        <li class="muted">Nothing evaluated yet &mdash; the autonomous scan hasn't run for this account.</li>
         {% endfor %}
-        </tbody>
-    </table>
+    </ul>
 </section>
+</div>
 
 <section class="panel panel-table">
     <div class="panel-head">

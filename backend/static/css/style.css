@@ -3279,6 +3279,253 @@ select:focus {
     font-weight: 600;
 }
 
+/* ---------- Agent Map (2026-09-11) - the one page in this app that
+   deliberately breaks from the "one accent, no glow" restraint (see the
+   --bg-base comment at the top of this file): a live system map is
+   content this app doesn't otherwise have, and glow/pulse here encodes
+   real state (is this engine actually running) rather than decorating a
+   static card. Still themed entirely through existing tokens - no new
+   hardcoded colors - so it still respects whichever theme is active. --- */
+
+.agent-map-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 10px 0 0;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.agent-map-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    flex: 0 0 auto;
+}
+
+.agent-map-status-dot.is-active {
+    background: var(--positive);
+    box-shadow: 0 0 0 4px rgba(108, 191, 139, 0.18);
+}
+
+.agent-map-grid {
+    align-items: start;
+}
+
+.agent-map-diagram-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+}
+
+.agent-map-svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    overflow: visible;
+}
+
+.agent-map-link {
+    stroke: var(--border);
+    stroke-width: 1.2;
+}
+
+.agent-map-link.is-active {
+    stroke: var(--accent);
+    stroke-opacity: 0.45;
+}
+
+.agent-map-node-icon {
+    font-size: 17px;
+    fill: var(--text-primary);
+}
+
+.agent-map-node-label {
+    font-size: 11px;
+    fill: var(--text-muted);
+}
+
+.agent-map-node-glow {
+    fill: var(--accent);
+    opacity: 0;
+    transform-box: fill-box;
+    transform-origin: center;
+}
+
+.agent-map-node-ring {
+    fill: var(--bg-elevated);
+    stroke: var(--border-strong);
+    stroke-width: 1.4;
+}
+
+.agent-map-node--live .agent-map-node-ring { stroke: var(--accent); }
+.agent-map-node--support .agent-map-node-ring { stroke: var(--caution); }
+.agent-map-node--shadow .agent-map-node-ring { stroke: var(--border-strong); }
+.agent-map-node--shadow .agent-map-node-icon { fill: var(--text-muted); }
+
+.agent-map-node.is-active .agent-map-node-glow {
+    opacity: 0.35;
+    animation: agent-map-pulse 2.6s ease-in-out infinite;
+}
+
+.agent-map-node.is-active .agent-map-node-ring {
+    animation: agent-map-ring-pulse 2.6s ease-in-out infinite;
+}
+
+.agent-map-hub-glow {
+    fill: var(--accent);
+    opacity: 0;
+    transform-box: fill-box;
+    transform-origin: center;
+}
+
+.agent-map-hub-glow.is-active {
+    opacity: 0.4;
+    animation: agent-map-pulse 3.2s ease-in-out infinite;
+}
+
+.agent-map-hub-ring {
+    fill: var(--bg-elevated-soft);
+    stroke: var(--accent);
+    stroke-width: 2;
+}
+
+.agent-map-hub-icon {
+    font-size: 22px;
+    fill: var(--accent);
+}
+
+.agent-map-hub-label {
+    font-size: 12px;
+    font-weight: 600;
+    fill: var(--text-primary);
+    letter-spacing: 0.02em;
+}
+
+@keyframes agent-map-pulse {
+    0%, 100% { opacity: 0.28; transform: scale(1); }
+    50% { opacity: 0.6; transform: scale(1.12); }
+}
+
+@keyframes agent-map-ring-pulse {
+    0%, 100% { stroke-opacity: 0.7; }
+    50% { stroke-opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .agent-map-node.is-active .agent-map-node-glow,
+    .agent-map-node.is-active .agent-map-node-ring,
+    .agent-map-hub-glow.is-active {
+        animation: none;
+    }
+    .agent-map-node.is-active .agent-map-node-glow { opacity: 0.4; }
+}
+
+.agent-map-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    font-size: 0.76rem;
+    color: var(--text-muted);
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--border);
+}
+
+.agent-map-legend span {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.agent-map-legend-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--bg-elevated);
+    border: 1.5px solid var(--border-strong);
+}
+
+.agent-map-legend-dot.agent-map-node--live { border-color: var(--accent); background: var(--accent-soft); }
+.agent-map-legend-dot.agent-map-node--support { border-color: var(--caution); background: rgba(201, 168, 98, 0.14); }
+.agent-map-legend-dot.agent-map-node--shadow { border-color: var(--border-strong); }
+
+.agent-map-pulse-feed .panel-head span {
+    text-transform: none;
+    letter-spacing: normal;
+}
+
+.agent-map-feed-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    max-height: 640px;
+    overflow-y: auto;
+}
+
+.agent-map-feed-list li {
+    display: flex;
+    gap: 10px;
+    padding: 10px 4px;
+    border-bottom: 1px solid var(--border);
+}
+
+.agent-map-feed-list li:last-child {
+    border-bottom: none;
+}
+
+.agent-map-feed-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    margin-top: 6px;
+    flex: 0 0 auto;
+}
+
+.agent-map-feed-dot.is-fed {
+    background: var(--accent);
+}
+
+.agent-map-feed-dot.is-placed {
+    background: var(--positive);
+}
+
+.agent-map-feed-body {
+    min-width: 0;
+    flex: 1;
+}
+
+.agent-map-feed-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 0.85rem;
+}
+
+.agent-map-feed-head time {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.agent-map-feed-body p {
+    margin: 2px 0 0;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    line-height: 1.4;
+}
+
+@media (max-width: 900px) {
+    .agent-map-node-label {
+        font-size: 10px;
+    }
+}
+
 .ticker-autocomplete-reason {
     font-size: 0.72rem;
     color: var(--text-secondary);
