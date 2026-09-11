@@ -7,10 +7,13 @@ drifts from the code, trust the code and fix this doc._
 ## The one-sentence version
 
 **Every "brain" here is a deterministic rule engine that scores fixed technical
-indicators.** None of them learn, adapt, or improve by running more. The only
-thing that changes their output is fresher price data. There is a real
-reporting layer that could feed outcomes back into decisions someday
-(Tier 2 — see the bottom of this doc) — it does not exist yet.
+indicators.** None of them learn from experience, and there is exactly one
+narrow exception worth knowing precisely (see `calibration.py` below) — it
+is not the general learning loop this doc originally implied didn't exist
+at all. Correction logged 2026-09-11: the first version of this doc said
+"Tier 2 doesn't exist... zero lines of code," which understated what's
+actually there. It's still true that nothing learns from *real* trade
+outcomes — that part hasn't changed.
 
 ## The five layers
 
@@ -56,6 +59,7 @@ reporting layer that could feed outcomes back into decisions someday
 | `neural/neural_engine.py` | scanner_rows + watchlist + news + options payloads | **No** — feeds the dashboard's "Neural Core" stat card only | (aggregates others) |
 | `options/options_brain.py` | option chain + Greeks | **No** — this is the *legacy research* options page, explicitly disclaimed "no options execution is enabled." Not the same system as `options_selector.py`. Easy to confuse by name; don't. | yfinance |
 | `integrations/tradingview.py` | inbound webhook payloads | **No** — stored and shown in the mission feed / alerts only, never read by the scan | (external webhook) |
+| `calibration.py` + `calibration_store.py` | **backtested** per-strategy win rate / avg return (`backtest_engine.run_ticker_backtest`), ≥15 trades required to be "trusted" | **Yes** — `strategy_brain.py:375` multiplies every candidate's raw score by `score_multiplier(strategy_name)`, ±25% cap. This is the one real exception to "nothing learns." But: it learns from **simulated backtests**, not this account's own real trades (`closed_trades.py` is never read here), and it only updates when an admin manually POSTs `/api/admin/recalibrate-strategies` — no schedule, no automatic trigger. | Alpaca (via backtest_engine) |
 
 ## What "the scan" actually does, in order
 
@@ -73,16 +77,25 @@ reporting layer that could feed outcomes back into decisions someday
 - **Two `options_brain.py` modules exist** — a legacy top-level one and `options/options_brain.py`, which literally imports from the legacy one (`from options_brain import build_options_outlook as legacy_build_options_outlook`). Neither is the real execution path (that's `autonomy/options_selector.py`). Naming collision risk for future work — grep both before touching "options brain" anything.
 - **`get_market_data`'s deadline-fallback error string still says "Scanner timed out - Yahoo Finance is rate limiting"** even though `market_scanner.scan_market` has been Alpaca-backed since the migration. Stale message, not a stale mechanism — cosmetic, but worth fixing so a real timeout doesn't misdirect debugging toward the wrong provider.
 
-## Why nothing here "gets better by running"
+## Why nothing here "gets better by running" — precisely stated
 
-Every brain in layer 2 is stateless: same inputs in, same rule-based output
-out, every time. `autonomy/performance_report.py`'s own docstring calls
-itself **"Tier 1 of the 'make autonomy learn' roadmap"** — human-readable
-reporting only — and explicitly says an automated system that *adjusts its
-own trading parameters from real outcomes* (**Tier 2**) is "a substantially
-bigger, riskier undertaking that needs real trade-history volume first."
-Tier 2 does not exist in this codebase yet. Running the brains 24/7 gets you
-more scan ticks against fresher data and a bigger sample for the efficiency/
-performance reports to eventually analyze — it does not, on its own, make
-any brain's judgment better. That's a separate, deliberate project; see the
+Every brain in layer 2 is stateless within a single call: same inputs in,
+same rule-based output out. The **one** feedback path is `calibration.py`'s
+`score_multiplier`, and it's narrower than it might sound: it adjusts a
+strategy's score based on how that strategy performed in a **backtest**
+(simulated fills against historical bars), not on how this account's real
+orders actually turned out, and it only updates when an admin manually
+triggers it — there's no automatic recalibration, and it's never looked at
+`closed_trades.py` (this account's real, closed P&L) at all.
+
+`autonomy/performance_report.py`'s own docstring calls itself **"Tier 1 of
+the 'make autonomy learn' roadmap"** — human-readable reporting only — and
+explicitly says an automated system that *adjusts its own trading
+parameters from real outcomes* (**Tier 2**) is "a substantially bigger,
+riskier undertaking that needs real trade-history volume first." That
+specific thing — real closed trades feeding back into live scoring,
+automatically — does not exist. Running the brains 24/7 gets you more scan
+ticks against fresher data and a bigger sample for the efficiency/
+performance reports to eventually analyze; it does not make any brain's
+judgment better on its own. That's a separate, deliberate project; see the
 learning-loop plan (tracked separately, not yet written as of this doc).
