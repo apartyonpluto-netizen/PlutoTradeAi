@@ -59,7 +59,7 @@ outcomes — that part hasn't changed.
 | `neural/neural_engine.py` | scanner_rows + watchlist + news + options payloads | **No** — feeds the dashboard's "Neural Core" stat card only | (aggregates others) |
 | `options/options_brain.py` | option chain + Greeks | **No** — this is the *legacy research* options page, explicitly disclaimed "no options execution is enabled." Not the same system as `options_selector.py`. Easy to confuse by name; don't. | yfinance |
 | `integrations/tradingview.py` | inbound webhook payloads | **No** — stored and shown in the mission feed / alerts only, never read by the scan | (external webhook) |
-| `calibration.py` + `calibration_store.py` | **backtested** per-strategy win rate / avg return (`backtest_engine.run_ticker_backtest`), ≥15 trades required to be "trusted" | **Yes** — `strategy_brain.py:375` multiplies every candidate's raw score by `score_multiplier(strategy_name)`, ±25% cap. This is the one real exception to "nothing learns." But: it learns from **simulated backtests**, not this account's own real trades (`closed_trades.py` is never read here), and it only updates when an admin manually POSTs `/api/admin/recalibrate-strategies` — no schedule, no automatic trigger. | Alpaca (via backtest_engine) |
+| `calibration.py` + `calibration_store.py` | **Updated 2026-09-11 (see "What changed" below).** Backtested per-strategy win rate / avg return (`backtest_engine.run_ticker_backtest`), OR this deployment's own real closed trades (`autonomy/closed_trades.py`, joined across every account) when trusted — real is now preferred over backtest. Either way, ≥15 trades required to be "trusted." | **Yes** — `strategy_brain.py:375` multiplies every candidate's raw score by `score_multiplier(strategy_name)`, ±25% cap. Updates automatically every 10 newly-closed trades (any account), in addition to the existing manual admin trigger (`/api/admin/recalibrate-strategies`, which now refreshes both sources). | Alpaca (via backtest_engine) + this account's own real fills (real-outcomes path) |
 
 ## What "the scan" actually does, in order
 
@@ -99,3 +99,66 @@ ticks against fresher data and a bigger sample for the efficiency/
 performance reports to eventually analyze; it does not make any brain's
 judgment better on its own. That's a separate, deliberate project; see the
 learning-loop plan (tracked separately, not yet written as of this doc).
+
+**Update, same day, later:** the paragraph above is now partially out of
+date — see "What changed" below. The core claim still holds in spirit
+(no brain's rule-based *judgment* changes; nothing here is a learning
+model), but "real closed trades feeding back into live scoring,
+automatically — does not exist" is no longer true as stated.
+
+## What changed (2026-09-11, later the same day): memory, real outcomes, multi-source data
+
+Implemented the plan this doc's own gaps motivated, in five small,
+separately committed, separately tested pieces:
+
+1. **A real memory layer.** `autonomy/research_log.py` (schema v2) now
+   captures `skip_category` (previously computed but silently dropped
+   before reaching this log) and `signal_snapshot` — `strategy_brain`'s
+   full `market_context` (RSI, EMA stack, VWAP, relative volume, etc.) and
+   `strategies_evaluated`, pass-through at zero marginal cost, for EVERY
+   candidate the scan evaluates. Shadow-mode only, same guarantee as
+   `regime_shadow` — nothing reads this back into a decision. Deliberately
+   does **not** yet capture `candle_brain`/`pattern_brain`/`neural_engine`
+   output — see their own table rows above; wiring them in would add real
+   yfinance calls to every candidate on every scan tick.
+2. **A second, broker-side price check.** `integrations/market_data_aggregator.py`
+   cross-checks Alpaca's real-time price against Webull's own equity
+   snapshot (`integrations/webull.py`'s new `get_equity_snapshot`, mirroring
+   the options-side snapshot already used live) immediately before
+   submission. Fails closed only on genuine disagreement beyond tolerance
+   (new `skip_category`: `price_sources_disagree`); Webull being
+   unavailable falls back to Alpaca alone, unchanged from before — this can
+   only make the system *more* conservative, never less available.
+   Deliberately **not** wired into `strategy_brain.py`'s own real-time read
+   (would double Webull call volume across every scanned ticker for a read
+   with no direct trade consequence).
+3. **`autonomy/outcomes_analysis.py`** — Tier 1 reporting, joins
+   `closed_trades.py` back to the new `signal_snapshot` and reports
+   realized win rate/P&L by RSI-at-entry, EMA-stack alignment, relative
+   volume, and price-vs-VWAP, each with `sufficient_sample` gating. Never
+   called from the scan. `candle_brain`/`pattern_brain`/`neural_engine`
+   buckets aren't here either, for the same reason as (1).
+4. **Real-outcomes calibration** — `calibration_store.score_multiplier`
+   now prefers a multiplier derived from this deployment's own real closed
+   trades over the backtested one, gated by the same `MIN_TRADES_TO_TRUST`
+   and ±25% cap, with automatic recalibration every 10 newly-closed trades
+   (any account) plus the existing manual admin trigger. See the table row
+   above — this is the one row in this doc that's genuinely more capable
+   now than when this doc was first written.
+5. **A brain-validation gate** — `autonomy/autonomous_controller.py` gained
+   `validated_brains` (default `[]` per account) and `is_brain_validated`.
+   Infrastructure only: **nothing in this codebase adds a name to this list
+   automatically**, and as of this writing there is still no live call site
+   that reads a shadow-only brain's output into scoring at all (see (1) —
+   `candle_brain`/`pattern_brain`/`neural_engine` aren't even in
+   `signal_snapshot` yet), so this gate currently guards nothing. It exists
+   so that promoting one of them later is a deliberate, auditable,
+   per-account decision made with `outcomes_analysis.py` evidence in hand —
+   not a hardcoded change.
+
+**Still true, unchanged by any of the above:** no currently-silent brain
+was promoted to live-decision-influencing. `backtest_engine.py` still uses
+yfinance and a fixed-hold-days exit, a real methodology gap between what
+calibration validates and what live trading does — not addressed here,
+deliberately (see the plan's own out-of-scope list). Portfolio-level
+correlation/concentration risk and real-time human paging remain open.

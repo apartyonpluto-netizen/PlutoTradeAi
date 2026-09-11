@@ -38,7 +38,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 from global_settings import get_global_settings
 
@@ -46,6 +46,14 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
 USER_DATA_ROOT = DATA_DIR / "users"
 MODES = ("OFF", "SCOUT", "ANALYST", "PAPER", "APPROVAL", "AUTONOMOUS")
+
+# Brains that currently exist ONLY as shadow/display-only signals - never
+# read into any live scoring or sizing decision (see
+# docs/AGENT_ARCHITECTURE.md's layer-2 table). validated_brains below is
+# the gate a name must appear in before that could ever change for a
+# given account - see its own comment for why nothing in this codebase
+# adds a name to it automatically.
+SHADOW_ONLY_BRAINS = ("candle_brain", "pattern_brain", "neural_engine")
 
 
 def _settings_file(user_id: str) -> Path:
@@ -88,6 +96,22 @@ def _default_settings() -> Dict[str, object]:
         "emergency_stop_enabled": False,
         "last_mode_change": now,
         "mode_change_reason": "Initialization",
+        # Brain-validation gate (2026-09-11, Section 5 of the memory/
+        # real-outcomes/multi-source-data plan) - infrastructure only.
+        # Empty for every account by default and stays that way unless a
+        # human explicitly calls set_validated_brains: no code anywhere in
+        # this app adds a name to this list on its own, and as of this
+        # writing nothing in the live scan reads a shadow-only brain's
+        # output into scoring at all yet (see SHADOW_ONLY_BRAINS above,
+        # and research_log.py's signal_snapshot, which records their
+        # future home but doesn't populate it yet either) - so this gate
+        # currently has nothing live to guard. It exists now so that WHEN
+        # a future increment adds real shadow capture for one of these
+        # brains and autonomy/outcomes_analysis.py's evidence supports
+        # promoting it, that promotion is a deliberate, auditable,
+        # per-account settings change through this list - never a
+        # hardcoded "just wire it in" code change.
+        "validated_brains": [],
     }
 
 
@@ -267,3 +291,33 @@ def reset_emergency_stop(user_id: str, reason: str = "") -> Dict[str, object]:
         settings["mode_change_reason"] = reason or "Emergency stop reset"
 
     return _derived(_locked_read_modify_write(user_id, _mutate))
+
+
+def set_validated_brains(user_id: str, validated_brains: List[str]) -> Dict[str, object]:
+    """The one way validated_brains ever changes - a deliberate, explicit
+    call, never a side effect of anything else in this file. Restricted to
+    SHADOW_ONLY_BRAINS: this list exists to promote a specific brain whose
+    real-outcomes evidence (see autonomy/outcomes_analysis.py) has been
+    reviewed, not to be a free-text field a typo could silently no-op."""
+    normalized = sorted({str(name).strip() for name in validated_brains if str(name).strip()})
+    unknown = [name for name in normalized if name not in SHADOW_ONLY_BRAINS]
+    if unknown:
+        raise ValueError(f"Unknown brain name(s): {', '.join(unknown)}. Must be one of {SHADOW_ONLY_BRAINS}.")
+
+    def _mutate(settings: Dict[str, object]) -> None:
+        settings["validated_brains"] = normalized
+
+    return _derived(_locked_read_modify_write(user_id, _mutate))
+
+
+def is_brain_validated(user_id: str, brain_name: str) -> bool:
+    """The actual gate: True only if brain_name is explicitly present in
+    this account's validated_brains. Safe to call even for a brain name
+    that isn't shadow-only at all (e.g. strategy_brain, which already
+    feeds live scoring unconditionally and was never meant to go through
+    this gate) - always returns False for anything not in
+    SHADOW_ONLY_BRAINS, so this can never accidentally become a backdoor
+    around a brain this gate was never designed to cover."""
+    if brain_name not in SHADOW_ONLY_BRAINS:
+        return False
+    return brain_name in (_load(user_id).get("validated_brains") or [])
