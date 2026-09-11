@@ -393,6 +393,42 @@ def get_option_snapshot(app_key: str, app_secret: str, option_symbols: List[str]
     return payload if isinstance(payload, list) else []
 
 
+def get_equity_snapshot(app_key: str, app_secret: str, symbols: List[str]) -> List[Dict[str, Any]]:
+    """Live snapshot for one or more equity symbols, via DataClient.
+    market_data.get_snapshot - the equity sibling of get_option_snapshot
+    above, same endpoint family (both /openapi/market-data/.../snapshot,
+    v2), added 2026-09-11 so the broker Webull orders WILL actually be
+    submitted to can be cross-checked against Alpaca's real-time trade
+    price before submission (see integrations/market_data_aggregator.py).
+    Up to 100 symbols per call per Webull's own docstring on get_snapshot.
+
+    UNLIKE get_option_snapshot above, this response shape has NOT been
+    confirmed against a real live call this session - there was no
+    live-credential access available while writing this. The assumed last-
+    trade-price field name ("price") is inferred by analogy to
+    get_option_snapshot's confirmed "price (last trade)" field on the
+    sibling endpoint, not verified directly. market_data_aggregator.py's
+    field extraction is deliberately defensive about this: if "price" is
+    ever missing or non-numeric, it treats Webull as unavailable for that
+    tick and falls back to Alpaca alone (today's behavior) rather than
+    guessing at a different key - a wrong field-name assumption can only
+    make this cross-check a no-op, never a wrong rejection. Confirm the
+    real shape against a live sandbox call before trusting the
+    "provider disagreement" skip_category this feeds; update this
+    docstring once confirmed."""
+    if not symbols:
+        return []
+    data_client = _get_data_client(app_key, app_secret)
+    response = _call_with_429_retry(
+        "equity snapshot",
+        lambda: data_client.market_data.get_snapshot(",".join(symbols), category="US_STOCK"),
+    )
+    if response.status_code != 200:
+        raise ValueError(f"Webull API error (equity snapshot): HTTP {response.status_code}")
+    payload = response.json()
+    return payload if isinstance(payload, list) else []
+
+
 # Webull's client (webull.core.client.Client.get_response) raises a
 # ServerException for ANY non-2xx response rather than returning a Response
 # object with a checkable .status_code - confirmed by reading the SDK source

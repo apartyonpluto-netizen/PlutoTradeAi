@@ -92,6 +92,7 @@ if __package__:
     from .integrations.tradingview import get_tradingview_status, save_alert
     from .integrations import webull as webull_api
     from .integrations import alpaca_data
+    from .integrations import market_data_aggregator
     from .autonomy.options_selector import select_option_contract
     from .webull_credentials import (
         get_webull_credentials,
@@ -247,6 +248,7 @@ else:
     from integrations.tradingview import get_tradingview_status, save_alert
     from integrations import webull as webull_api
     from integrations import alpaca_data
+    from integrations import market_data_aggregator
     from autonomy.options_selector import select_option_contract
     from webull_credentials import (
         get_webull_credentials,
@@ -10662,9 +10664,29 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             # the SAME as a confirmed large drift - "couldn't confirm
             # freshness" fails closed exactly like "confirmed stale" does,
             # never "assume it's still fine and submit anyway."
-            fresh_price = alpaca_data.get_latest_trade_price(ticker)
+            #
+            # Cross-checked against Webull's own quote since 2026-09-11
+            # (see integrations/market_data_aggregator.py) - the broker
+            # we're about to submit this order TO agreeing with the price
+            # we computed is a stronger confirmation than Alpaca alone.
+            # Webull being unavailable falls back to Alpaca's price alone
+            # (unchanged from before); only a genuine disagreement between
+            # both sources gets its own distinct skip_category below.
+            cross_check = market_data_aggregator.get_cross_checked_price(ticker, creds)
+            fresh_price = cross_check["price"]
             drift_reason = ""
-            if fresh_price is None:
+            drift_skip_category = "price_drift"
+            if cross_check["disagreement"]:
+                alpaca_reading = next((p["price"] for p in cross_check["provider_status"] if p["provider"] == "alpaca"), None)
+                webull_reading = next((p["price"] for p in cross_check["provider_status"] if p["provider"] == "webull"), None)
+                drift_reason = (
+                    f"real-time price sources disagree for {ticker} immediately before submission "
+                    f"(Alpaca ${alpaca_reading:.2f} vs Webull ${webull_reading:.2f}, beyond "
+                    f"{market_data_aggregator.PRICE_SOURCE_DISAGREEMENT_TOLERANCE_PERCENT:.1f}% tolerance) - "
+                    "refusing to submit against an unconfirmed price"
+                )
+                drift_skip_category = "price_sources_disagree"
+            elif fresh_price is None:
                 drift_reason = (
                     f"could not confirm a fresh, real-time price for {ticker} immediately before submission - "
                     "refusing to submit against a possibly-stale scan-time price"
@@ -10681,14 +10703,14 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 entry["status"] = "skipped"
                 entry["reason_skipped"] = drift_reason
                 entry["was_qualifying"] = True
-                entry["skip_category"] = "price_drift"
+                entry["skip_category"] = drift_skip_category
                 skipped.append(entry)
                 record_overnight_order(user_id, entry)
                 _log_research_decision(
                     ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
                     raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=drift_reason,
                     quantity=quantity, entry_client_order_id=entry.get("entry_client_order_id"),
-                    regime_shadow=entry.get("regime_shadow"), skip_category="price_drift",
+                    regime_shadow=entry.get("regime_shadow"), skip_category=drift_skip_category,
                     signal_snapshot=_signal_snapshot_from(opp),
                 )
                 continue

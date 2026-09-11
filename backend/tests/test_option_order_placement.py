@@ -158,3 +158,39 @@ def test_get_option_snapshot_returns_empty_list_for_no_symbols_without_calling_t
         snapshot = webull_api.get_option_snapshot("key", "secret", [])
     assert snapshot == []
     data_client.option_market_data.get_option_snapshot.assert_not_called()
+
+
+def test_get_equity_snapshot_joins_symbols_and_returns_json():
+    # Mirrors get_option_snapshot's confirmed shape (see its own docstring)
+    # - the equity sibling endpoint, NOT independently confirmed live
+    # (see get_equity_snapshot's own docstring for why).
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = [{"symbol": "AAPL", "price": "228.50"}]
+    data_client = MagicMock()
+    data_client.market_data.get_snapshot.return_value = response
+    with patch.object(webull_api, "_get_data_client", return_value=data_client):
+        snapshot = webull_api.get_equity_snapshot("key", "secret", ["AAPL", "MSFT"])
+    assert snapshot == [{"symbol": "AAPL", "price": "228.50"}]
+    data_client.market_data.get_snapshot.assert_called_once_with("AAPL,MSFT", category="US_STOCK")
+
+
+def test_get_equity_snapshot_returns_empty_list_for_no_symbols_without_calling_the_broker():
+    data_client = MagicMock()
+    with patch.object(webull_api, "_get_data_client", return_value=data_client):
+        snapshot = webull_api.get_equity_snapshot("key", "secret", [])
+    assert snapshot == []
+    data_client.market_data.get_snapshot.assert_not_called()
+
+
+def test_get_equity_snapshot_raises_on_non_200():
+    response = MagicMock()
+    response.status_code = 500
+    data_client = MagicMock()
+    data_client.market_data.get_snapshot.return_value = response
+    with patch.object(webull_api, "_get_data_client", return_value=data_client):
+        try:
+            webull_api.get_equity_snapshot("key", "secret", ["AAPL"])
+            assert False, "expected a ValueError"
+        except ValueError as error:
+            assert "equity snapshot" in str(error)

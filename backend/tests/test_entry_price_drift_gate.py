@@ -149,6 +149,85 @@ def test_small_drift_under_the_threshold_still_places_normally(user_id):
     mock_submit.assert_called_once()
 
 
+# --- integration: cross-checking against Webull's own quote (2026-09-11) --
+
+
+def test_price_sources_disagreeing_beyond_tolerance_is_skipped_with_its_own_category(user_id):
+    # Both sources returned a real number, but they genuinely disagree -
+    # this must get its OWN skip_category (not folded into the generic
+    # "price_drift"/"could not confirm" reasons), so it's separately
+    # visible in the efficiency report. See
+    # integrations/market_data_aggregator.py's own module docstring.
+    disagreement_result = {
+        "price": None,
+        "disagreement": True,
+        "provider_status": [
+            {"provider": "alpaca", "price": 100.0, "error": None},
+            {"provider": "webull", "price": 112.0, "error": None},
+        ],
+    }
+    with patch.object(pluto_app, "get_webull_credentials", return_value=CREDS), \
+         patch.object(pluto_app, "is_webull_configured", return_value=True), \
+         patch.object(pluto_app, "get_anthropic_api_key", return_value=""), \
+         patch.object(pluto_app, "get_accounts", return_value=[{"platform": "webull", "status": "Connected"}]), \
+         patch.object(pluto_app.webull_api, "get_paper_accounts", return_value=[{"account_id": "acct-1"}]), \
+         patch.object(pluto_app.webull_api, "find_individual_cash_account", return_value={"account_id": "acct-1"}), \
+         patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"), \
+         patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
+         patch.object(pluto_app.webull_api, "get_open_orders", return_value=[]), \
+         patch.object(pluto_app.webull_api, "get_order_history", return_value=[]), \
+         patch.object(pluto_app.market_data_aggregator, "get_cross_checked_price", return_value=disagreement_result), \
+         patch.object(
+             pluto_app.webull_api, "get_account_balance",
+             return_value={"total_net_liquidation_value": 100000.0, "total_day_profit_loss": 0.0, "account_currency_assets": [{"buying_power": "1000000"}]},
+         ), \
+         patch.object(pluto_app, "_build_page_context", return_value={"upcoming_opportunities": [_candidate(ideal_entry=100.0)]}), \
+         patch.object(pluto_app, "_submit_and_protect_entry", side_effect=_fake_submit_and_protect_entry) as mock_submit, \
+         patch.object(pluto_app, "record_overnight_order", side_effect=lambda user_id, entry: entry), \
+         patch.object(pluto_app, "time"):
+        result = pluto_app._run_autonomous_trade_scan_locked(user_id)
+
+    assert result["placed_count"] == 0
+    mock_submit.assert_not_called()
+    skipped = result["skipped"][0]
+    assert skipped["skip_category"] == "price_sources_disagree"
+    assert "disagree" in skipped["reason_skipped"]
+    assert "$100.00" in skipped["reason_skipped"] and "$112.00" in skipped["reason_skipped"]
+
+
+def test_webull_being_unavailable_falls_back_to_alpaca_alone_unchanged(user_id):
+    # Webull's snapshot call failing (network error, bad credentials,
+    # sandbox unreachable) must NOT newly block a trade that would have
+    # gone through before this cross-check existed - a missing second
+    # opinion is not evidence the first price is wrong. Exercises the
+    # real wiring end-to-end (not the aggregator mocked away), so this is
+    # the actual safety property, not just documentation of intent.
+    with patch.object(pluto_app, "get_webull_credentials", return_value=CREDS), \
+         patch.object(pluto_app, "is_webull_configured", return_value=True), \
+         patch.object(pluto_app, "get_anthropic_api_key", return_value=""), \
+         patch.object(pluto_app, "get_accounts", return_value=[{"platform": "webull", "status": "Connected"}]), \
+         patch.object(pluto_app.webull_api, "get_paper_accounts", return_value=[{"account_id": "acct-1"}]), \
+         patch.object(pluto_app.webull_api, "find_individual_cash_account", return_value={"account_id": "acct-1"}), \
+         patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"), \
+         patch.object(pluto_app.webull_api, "get_account_positions", return_value=[]), \
+         patch.object(pluto_app.webull_api, "get_open_orders", return_value=[]), \
+         patch.object(pluto_app.webull_api, "get_order_history", return_value=[]), \
+         patch.object(pluto_app.alpaca_data, "get_latest_trade_price", return_value=100.0), \
+         patch.object(pluto_app.webull_api, "get_equity_snapshot", side_effect=ValueError("sandbox unreachable")), \
+         patch.object(
+             pluto_app.webull_api, "get_account_balance",
+             return_value={"total_net_liquidation_value": 100000.0, "total_day_profit_loss": 0.0, "account_currency_assets": [{"buying_power": "1000000"}]},
+         ), \
+         patch.object(pluto_app, "_build_page_context", return_value={"upcoming_opportunities": [_candidate(ideal_entry=100.0)]}), \
+         patch.object(pluto_app, "_submit_and_protect_entry", side_effect=_fake_submit_and_protect_entry) as mock_submit, \
+         patch.object(pluto_app, "record_overnight_order", side_effect=lambda user_id, entry: entry), \
+         patch.object(pluto_app, "time"):
+        result = pluto_app._run_autonomous_trade_scan_locked(user_id)
+
+    assert result["placed_count"] == 1
+    mock_submit.assert_called_once()
+
+
 def test_the_freshness_check_is_not_consulted_at_all_during_a_dry_run_preview(user_id):
     # Preview mode never calls the broker or reserves anything real - see
     # dry_run's own contract in _run_autonomous_trade_scan_locked. It must
