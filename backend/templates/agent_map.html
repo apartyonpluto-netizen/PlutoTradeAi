@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · Agent Map{% endblock %}
+{% block content %}
+{% set map = agent_map %}
+{% set outcomes = map.outcomes %}
+
+<section class="panel">
+    <div class="panel-head">
+        <h3>Agent Map</h3>
+        <span>Live, this account</span>
+    </div>
+    <p class="muted">
+        The in-app counterpart to the architecture doc &mdash; not a diagram of what the code
+        <em>could</em> do, but real evidence of what it's actually doing right now: whether the memory
+        layer (<code>research_log.py</code>'s <code>signal_snapshot</code>) is genuinely being fed on
+        every scan tick, which strategy-score source calibration is actually using, what the real-outcomes
+        evidence says so far, and which currently-silent brains (if any) have been promoted to live scoring.
+        Nothing on this page changes a live decision &mdash; it's the same reporting-only boundary as
+        Performance and Daily Digest.
+    </p>
+    <div class="price-map-grid">
+        <div>
+            <small>Signal snapshots fed</small>
+            <b class="{{ 'tone-positive' if map.memory_feed_total and map.memory_feed_populated == map.memory_feed_total else 'tone-caution' if map.memory_feed_populated else 'tone-negative' if map.memory_feed_total else '' }}">
+                {{ map.memory_feed_populated }}/{{ map.memory_feed_total }}
+            </b>
+        </div>
+        <div>
+            <small>Trades to next auto-recalibration</small>
+            <b>{{ map.closed_trades_since_last_real_recalibration }}/{{ map.real_outcomes_recalibration_interval }}</b>
+        </div>
+        <div>
+            <small>Strategies on real-outcomes data</small>
+            <b>{{ map.calibration_rows|selectattr("active_source", "equalto", "real")|list|length }}/{{ map.calibration_rows|length }}</b>
+        </div>
+        <div>
+            <small>Brains promoted to live</small>
+            <b>{{ map.brain_validation|selectattr("validated")|list|length }}/{{ map.brain_validation|length }}</b>
+        </div>
+    </div>
+</section>
+
+<section class="panel panel-table">
+    <div class="panel-head">
+        <h3>Recent Research Log &mdash; Memory Feed</h3>
+        <span>Last {{ map.memory_feed_total }} evaluated</span>
+    </div>
+    <p class="muted">
+        Every candidate the scan evaluates gets a durable record here, placed or skipped, with a
+        <code>signal_snapshot</code> of strategy_brain's own reading at that moment. If <b>Memory</b> is
+        blank for recent rows, the scan isn't running or isn't reaching this code path &mdash; that's the
+        thing to investigate first.
+    </p>
+    <table>
+        <thead><tr><th>Ticker</th><th>Decision</th><th>Skip Category</th><th>Memory</th><th>Logged</th></tr></thead>
+        <tbody>
+        {% for row in map.memory_feed %}
+        <tr>
+            <td>{{ row.ticker or "—" }}</td>
+            <td>{{ row.decision or "—" }}</td>
+            <td>{{ row.skip_category or "—" }}</td>
+            <td>
+                {% if row.has_signal_snapshot %}
+                <span class="status-pill status-buy">FED</span>
+                {% else %}
+                <span class="status-pill status-watch">MISSING</span>
+                {% endif %}
+            </td>
+            <td class="alert-time" data-timestamp="{{ row.logged_at or '' }}">--</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="muted">No research_log records yet &mdash; nothing has been evaluated by the autonomous scan for this account.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<section class="panel panel-table">
+    <div class="panel-head">
+        <h3>Strategy Calibration</h3>
+        <span>{{ map.calibration_status|replace("_", " ")|title }}</span>
+    </div>
+    <p class="muted">
+        <code>score_multiplier</code> prefers a real-outcomes-derived adjustment (this account's own
+        closed trades) once a strategy has &ge;{{ map.min_trades_to_trust }} of them; otherwise it falls
+        back to the backtested figure. <b>Active</b> shows which source is actually shaping live scores
+        for that strategy right now &mdash; a strategy can show numbers under both columns while only one
+        of them is trusted enough to count.
+    </p>
+    <table>
+        <thead><tr><th>Strategy</th><th>Active</th><th>Real trades</th><th>Real avg return</th><th>Backtest trades</th><th>Backtest avg return</th></tr></thead>
+        <tbody>
+        {% for row in map.calibration_rows %}
+        <tr>
+            <td>{{ row.strategy }}</td>
+            <td>
+                {% if row.active_source == "real" %}
+                <span class="status-pill status-buy">REAL</span>
+                {% elif row.active_source == "backtest" %}
+                <span class="status-pill status-watch">BACKTEST</span>
+                {% else %}
+                <span class="badge badge-soft">NONE YET</span>
+                {% endif %}
+            </td>
+            <td>{{ row.real.trade_count if row.real else "—" }}</td>
+            <td>{{ (row.real.avg_return_percent ~ "%") if row.real and row.real.avg_return_percent is not none else "—" }}</td>
+            <td>{{ row.backtest.trade_count if row.backtest else "—" }}</td>
+            <td>{{ (row.backtest.avg_return_percent ~ "%") if row.backtest and row.backtest.avg_return_percent is not none else "—" }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="muted">No calibration data yet &mdash; needs either a manual admin recalibration or enough real closed trades to trigger one automatically.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<section class="panel panel-table">
+    <div class="panel-head">
+        <h3>Brain Validation Gate</h3>
+        <span>{{ map.brain_validation|selectattr("validated")|list|length }} of {{ map.brain_validation|length }} promoted</span>
+    </div>
+    <p class="muted">
+        Every brain below still exists only as a shadow/display-only signal &mdash; it has never fed a
+        live decision. This table is empty of green pills by default and stays that way unless someone
+        explicitly promotes a name, with real evidence from Outcomes Evidence below in hand. Nothing in
+        this codebase does that automatically.
+    </p>
+    <table>
+        <thead><tr><th>Brain</th><th>Status</th></tr></thead>
+        <tbody>
+        {% for brain in map.brain_validation %}
+        <tr>
+            <td>{{ brain.name }}</td>
+            <td>
+                {% if brain.validated %}
+                <span class="status-pill status-buy">VALIDATED</span>
+                {% else %}
+                <span class="badge badge-soft">SHADOW ONLY</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+{% macro outcomes_table(title, rows) %}
+<section class="panel panel-table">
+    <div class="panel-head">
+        <h3>{{ title }}</h3>
+        <span>{{ rows|length }} bucket{{ "s" if rows|length != 1 else "" }}</span>
+    </div>
+    <table>
+        <thead><tr><th>Bucket</th><th>Trades</th><th>W / L</th><th>Win Rate</th><th>Avg P&amp;L</th></tr></thead>
+        <tbody>
+        {% for row in rows %}
+        <tr>
+            <td>{{ row.label }}{% if not row.sufficient_sample %} <span class="muted">(low sample)</span>{% endif %}</td>
+            <td>{{ row.count }}</td>
+            <td>{{ row.wins }} / {{ row.losses }}</td>
+            <td>{{ row.win_rate_percent ~ "%" if row.win_rate_percent is not none else "—" }}</td>
+            <td class="{{ 'tone-positive' if row.avg_pnl and row.avg_pnl > 0 else 'tone-negative' if row.avg_pnl and row.avg_pnl < 0 else '' }}">
+                {{ "${:,.2f}".format(row.avg_pnl) if row.avg_pnl is not none else "—" }}
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="muted">No closed trades with a signal_snapshot in this breakdown yet.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endmacro %}
+
+<section class="panel">
+    <div class="panel-head">
+        <h3>Outcomes Evidence</h3>
+        <span>{{ outcomes.signal_snapshot_available_count }}/{{ outcomes.total_closed_trades }} closed trades with memory</span>
+    </div>
+    <p class="muted">
+        Does strategy_brain's own technical picture at entry (RSI, EMA-stack alignment, relative volume,
+        price vs. VWAP) actually correlate with what happened? This is the evidence a human reads before
+        ever promoting a brain above &mdash; every row below is flagged <strong>low sample</strong> under
+        {{ outcomes.min_sample_size_for_rates }} trades with known P&amp;L, same discipline as Performance.
+        Not included yet: {{ outcomes.not_yet_captured|join(", ") }} &mdash; their output isn't in
+        signal_snapshot at all, so there's nothing real to bucket by.
+    </p>
+</section>
+
+{{ outcomes_table("By RSI at Entry", outcomes.by_rsi_at_entry) }}
+{{ outcomes_table("By EMA Stack Alignment", outcomes.by_ema_stack_alignment) }}
+{{ outcomes_table("By Relative Volume", outcomes.by_relative_volume) }}
+{{ outcomes_table("By Price vs. VWAP", outcomes.by_price_vs_vwap) }}
+{% endblock %}

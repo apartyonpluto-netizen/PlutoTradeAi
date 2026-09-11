@@ -44,6 +44,7 @@ if __package__:
     )
     from .global_settings import get_global_settings, update_global_settings
     from .autonomy.autonomous_controller import (
+        SHADOW_ONLY_BRAINS,
         emergency_stop,
         get_autonomy_status,
         reset_emergency_stop,
@@ -111,6 +112,8 @@ if __package__:
     )
     from .autonomy.closed_trades import get_closed_trade, list_closed_trades, record_closed_trade
     from .autonomy.performance_report import build_performance_report
+    from .autonomy.outcomes_analysis import build_outcomes_analysis
+    from .calibration_store import MIN_TRADES_TO_TRUST, REAL_OUTCOMES_RECALIBRATION_TRADE_INTERVAL
     from .autonomy.daily_digest import build_daily_digest
     from .autonomy.efficiency_report import build_efficiency_report
     from .fast_monitor_heartbeat import (
@@ -137,7 +140,7 @@ if __package__:
     from . import order_lifecycle as ol
     from .anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from .autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
-    from .autonomy.research_log import record_research_decision
+    from .autonomy.research_log import list_research_decisions, record_research_decision
     from .autonomy.scan_run_log import list_scan_runs, record_scan_run
     from .autonomy.ambiguous_resolution_audit import (
         find_incomplete_resolutions,
@@ -205,6 +208,7 @@ else:
     )
     from global_settings import get_global_settings, update_global_settings
     from autonomy.autonomous_controller import (
+        SHADOW_ONLY_BRAINS,
         emergency_stop,
         get_autonomy_status,
         reset_emergency_stop,
@@ -272,6 +276,8 @@ else:
     )
     from autonomy.closed_trades import get_closed_trade, list_closed_trades, record_closed_trade
     from autonomy.performance_report import build_performance_report
+    from autonomy.outcomes_analysis import build_outcomes_analysis
+    from calibration_store import MIN_TRADES_TO_TRUST, REAL_OUTCOMES_RECALIBRATION_TRADE_INTERVAL
     from autonomy.daily_digest import build_daily_digest
     from autonomy.efficiency_report import build_efficiency_report
     from fast_monitor_heartbeat import (
@@ -298,7 +304,7 @@ else:
     import order_lifecycle as ol
     from anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
-    from autonomy.research_log import record_research_decision
+    from autonomy.research_log import list_research_decisions, record_research_decision
     from autonomy.scan_run_log import list_scan_runs, record_scan_run
     from autonomy.ambiguous_resolution_audit import (
         find_incomplete_resolutions,
@@ -2845,6 +2851,85 @@ def performance_page() -> str:
     context = _build_page_context(include_opportunities=False, include_market_scan=False)
     context["performance_report"] = build_performance_report(_current_user_id())
     return render_template("performance.html", **context)
+
+
+# How many of the most recent research_log records to show/sample on the
+# Agent Map page - recent enough to be meaningful "is this actually
+# running right now" evidence, not so many the page is slow to render.
+AGENT_MAP_RECENT_RECORDS = 25
+
+
+@app.route("/agent-map")
+def agent_map_page() -> str:
+    """The in-app, LIVE counterpart to docs/AGENT_ARCHITECTURE.md and the
+    published Agent Map artifact - answers "is the memory layer actually
+    being fed" with this account's own real data, not a static diagram.
+    Built 2026-09-11 directly in response to being asked to see the map
+    "within the application" so the memory/real-outcomes work (see
+    research_log.py's signal_snapshot, calibration.py's real-outcomes
+    path, outcomes_analysis.py, and the validated_brains gate) is
+    continuously checkable, not just documented once and trusted.
+
+    include_opportunities=False/include_market_scan=False for the same
+    reason performance_page/daily_digest_page use them - this page only
+    reads this account's own recorded history, never live market data."""
+    user_id = _current_user_id()
+    context = _build_page_context(include_opportunities=False, include_market_scan=False)
+
+    # Newest first - list_research_decisions returns oldest-first append order.
+    recent_records = list(reversed(list_research_decisions(user_id)))[:AGENT_MAP_RECENT_RECORDS]
+    memory_feed = []
+    signal_snapshot_populated_count = 0
+    for record in recent_records:
+        snapshot = record.get("signal_snapshot")
+        market_context = snapshot.get("market_context") if isinstance(snapshot, dict) else None
+        has_memory = isinstance(market_context, dict) and bool(market_context)
+        if has_memory:
+            signal_snapshot_populated_count += 1
+        memory_feed.append({
+            "ticker": record.get("ticker"),
+            "decision": record.get("decision"),
+            "skip_category": record.get("skip_category"),
+            "has_signal_snapshot": has_memory,
+            "logged_at": record.get("logged_at"),
+        })
+
+    calibration = get_calibration()
+    real_stats = calibration.get("real_strategy_stats") or {}
+    backtest_stats = calibration.get("strategy_stats") or {}
+    calibration_rows = []
+    for strategy_name in sorted(set(real_stats) | set(backtest_stats)):
+        real = real_stats.get(strategy_name)
+        backtest = backtest_stats.get(strategy_name)
+        # Mirrors calibration_store.score_multiplier's own preference
+        # order exactly - real-if-trusted, else backtest-if-trusted, else
+        # neither - so this column never implies a source is "in effect"
+        # when score_multiplier itself would have ignored it.
+        if real and real.get("trusted"):
+            active_source = "real"
+        elif backtest and backtest.get("trusted"):
+            active_source = "backtest"
+        else:
+            active_source = None
+        calibration_rows.append({"strategy": strategy_name, "real": real, "backtest": backtest, "active_source": active_source})
+
+    validated_brains = set(context.get("autonomy_status", {}).get("validated_brains") or [])
+    brain_validation = [{"name": name, "validated": name in validated_brains} for name in SHADOW_ONLY_BRAINS]
+
+    context["agent_map"] = {
+        "memory_feed": memory_feed,
+        "memory_feed_total": len(recent_records),
+        "memory_feed_populated": signal_snapshot_populated_count,
+        "calibration_status": calibration.get("status", "never_run"),
+        "calibration_rows": calibration_rows,
+        "real_outcomes_generated_at": calibration.get("real_outcomes_generated_at") or "",
+        "closed_trades_since_last_real_recalibration": int(calibration.get("closed_trades_since_last_real_recalibration", 0) or 0),
+        "real_outcomes_recalibration_interval": REAL_OUTCOMES_RECALIBRATION_TRADE_INTERVAL,
+        "min_trades_to_trust": MIN_TRADES_TO_TRUST,
+        "outcomes": build_outcomes_analysis(user_id),
+        "brain_validation": brain_validation,
+    }
+    return render_template("agent_map.html", **context)
 
 
 @app.route("/daily-digest")
