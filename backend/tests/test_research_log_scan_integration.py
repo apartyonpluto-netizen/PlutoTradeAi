@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import app as pluto_app
 import order_lifecycle as ol
-from autonomy.research_log import list_research_decisions
+from autonomy.research_log import RESEARCH_LOG_SCHEMA_VERSION, list_research_decisions
 
 CREDS = {"app_key": "key", "app_secret": "secret"}
 ZERO_QTY_SENTINEL_PRICE = 987654.0
@@ -30,23 +30,28 @@ def _opportunities():
         {  # placed
             "ticker": "AAPL", "recommendation": "CALL", "confidence": 90,
             "ideal_entry": 100.0, "stop": 50.0, "target": 110.0, "strategy": "Trend Reversal",
+            "market_context": {"ticker": "AAPL", "rsi": 61.0}, "strategies_evaluated": ["Trend Reversal", "Momentum"],
         },
         {  # below the confidence floor - never becomes "qualifying" at all
             "ticker": "SLOW", "recommendation": "CALL", "confidence": 20,
             "ideal_entry": 50.0, "stop": 25.0, "target": 60.0, "strategy": "Momentum",
+            "market_context": {"ticker": "SLOW", "rsi": 44.0}, "strategies_evaluated": ["Momentum"],
         },
         {  # not a bullish setup - filtered before qualifying too
             "ticker": "BEAR", "recommendation": "WAIT", "confidence": 90,
             "ideal_entry": 50.0, "stop": 25.0, "target": 60.0, "strategy": "Mean Reversion",
+            "market_context": {"ticker": "BEAR", "rsi": 30.0}, "strategies_evaluated": ["Mean Reversion"],
         },
         {  # qualifies technically, but sizing rejects it for risk/buying-power reasons
             "ticker": "HUGE", "recommendation": "CALL", "confidence": 85,
             "ideal_entry": ZERO_QTY_SENTINEL_PRICE, "stop": ZERO_QTY_SENTINEL_PRICE - 1.0, "target": ZERO_QTY_SENTINEL_PRICE + 1.0,
             "strategy": "Breakout",
+            "market_context": {"ticker": "HUGE", "rsi": 70.0}, "strategies_evaluated": ["Breakout"],
         },
         {  # qualifies and sizes, but the LLM step vetoes it
             "ticker": "VETO", "recommendation": "CALL", "confidence": 88,
             "ideal_entry": 60.0, "stop": 30.0, "target": 70.0, "strategy": "Trend Reversal",
+            "market_context": {"ticker": "VETO", "rsi": 66.0}, "strategies_evaluated": ["Trend Reversal"],
         },
     ]
 
@@ -178,7 +183,7 @@ def test_every_record_carries_a_regime_shadow_block_for_future_backtesting(user_
 def test_records_are_versioned(user_id):
     _run_scan_and_capture(user_id, _opportunities())
     for record in list_research_decisions(user_id):
-        assert record["schema_version"] == 1
+        assert record["schema_version"] == RESEARCH_LOG_SCHEMA_VERSION
 
 
 def test_research_logging_failure_does_not_block_the_real_scan(user_id):
@@ -186,3 +191,56 @@ def test_research_logging_failure_does_not_block_the_real_scan(user_id):
         result = _run_scan_and_capture(user_id, [_opportunities()[0]])  # just the placed candidate
     assert result["placed_count"] == 1
     assert result["placed"][0]["status"] == "placed"
+
+
+def test_skip_category_is_recorded_for_every_skip_reason(user_id):
+    # skip_category was computed at every branch of the scan loop but
+    # silently never reached this durable log before 2026-09-11 - this is
+    # the regression test for that fix, one assertion per distinct branch.
+    _run_scan_and_capture(user_id, _opportunities())
+    records = {r["ticker"]: r for r in list_research_decisions(user_id)}
+    assert records["SLOW"]["skip_category"] == "confidence_threshold"
+    assert records["BEAR"]["skip_category"] == "not_call_or_put"
+    assert records["HUGE"]["skip_category"] == "sizing_too_small"
+    assert records["VETO"]["skip_category"] == "llm_veto"
+    assert records["AAPL"]["skip_category"] is None
+
+
+def test_signal_snapshot_carries_strategy_brains_market_context_through_untouched(user_id):
+    # The new "memory layer": signal_snapshot is a pure pass-through of
+    # whatever strategy_brain already computed for this candidate (carried
+    # on the opportunity dict by _build_page_context) - never recomputed or
+    # re-fetched by the research log itself. Proven here by round-tripping
+    # a distinct market_context/strategies_evaluated per ticker and
+    # checking each logged record against its own opportunity's values,
+    # not just checking the keys exist.
+    opportunities = _opportunities()
+    _run_scan_and_capture(user_id, opportunities)
+    records = {r["ticker"]: r for r in list_research_decisions(user_id)}
+    for opp in opportunities:
+        snapshot = records[opp["ticker"]]["signal_snapshot"]
+        assert isinstance(snapshot, dict)
+        assert snapshot["market_context"] == opp["market_context"]
+        assert snapshot["strategies_evaluated"] == opp["strategies_evaluated"]
+
+
+def test_signal_snapshot_is_shadow_only_and_never_read_back_into_the_scans_own_decisions(user_id):
+    # Same shadow-mode guarantee regime_shadow already has: a candidate
+    # whose signal_snapshot content looks maximally favorable (high RSI,
+    # every strategy agreeing) must still be skipped/placed based only on
+    # confidence/recommendation/sizing/LLM - never on signal_snapshot
+    # itself, since nothing in the scan reads it back.
+    opportunities = _opportunities()
+    for opp in opportunities:
+        opp["market_context"] = {"ticker": opp["ticker"], "rsi": 99.9, "looks_great": True}
+        opp["strategies_evaluated"] = ["Everything Agrees"]
+    result = _run_scan_and_capture(user_id, opportunities)
+    records = {r["ticker"]: r for r in list_research_decisions(user_id)}
+    # Same skip/placement outcome as the un-juiced fixture - the favorable
+    # signal_snapshot content changed nothing about the real decision.
+    assert result["placed_count"] == 1
+    assert records["SLOW"]["decision"] == "skipped"
+    assert records["BEAR"]["decision"] == "skipped"
+    assert records["HUGE"]["decision"] == "skipped"
+    assert records["VETO"]["decision"] == "skipped"
+    assert records["AAPL"]["decision"] == "placed"

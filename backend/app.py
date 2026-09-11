@@ -2325,6 +2325,18 @@ def _build_page_context(
                 "research_only": strategy.get("research_only", True),
                 "disclaimer": strategy.get("disclaimer", "For research only."),
                 "extended_hours": extended_hours,
+                # Pass-through, never recomputed - this is exactly what
+                # strategy_brain actually used to produce confidence/
+                # recommendation for this candidate (EMA stack, RSI, VWAP,
+                # support/resistance, relative volume, every strategy it
+                # scored and rejected). Zero marginal cost (strategy_brain
+                # already computed this once above) - carried through so
+                # the autonomous scan can durably record it as a signal
+                # snapshot (see docs/AGENT_ARCHITECTURE.md's "memory"
+                # section) without ever recomputing or re-fetching
+                # anything. Not read by any decision logic itself.
+                "market_context": strategy.get("market_context"),
+                "strategies_evaluated": strategy.get("strategies_evaluated"),
             }
         )
         mission_queue.append(
@@ -10122,9 +10134,21 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         except Exception as shadow_error:  # noqa: BLE001 - shadow/research code must never affect the real scan
             return {"regime_mode": "shadow", "error": str(shadow_error)}
 
+    def _signal_snapshot_from(opp: Dict[str, object]) -> Dict[str, object]:
+        """SHADOW MODE ONLY - see _log_research_decision's own docstring.
+        Pass-through of strategy_brain's already-computed market_context/
+        strategies_evaluated (carried on the opportunity dict by
+        _build_page_context) - never recomputed or re-fetched here, so
+        this is zero marginal cost and cannot itself fail in a way that
+        needs a try/except the way a fresh network call would."""
+        return {
+            "market_context": opp.get("market_context"),
+            "strategies_evaluated": opp.get("strategies_evaluated"),
+        }
+
     def _log_research_decision(
         *, ticker, recommendation, strategy, raw_confidence, decision, reason_skipped,
-        quantity, entry_client_order_id, regime_shadow=None,
+        quantity, entry_client_order_id, regime_shadow=None, skip_category=None, signal_snapshot=None,
     ) -> None:
         """Durably records ONE evaluated candidate to the append-only
         research log (autonomy/research_log.py) - called for EVERY
@@ -10135,6 +10159,25 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         signal) isn't built only from the subset that reached submission -
         see research_log.py's own module docstring on survivorship bias.
         Never lets a logging failure affect the real scan.
+
+        skip_category (2026-09-11): the same short skip-reason code already
+        stamped on the in-memory skipped/placed record for the trading-
+        efficiency funnel (app.py's own skip_category work) - was
+        previously computed at every site but never threaded into this
+        durable log, so it silently never reached research_log.py. None
+        for a placed candidate (no skip to categorize).
+
+        signal_snapshot (2026-09-11): the "memory" layer - market_context
+        and strategies_evaluated exactly as strategy_brain computed them
+        for THIS candidate (see _build_page_context's own opportunity
+        construction, which now carries these through at zero marginal
+        cost - never recomputed here). SHADOW MODE ONLY, same discipline
+        as regime_shadow below: nothing reads this back into a decision.
+        See docs/AGENT_ARCHITECTURE.md for why candle_brain/pattern_brain/
+        neural_engine are deliberately NOT captured here yet - they'd add
+        real yfinance network calls to every candidate on every scan tick,
+        the same load pattern that caused the original Yahoo rate-limit
+        incident this app already migrated away from once.
 
         No-ops entirely under dry_run - a preview run isn't a real evaluated
         candidate with real consequences, and mixing preview rows into the
@@ -10154,9 +10197,11 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                     "raw_confidence": raw_confidence,
                     "decision": decision,
                     "reason_skipped": reason_skipped,
+                    "skip_category": skip_category,
                     "quantity": quantity,
                     "entry_client_order_id": entry_client_order_id,
                     "regime_shadow": regime_shadow if regime_shadow is not None else _shadow_snapshot_for(ticker, strategy, raw_confidence),
+                    "signal_snapshot": signal_snapshot,
                 },
             )
         except Exception:  # noqa: BLE001 - research logging must never affect the real scan
@@ -10199,7 +10244,8 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         _log_research_decision(
             ticker=opp.get("ticker"), recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
             raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=reason,
-            quantity=None, entry_client_order_id=None,
+            quantity=None, entry_client_order_id=None, skip_category=skip_category,
+            signal_snapshot=_signal_snapshot_from(opp),
         )
 
     for candidate_index, opp in enumerate(candidates):
@@ -10257,7 +10303,8 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             _log_research_decision(
                 ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
                 raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=reason,
-                quantity=0, entry_client_order_id=None,
+                quantity=0, entry_client_order_id=None, skip_category="unprotectable_levels",
+                signal_snapshot=_signal_snapshot_from(opp),
             )
             continue
 
@@ -10275,7 +10322,8 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             _log_research_decision(
                 ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
                 raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=reason,
-                quantity=0, entry_client_order_id=None,
+                quantity=0, entry_client_order_id=None, skip_category="no_margin_account",
+                signal_snapshot=_signal_snapshot_from(opp),
             )
             continue
 
@@ -10408,6 +10456,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                         decision="placed" if option_entry.get("status") == "placed" else "skipped",
                         reason_skipped=option_entry.get("error") if option_entry.get("status") != "placed" else None,
                         quantity=option_quantity, entry_client_order_id=option_entry.get("entry_client_order_id"),
+                        skip_category=option_entry.get("skip_category"), signal_snapshot=_signal_snapshot_from(opp),
                     )
                     if option_entry.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE:
                         break  # same circuit breaker as the equity path - this account's committed capital is no longer confidently known this run
@@ -10478,7 +10527,8 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             _log_research_decision(
                 ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
                 raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=sizing["reason"],
-                quantity=0, entry_client_order_id=None,
+                quantity=0, entry_client_order_id=None, skip_category="sizing_too_small",
+                signal_snapshot=_signal_snapshot_from(opp),
             )
             continue
         # direction="short" has its stop ABOVE limit_price - mirrored so
@@ -10571,7 +10621,8 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                     ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
                     raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=veto_reason,
                     quantity=quantity, entry_client_order_id=entry.get("entry_client_order_id"),
-                    regime_shadow=entry.get("regime_shadow"),
+                    regime_shadow=entry.get("regime_shadow"), skip_category="llm_veto",
+                    signal_snapshot=_signal_snapshot_from(opp),
                 )
                 continue
 
@@ -10637,7 +10688,8 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                     ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
                     raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=drift_reason,
                     quantity=quantity, entry_client_order_id=entry.get("entry_client_order_id"),
-                    regime_shadow=entry.get("regime_shadow"),
+                    regime_shadow=entry.get("regime_shadow"), skip_category="price_drift",
+                    signal_snapshot=_signal_snapshot_from(opp),
                 )
                 continue
 
@@ -10727,7 +10779,8 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             decision="placed" if entry.get("status") == "placed" else "skipped",
             reason_skipped=entry.get("error") if entry.get("status") != "placed" else None,
             quantity=quantity, entry_client_order_id=entry.get("entry_client_order_id"),
-            regime_shadow=entry.get("regime_shadow"),
+            regime_shadow=entry.get("regime_shadow"), skip_category=entry.get("skip_category"),
+            signal_snapshot=_signal_snapshot_from(opp),
         )
         if entry.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE:
             # Circuit breaker: an ambiguous submission means this account's

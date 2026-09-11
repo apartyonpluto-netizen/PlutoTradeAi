@@ -34,7 +34,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
 USER_DATA_ROOT = DATA_DIR / "users"
 
-RESEARCH_LOG_SCHEMA_VERSION = 1
+RESEARCH_LOG_SCHEMA_VERSION = 2
 
 
 def _now_iso() -> str:
