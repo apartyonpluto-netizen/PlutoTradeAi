@@ -199,6 +199,41 @@ def test_happy_path_cancels_stop_places_sell_and_records_a_closed_trade():
     assert closed[0]["net_realized_pnl"] > 0
 
 
+def test_happy_path_triggers_the_real_outcomes_recalibration_check():
+    # Confirms the real wiring (added 2026-09-11 alongside
+    # calibration.py's real-outcomes calibration) - every closed-trade
+    # recording site must call this exactly once so the trade actually
+    # counts toward the automatic recalibration interval. The function
+    # itself is unit-tested separately (tests/test_calibration.py); this
+    # only proves the call site is wired into the real exit path.
+    entry = _active_entry()
+    sell_id = ol.deterministic_client_order_id("user-1", TICKER, TRADING_DAY, "target_exit", attempt=1)
+    fresh_price = TARGET_PRICE + 1.0
+    cancelled: set = set()
+
+    def _get_detail(app_key, app_secret, account_id, client_order_id):
+        if client_order_id == STOP_ID:
+            return _exit_order_detail("CANCELLED", QUANTITY, 0) if client_order_id in cancelled else _exit_order_detail("SUBMITTED", QUANTITY, 0)
+        if client_order_id == sell_id:
+            return _exit_order_detail("FILLED", QUANTITY, QUANTITY, average_price=fresh_price)
+        return _exit_order_detail("UNKNOWN", 0, 0)
+
+    def _cancel(app_key, app_secret, account_id, client_order_id):
+        cancelled.add(client_order_id)
+
+    with patch.object(pluto_app.webull_api, "get_order_detail", side_effect=_get_detail), \
+         patch.object(pluto_app.webull_api, "cancel_order", side_effect=_cancel), \
+         patch.object(pluto_app.webull_api, "place_stock_order", return_value={"client_order_id": sell_id}), \
+         patch.object(pluto_app.alpaca_data, "get_latest_trade_price", return_value=fresh_price), \
+         patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"), \
+         patch.object(pluto_app, "maybe_trigger_real_outcomes_recalibration") as mock_trigger, \
+         patch.object(pluto_app, "time"):
+        result = _call(entry)
+
+    assert result is True
+    mock_trigger.assert_called_once_with()
+
+
 def test_stop_cancel_call_itself_failing_raises_and_places_no_sell():
     entry = _active_entry()
     with patch.object(pluto_app.webull_api, "get_order_detail", return_value=_exit_order_detail("SUBMITTED", QUANTITY, 0)), \

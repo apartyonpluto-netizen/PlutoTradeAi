@@ -148,7 +148,12 @@ if __package__:
         RESOLUTION_PHASE_STARTED,
     )
     from .backtest_engine import run_backtest
-    from .calibration import get_calibration, start_calibration
+    from .calibration import (
+        get_calibration,
+        maybe_trigger_real_outcomes_recalibration,
+        recalibrate_from_real_outcomes,
+        start_calibration,
+    )
     from .market_scanner import scan_market
     from .news.future_news import get_future_news_roadmap
     from .news.news_service import fetch_news_bundle
@@ -304,7 +309,12 @@ else:
         RESOLUTION_PHASE_STARTED,
     )
     from backtest_engine import run_backtest
-    from calibration import get_calibration, start_calibration
+    from calibration import (
+        get_calibration,
+        maybe_trigger_real_outcomes_recalibration,
+        recalibrate_from_real_outcomes,
+        start_calibration,
+    )
     from market_scanner import scan_market
     from news.future_news import get_future_news_roadmap
     from news.news_service import fetch_news_bundle
@@ -869,7 +879,15 @@ def api_admin_recalibrate_strategies():
     win rate, so strategy_brain's confidence scores can be nudged by
     evidence instead of trusting the hand-tuned formulas blindly. Can take
     several minutes - the route returns immediately, the UI polls
-    /api/admin/calibration-status for progress."""
+    /api/admin/calibration-status for progress.
+
+    Also refreshes the real-outcomes multiplier (this deployment's own
+    closed trades - see calibration.recalibrate_from_real_outcomes) inline,
+    synchronously - unlike the backtest above, that's a fast local-JSON
+    aggregation with no network calls, so it doesn't need the same
+    background-thread treatment. This is "the existing manual admin
+    trigger" the real-outcomes plan calls for keeping, now refreshing both
+    sources with the one button rather than needing a second endpoint."""
     guard = _require_admin()
     if guard:
         return guard
@@ -884,6 +902,10 @@ def api_admin_recalibrate_strategies():
         )
     except ValueError as error:
         return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
+    try:
+        recalibrate_from_real_outcomes()
+    except Exception:  # noqa: BLE001 - a real-outcomes recompute failure must not block the backtest trigger above
+        pass
     return _api_success(result, ok=True)
 
 
@@ -6079,6 +6101,7 @@ def _check_and_execute_target_exit(
         "reconciled_at": _now_utc().isoformat(),
     }
     record_closed_trade(user_id, trade_id, closed_record)
+    maybe_trigger_real_outcomes_recalibration()
     ol.transition(entry, ol.CLOSED, closed_trade_id=trade_id, close_reason="target_exit_executed")
     try:
         if pnl_complete:
@@ -6473,6 +6496,7 @@ def _reconcile_position_exit(
             "reconciled_at": _now_utc().isoformat(),
         }
         record_closed_trade(user_id, trade_id, closed_record)
+        maybe_trigger_real_outcomes_recalibration()
         ol.transition(entry, ol.CLOSED, closed_trade_id=trade_id, close_reason=f"{exited_leg}_filled")
         try:
             if pnl_complete:
@@ -7111,6 +7135,7 @@ def _check_and_execute_option_exit(
         "reconciled_at": _now_utc().isoformat(),
     }
     record_closed_trade(user_id, trade_id, closed_record)
+    maybe_trigger_real_outcomes_recalibration()
     ol.transition(entry, ol.CLOSED, closed_trade_id=trade_id, close_reason=close_reason)
     try:
         if pnl_complete:
@@ -8839,6 +8864,7 @@ def _resolve_position_absent_reconciliation(
         "reconciled_at": _now_utc().isoformat(),
     }
     record_closed_trade(target_user_id, trade_id, closed_record)
+    maybe_trigger_real_outcomes_recalibration()
     ol.transition(entry, ol.CLOSED, closed_trade_id=trade_id, close_reason="manual_reconciliation_position_absent")
     replace_overnight_orders(target_user_id, orders)
     logger.warning(
