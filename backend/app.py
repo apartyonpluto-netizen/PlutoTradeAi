@@ -10205,12 +10205,31 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         if order.get("status") == "placed" and _order_trading_day(order) == today_key
     }
 
+    # A ticker whose entry is still anywhere short of CLOSED - opened
+    # today or on an earlier day, equity or option - must never receive a
+    # second, independent autonomous entry. already_placed_today above
+    # only catches TODAY's placements; a multi-day swing hold from Monday
+    # would silently fall through it on Wednesday and let a fresh bullish
+    # signal pyramid into the same ticker as an entirely separate
+    # position. Sourced from overnight_orders (not the raw broker position
+    # snapshot) specifically because ol.is_transitional's ticker field is
+    # already correct for BOTH equity and option entries - get_account_positions'
+    # real response shape for an OPTION row is documented elsewhere in this
+    # function as unconfirmed, so matching on the broker snapshot directly
+    # would silently miss every open option position.
+    tickers_with_open_positions = {
+        str(order.get("ticker", "")).upper()
+        for order in list_overnight_orders(user_id)
+        if order.get("ticker") and ol.is_transitional(order)
+    }
+
     qualifying = [
         opp
         for opp in opportunities
         if str(opp.get("recommendation", "")).upper() in ("CALL", "PUT")
         and int(opp.get("confidence", 0) or 0) >= OVERNIGHT_MIN_CONFIDENCE
         and str(opp.get("ticker", "")).upper() not in already_placed_today
+        and str(opp.get("ticker", "")).upper() not in tickers_with_open_positions
     ]
     qualifying.sort(key=lambda opp: int(opp.get("confidence", 0) or 0), reverse=True)
 
@@ -10427,6 +10446,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         if opp in candidates:
             continue
         opp_was_qualifying = opp in qualifying
+        ticker_upper = str(opp.get("ticker", "")).upper()
         # Only the max-positions/no-slots branch needs surfacing per-ticker
         # in the scan-run reason text (see the sizing-rejection skip's own
         # comment, above, in the main candidate loop) - the blocked-entries
@@ -10441,12 +10461,23 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             reason = f"max_positions limit reached ({open_position_count}/{max_positions} open)" if max_positions > 0 else "no position slots available"
             surface_in_summary = True
             skip_category = "max_positions"
-        elif str(opp.get("recommendation", "")).upper() in ("CALL", "PUT"):
-            reason = f"confidence {opp.get('confidence')} below {OVERNIGHT_MIN_CONFIDENCE} threshold"
-            skip_category = "confidence_threshold"
-        else:
+        elif str(opp.get("recommendation", "")).upper() not in ("CALL", "PUT"):
             reason = f"recommendation is {opp.get('recommendation')}, only CALL/PUT setups auto-order tonight"
             skip_category = "not_call_or_put"
+        elif int(opp.get("confidence", 0) or 0) < OVERNIGHT_MIN_CONFIDENCE:
+            reason = f"confidence {opp.get('confidence')} below {OVERNIGHT_MIN_CONFIDENCE} threshold"
+            skip_category = "confidence_threshold"
+        elif ticker_upper in tickers_with_open_positions:
+            # Checked before already_placed_today below - a position opened
+            # today is ALSO still transitional, so this is the more specific
+            # (and more common) of the two true reasons; still_placed_today
+            # only ever fires for the narrower case of a same-day entry that
+            # already fully closed today (terminal, so not caught above).
+            reason = f"{opp.get('ticker')} already has an open, unclosed position - refusing to place a second, independent entry in the same ticker"
+            skip_category = "already_holds_position"
+        else:
+            reason = f"{opp.get('ticker')} was already placed today"
+            skip_category = "already_placed_today"
         skip_record = {
             "ticker": opp.get("ticker"),
             "recommendation": opp.get("recommendation"),

@@ -66,7 +66,7 @@ outcomes — that part hasn't changed.
 `_run_autonomous_trade_scan_locked` (app.py):
 1. Reconciles existing positions (independent of everything below — runs even when autonomy is OFF).
 2. Calls `_build_page_context(include_reversal=True, include_trend=True, include_options=False)` → gets `upcoming_opportunities` (up to 6 tickers deep-analyzed, each already scored by strategy_brain/charting_brain/extended_hours_brain).
-3. Filters to `qualifying`: recommendation is CALL/PUT, confidence ≥ threshold, not already placed today.
+3. Filters to `qualifying`: recommendation is CALL/PUT, confidence ≥ threshold, not already placed today, and not already holding an open (non-terminal-lifecycle) position in that ticker from ANY earlier day — added 2026-09-12 after finding the prior check only covered same-day placements, which would have let a multi-day swing hold get a second, independent entry pyramided into it.
 4. Per candidate, in order: reject if no usable stop/target (`c532f6c`) → margin-account check for shorts → **try a real option first** (`options_selector.py`) → fall back to equity sizing → LLM veto (`llm_reasoning.py`, optional) → fresh real-time price drift check (Alpaca) → submit to Webull → confirm protection.
 5. Every outcome (placed or skipped, and why) is durably logged (`research_log`, `overnight_orders`, `scan_run_log`).
 
