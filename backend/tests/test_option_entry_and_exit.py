@@ -131,8 +131,15 @@ def test_reconcile_option_entry_fill_zero_fill_at_terminal_status_fails(user_id)
 
 def test_option_exit_not_yet_triggered_returns_false(user_id):
     entry = _active_option_entry("opt-entry-a")
+    # "today" must be pinned well before CONTRACT's 2026-09-18 expiration -
+    # otherwise, once real wall-clock time drifts within the default
+    # 3-day close_days_before_expiration window, the expiration safety net
+    # spuriously fires here, falling through to the real (unmocked)
+    # get_order_detail poll loop and hitting the live sandbox API.
+    fixed_now = datetime(2026, 9, 3, 15, 0, tzinfo=timezone.utc)
     with patch.object(pluto_app.webull_api, "get_option_snapshot", return_value=_snapshot_row(CONTRACT["option_symbol"], 5.10)), \
-         patch.object(pluto_app.webull_api, "place_option_order") as mock_place:
+         patch.object(pluto_app.webull_api, "place_option_order") as mock_place, \
+         patch.object(pluto_app, "_now_utc", return_value=fixed_now):
         result = pluto_app._check_and_execute_option_exit(user_id, CREDS, ACCOUNT_ID, TICKER, TRADING_DAY, entry)
     assert result is False
     mock_place.assert_not_called()
