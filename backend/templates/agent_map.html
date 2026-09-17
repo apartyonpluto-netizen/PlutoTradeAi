@@ -3,6 +3,7 @@
 {% block content %}
 {% set map = agent_map %}
 {% set outcomes = map.outcomes %}
+{% set lifecycle = map.lifecycle %}
 
 <section class="panel">
     <div class="panel-head">
@@ -24,6 +25,55 @@
         Idle &mdash; watching for the next scan tick
         {% endif %}
     </p>
+</section>
+
+<section class="panel panel-table">
+    <div class="panel-head">
+        <h3>Real-Money Readiness</h3>
+        <span>{{ lifecycle.since_fixes_clean_count }} / {{ lifecycle.readiness_target_clean_trades }} clean trades since fixes</span>
+    </div>
+    <p class="muted">
+        A trade counts <strong>clean</strong> only if it closed via its own resting stop/target (or, for
+        options, the automated pre-expiration safety close) with both fill prices confirmed, AND its
+        lifecycle_history never touched a failure or manual-intervention state
+        (<code>PROTECTION_FAILED</code>, <code>UNKNOWN_SUBMISSION_STATE</code>,
+        <code>position_absent_unexplained</code>, etc.) on the way there. This is the evidence the
+        2026-09-11 assessment asked for before calling the agent functional for real money &mdash;
+        "since fixes" counts only trades entered after the last of the five reliability fixes
+        (<time class="alert-time" data-timestamp="{{ lifecycle.fixes_complete_at }}">--</time>), so an
+        old known-bad trade can't count against a system that no longer has that bug.
+    </p>
+    <div class="progress"><div style="width: {{ lifecycle.readiness_progress_percent }}%;"></div></div>
+    <p class="muted">
+        All-time: {{ lifecycle.clean_lifecycle_count }}/{{ lifecycle.total_closed_trades }} closed trades
+        clean ({{ (lifecycle.clean_lifecycle_rate_percent ~ "%") if lifecycle.clean_lifecycle_rate_percent is not none else "—" }}).
+        Since fixes: {{ lifecycle.since_fixes_clean_count }}/{{ lifecycle.since_fixes_total }}
+        ({{ (lifecycle.since_fixes_clean_rate_percent ~ "%") if lifecycle.since_fixes_clean_rate_percent is not none else "—" }}).
+    </p>
+    <table>
+        <thead><tr><th>Ticker</th><th>Entered</th><th>Close Reason</th><th>P&amp;L</th><th>Status</th></tr></thead>
+        <tbody>
+        {% for trade in lifecycle.trades %}
+        <tr>
+            <td>{{ trade.ticker or "—" }}</td>
+            <td><time class="alert-time" data-timestamp="{{ trade.entry_timestamp or '' }}">--</time>{% if not trade.is_since_fixes %} <span class="muted">(pre-fixes)</span>{% endif %}</td>
+            <td>{{ trade.close_reason or "—" }}</td>
+            <td class="{{ 'tone-positive' if trade.net_realized_pnl and trade.net_realized_pnl > 0 else 'tone-negative' if trade.net_realized_pnl and trade.net_realized_pnl < 0 else '' }}">
+                {{ "${:,.2f}".format(trade.net_realized_pnl) if trade.net_realized_pnl is not none else "—" }}
+            </td>
+            <td>
+                {% if trade.is_clean %}
+                <span class="status-pill status-buy">CLEAN</span>
+                {% else %}
+                <span class="badge badge-soft" title="{{ trade.disqualifying_reasons|join('; ') }}">NOT CLEAN</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="muted">No closed trades yet.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
 </section>
 
 <div class="dashboard-grid agent-map-grid">

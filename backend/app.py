@@ -113,6 +113,7 @@ if __package__:
     from .autonomy.closed_trades import get_closed_trade, list_closed_trades, record_closed_trade
     from .autonomy.performance_report import build_performance_report
     from .autonomy.outcomes_analysis import build_outcomes_analysis
+    from .autonomy.lifecycle_tracker import build_lifecycle_summary
     from .calibration_store import MIN_TRADES_TO_TRUST, REAL_OUTCOMES_RECALIBRATION_TRADE_INTERVAL
     from .autonomy.daily_digest import build_daily_digest
     from .autonomy.efficiency_report import build_efficiency_report
@@ -277,6 +278,7 @@ else:
     from autonomy.closed_trades import get_closed_trade, list_closed_trades, record_closed_trade
     from autonomy.performance_report import build_performance_report
     from autonomy.outcomes_analysis import build_outcomes_analysis
+    from autonomy.lifecycle_tracker import build_lifecycle_summary
     from calibration_store import MIN_TRADES_TO_TRUST, REAL_OUTCOMES_RECALIBRATION_TRADE_INTERVAL
     from autonomy.daily_digest import build_daily_digest
     from autonomy.efficiency_report import build_efficiency_report
@@ -3024,6 +3026,7 @@ def agent_map_page() -> str:
         "real_outcomes_recalibration_interval": REAL_OUTCOMES_RECALIBRATION_TRADE_INTERVAL,
         "min_trades_to_trust": MIN_TRADES_TO_TRUST,
         "outcomes": build_outcomes_analysis(user_id),
+        "lifecycle": build_lifecycle_summary(user_id),
         "brain_validation": brain_validation,
         "pulse_nodes": pulse_nodes,
         "pulse_feed": pulse_feed,
