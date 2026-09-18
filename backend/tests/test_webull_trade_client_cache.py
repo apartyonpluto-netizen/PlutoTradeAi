@@ -6,7 +6,7 @@ from integrations import webull as webull_api
 
 
 def _clear_cache_entry(app_key: str, app_secret: str) -> None:
-    webull_api._trade_client_cache.pop((app_key, app_secret), None)
+    webull_api._trade_client_cache.pop((app_key, app_secret, webull_api._resolve_endpoint()), None)
 
 
 def _no_real_network_trade_client_construction():
@@ -69,7 +69,7 @@ def test_missing_credentials_still_raise_without_populating_the_cache():
         assert False, "expected ValueError for missing credentials"
     except ValueError:
         pass
-    assert ("", "") not in webull_api._trade_client_cache
+    assert ("", "", webull_api._resolve_endpoint()) not in webull_api._trade_client_cache
 
 
 def test_a_second_call_with_the_same_credentials_never_reaches_the_network():

@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from global_settings import get_global_settings
+from integrations import webull as webull_api
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
@@ -198,14 +199,23 @@ def _locked_read_modify_write(user_id: str, mutate: Callable[[Dict[str, object]]
 def _derived(payload: Dict[str, object]) -> Dict[str, object]:
     current_mode = str(payload.get("current_mode", "OFF")).upper()
     emergency_stop_enabled = bool(payload.get("emergency_stop_enabled", False))
+    # live_trading_locked reflects the REAL gate in integrations/webull.py
+    # (is_live_trading_armed - two independent env vars, off by default),
+    # not a hardcoded literal - every order this app places funnels through
+    # that same function's endpoint choice, so this status is never out of
+    # sync with what actually happens on placement. An active emergency
+    # stop always re-locks regardless of the env-level arming.
+    live_trading_armed = webull_api.is_live_trading_armed() and not emergency_stop_enabled
     return {
         **payload,
         "allowed_modes": list(MODES),
-        "live_trading_locked": True,
+        "live_trading_locked": not live_trading_armed,
         "paper_trading_active": current_mode == "PAPER" and not emergency_stop_enabled,
         "approval_required_status": current_mode == "APPROVAL" and bool(payload.get("approval_required", False)),
         "autonomous_mode_locked_message": (
-            "Sandbox only - real-money live execution stays locked regardless of this mode." if current_mode == "AUTONOMOUS" else ""
+            "Sandbox only - real-money live execution stays locked regardless of this mode."
+            if current_mode == "AUTONOMOUS" and not live_trading_armed
+            else ""
         ),
     }
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 import time
@@ -31,6 +32,51 @@ from webull.core.exception.exceptions import ClientException, ServerException
 # is the endpoint, not the key/secret.
 _REGION_ID = "us"
 _SANDBOX_ENDPOINT = "api.sandbox.webull.com"
+_LIVE_ENDPOINT = "api.webull.com"
+
+# Real-money live trading is off (sandbox) unless BOTH of these are set in
+# the process's own environment, together, to their exact expected values -
+# every _get_trade_client/_get_data_client call resolves its endpoint from
+# this, so it is the ONE place that decides sandbox vs. live for every order
+# this app ever places. Two independent env vars, not one boolean, are
+# deliberate: a single flag is one typo, one accidental Render dashboard
+# edit, or one copy-pasted .env away from routing real orders. This is
+# infra-level ONLY - it says nothing about whether any given user has
+# actually connected live (as opposed to sandbox-issued) app_key/app_secret,
+# which Webull enforces on its own end regardless of this switch.
+_LIVE_TRADING_ENVIRONMENT_VAR = "PLUTO_WEBULL_TRADING_ENVIRONMENT"
+_LIVE_TRADING_CONFIRMATION_VAR = "PLUTO_LIVE_TRADING_CONFIRMATION"
+_LIVE_TRADING_CONFIRMATION_VALUE = "I_UNDERSTAND_THIS_PLACES_REAL_MONEY_ORDERS"
+
+_live_trading_armed_warning_logged = False
+
+
+def is_live_trading_armed() -> bool:
+    """True only when PLUTO_WEBULL_TRADING_ENVIRONMENT=live AND
+    PLUTO_LIVE_TRADING_CONFIRMATION=I_UNDERSTAND_THIS_PLACES_REAL_MONEY_ORDERS
+    are BOTH set in the environment. Read fresh on every call (not cached
+    at import) so a test or a supervisor process reloading env vars is
+    reflected immediately - this is cheap enough that caching would only
+    add a staleness risk for no real benefit."""
+    environment = os.environ.get(_LIVE_TRADING_ENVIRONMENT_VAR, "").strip().lower()
+    confirmation = os.environ.get(_LIVE_TRADING_CONFIRMATION_VAR, "").strip()
+    return environment == "live" and confirmation == _LIVE_TRADING_CONFIRMATION_VALUE
+
+
+def _resolve_endpoint() -> str:
+    global _live_trading_armed_warning_logged
+    if is_live_trading_armed():
+        if not _live_trading_armed_warning_logged:
+            logging.getLogger(__name__).warning(
+                "LIVE TRADING ARMED via %s/%s - Webull orders will be placed "
+                "against %s with REAL MONEY.",
+                _LIVE_TRADING_ENVIRONMENT_VAR,
+                _LIVE_TRADING_CONFIRMATION_VAR,
+                _LIVE_ENDPOINT,
+            )
+            _live_trading_armed_warning_logged = True
+        return _LIVE_ENDPOINT
+    return _SANDBOX_ENDPOINT
 
 # The webull SDK's TradeClient logs every request's headers at INFO level,
 # including x-signature (an HMAC derived from the App Secret) and x-app-key
@@ -57,7 +103,7 @@ _webull_sdk_logging_configured = False
 # so it's safe to build the client graph once per credential pair and reuse
 # it - this does NOT change auth/network behavior, it only avoids rebuilding
 # the same lightweight object graph on every call.
-_trade_client_cache: Dict[Tuple[str, str], Any] = {}
+_trade_client_cache: Dict[Tuple[str, str, str], Any] = {}
 _trade_client_cache_lock = threading.Lock()
 
 
@@ -102,7 +148,8 @@ def _get_trade_client(app_key: str, app_secret: str):
     if not app_key or not app_secret:
         raise ValueError("Webull API credentials are not configured for this account.")
 
-    cache_key = (app_key, app_secret)
+    endpoint = _resolve_endpoint()
+    cache_key = (app_key, app_secret, endpoint)
     cached_client = _trade_client_cache.get(cache_key)
     if cached_client is not None:
         return cached_client
@@ -125,13 +172,13 @@ def _get_trade_client(app_key: str, app_secret: str):
         # handler that ever gets attached, once per process.
         api_client._stream_logger_set = True
         api_client._file_logger_set = True
-        api_client.add_endpoint(_REGION_ID, _SANDBOX_ENDPOINT)
+        api_client.add_endpoint(_REGION_ID, endpoint)
         trade_client = TradeClient(api_client)
         _trade_client_cache[cache_key] = trade_client
         return trade_client
 
 
-_data_client_cache: Dict[Tuple[str, str], Any] = {}
+_data_client_cache: Dict[Tuple[str, str, str], Any] = {}
 _data_client_cache_lock = threading.Lock()
 
 
@@ -147,7 +194,8 @@ def _get_data_client(app_key: str, app_secret: str):
     if not app_key or not app_secret:
         raise ValueError("Webull API credentials are not configured for this account.")
 
-    cache_key = (app_key, app_secret)
+    endpoint = _resolve_endpoint()
+    cache_key = (app_key, app_secret, endpoint)
     cached_client = _data_client_cache.get(cache_key)
     if cached_client is not None:
         return cached_client
@@ -164,7 +212,7 @@ def _get_data_client(app_key: str, app_secret: str):
         api_client = ApiClient(app_key, app_secret, _REGION_ID)
         api_client._stream_logger_set = True
         api_client._file_logger_set = True
-        api_client.add_endpoint(_REGION_ID, _SANDBOX_ENDPOINT)
+        api_client.add_endpoint(_REGION_ID, endpoint)
         data_client = DataClient(api_client)
         _data_client_cache[cache_key] = data_client
         return data_client
@@ -957,7 +1005,8 @@ def place_stock_order(
     trading_session: str = "CORE",
     client_order_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Places a real (sandbox) DAY limit order. trading_session must be CORE
+    """Places a real DAY limit order (sandbox unless is_live_trading_armed -
+    see _resolve_endpoint). trading_session must be CORE
     (regular hours), ALL (extended hours), or NIGHT (Webull's 24-hour session -
     the only one accepted outside pre-market/after-hours windows, and it draws
     from a separate night_trading_buying_power pool rather than the account's
@@ -1186,7 +1235,8 @@ def place_option_order(
     time_in_force: str = "DAY",
     client_order_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Places a real (sandbox) option order. client_order_id should be
+    """Places a real option order (sandbox unless is_live_trading_armed -
+    see _resolve_endpoint). client_order_id should be
     deterministic for any caller that might retry this same logical
     placement after a crash, matching place_stock_order's own contract -
     a fresh random id is generated only if none is supplied."""

@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Sequence
 
+from integrations import webull as webull_api
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -78,7 +80,11 @@ def build_neural_status(
         risk_flags.append("Options data unavailable for neural fusion.")
     if not news_items:
         risk_flags.append("News feed unavailable; sentiment placeholder only.")
-    risk_flags.append("Live trading disabled by safety policy.")
+    live_trading_armed = webull_api.is_live_trading_armed()
+    risk_flags.append(
+        "LIVE TRADING ARMED - orders route to real money." if live_trading_armed
+        else "Live trading disabled by safety policy."
+    )
 
     if confidence_score >= 75 and bias == "BULLISH":
         final_decision = "PAPER_TRADE"
@@ -105,7 +111,7 @@ def build_neural_status(
             "options_bias_placeholder": options_bias,
         },
         "execution": {
-            "live_trading_enabled": False,
+            "live_trading_enabled": live_trading_armed,
             "options_execution_enabled": False,
             "approval_required": True,
         },

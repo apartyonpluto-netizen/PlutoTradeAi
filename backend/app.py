@@ -1968,14 +1968,15 @@ def _build_section_payload(user_id: str, section: str, focus_ticker: str = "") -
 def _broker_framework_status() -> Dict[str, object]:
     etrade = ETradeBroker()
     webull = WebullBroker()
+    live_trading_armed = webull_api.is_live_trading_armed()
     return {
         "etrade": etrade.get_account_status(),
         "webull": webull.get_account_status(),
         "safety_defaults": {
-            "live_trading_enabled": False,
+            "live_trading_enabled": live_trading_armed,
             "options_execution_enabled": False,
             "etrade_execution_enabled": False,
-            "webull_paper_mode_only": True,
+            "webull_paper_mode_only": not live_trading_armed,
             "approval_required": True,
             "emergency_kill_switch_placeholder": True,
         },
@@ -2052,7 +2053,7 @@ def _compute_status(scanner_rows: List[Dict[str, object]], scanner_errors: List[
         "watch_today": top_tickers,
         "news_impact": "Moderate",
         "paper_connected": paper_connected,
-        "live_trading_enabled": False,
+        "live_trading_enabled": webull_api.is_live_trading_armed(),
         "settings": settings,
         "latest_alerts": [],
         "api_status": "Operational",
@@ -11918,7 +11919,7 @@ def api_status():
             "chart_levels_map": context.get("chart_levels_map", {}),
         },
         "safety": {
-            "live_trading_enabled": False,
+            "live_trading_enabled": webull_api.is_live_trading_armed(),
             "options_execution_enabled": False,
             "approval_required": True,
             "emergency_kill_switch_placeholder": True,
