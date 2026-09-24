@@ -30,9 +30,14 @@ name: Fast monitor scheduler
 # autonomous-scan-scheduler workflow - fast-monitor-trigger authenticates
 # with the identical X-Cron-Secret header/env var, not the separate
 # MONITOR_WORKER_SECRET the continuous-monitor worker uses.
+# DISABLED 2026-09-24: the schedule is off. The Render Cron Job runs
+# backend/trigger_autonomous_scan.py, which already calls this endpoint (see
+# render.yaml), so this workflow was redundant and only generated
+# "run failed" emails. workflow_dispatch is kept so it can still be run by
+# hand; restore the schedule below to re-enable it.
+#   schedule:
+#     - cron: "2-57/5 13-21 * * 1-5"
 on:
-  schedule:
-    - cron: "2-57/5 13-21 * * 1-5"
   workflow_dispatch: {}
 
 jobs:
