@@ -4,6 +4,10 @@ const rootTicker = (document.body.dataset.ticker || "SPY").toUpperCase();
 const POLL_INTERVALS = {
   dashboard: 20000,
   "stock-workspace": 10000,
+  portfolio: 15000,
+  "paper-trading": 15000,
+  performance: 20000,
+  alerts: 12000,
   scanners: 45000,
   brains: 30000,
   missions: 30000,
@@ -19,6 +23,13 @@ const state = {
   socketBound: false,
   streamStatus: "UNAVAILABLE",
   marketWatch: new Set(),
+  runtimeConfig: null,
+  apiCache: new Map(),
+  inFlightGets: new Map(),
+  signalsPage: 1,
+  paperPage: 1,
+  paperSort: { key: "created_at", direction: "desc" },
+  tradesSort: { key: "created_at", direction: "desc" },
 };
 
 const STATUS_LABELS = {
@@ -35,6 +46,45 @@ function fmtNumber(value, digits = 2) {
     return "Unavailable";
   }
   return Number(value).toFixed(digits);
+}
+
+function fmtCurrency(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return "Unavailable";
+  }
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(Number(value));
+}
+
+function fmtSignedCurrency(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return "Unavailable";
+  }
+  const num = Number(value);
+  return `${num >= 0 ? "+" : "-"}${fmtCurrency(Math.abs(num))}`;
+}
+
+function fmtPct(value, digits = 1) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return "Unavailable";
+  }
+  return `${(Number(value) * 100).toFixed(digits)}%`;
+}
+
+function formatDirection(direction) {
+  return String(direction || "NONE").toUpperCase();
+}
+
+function signalTone(direction) {
+  const normalized = formatDirection(direction);
+  if (normalized === "LONG") return "long";
+  if (normalized === "SHORT") return "short";
+  if (normalized === "EXIT") return "exit";
+  if (normalized === "WATCH") return "watch";
+  return "neutral";
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 }
 
 function showToast(message, type = "success") {
@@ -93,6 +143,7 @@ function mapDataStatusToStreamStatus(status) {
   const normalized = (status || "").toString().trim().toUpperCase();
   if (normalized === "LIVE") return "LIVE";
   if (normalized === "STREAMING") return "LIVE";
+  if (normalized === "DELAYED") return "CACHED";
   if (normalized === "RECONNECTING") return "RECONNECTING";
   if (normalized === "POLLING") return "POLLING";
   if (normalized === "CACHED") return "CACHED";
@@ -110,32 +161,202 @@ function mapSocketStateToStreamStatus(stateValue) {
 
 function updateStreamStatus(status) {
   state.streamStatus = mapDataStatusToStreamStatus(status);
+  const backendBadge = document.getElementById("backendDataBadge");
+  if (backendBadge) {
+    backendBadge.textContent = `BACKEND DATA: ${state.streamStatus}`;
+  }
   setConnectionStatus(state.status);
 }
 
-async function apiGet(url) {
-  const start = performance.now();
-  try {
-    const response = await fetch(url);
-    const json = await response.json();
-    setConnectionStatus("connected", performance.now() - start);
-    updateStreamStatus(json.data_status);
-    return { ok: response.ok, json };
-  } catch (_error) {
-    setConnectionStatus("reconnecting");
-    updateStreamStatus("UNAVAILABLE");
-    return {
-      ok: false,
-      json: {
-        success: false,
-        error: "Data unavailable",
-        data: {},
-        timestamp: new Date().toISOString(),
-        data_status: "unavailable",
-        provider: "Unavailable",
-      },
-    };
+async function syncRuntimeConfig() {
+  const { ok, json } = await apiGet("/api/runtime/config");
+  if (!ok || !json.success) {
+    return;
   }
+  state.runtimeConfig = json.data || {};
+
+  const chartBadge = document.getElementById("chartProviderBadge");
+  const paperBadge = document.getElementById("paperBrokerBadge");
+  const executionBadge = document.getElementById("executionProviderBadge");
+  const signalBadge = document.getElementById("signalSourceBadge");
+  if (chartBadge) {
+    chartBadge.textContent = `CHART: ${(state.runtimeConfig.chart_provider || "TRADINGVIEW").toUpperCase()}`;
+  }
+  if (paperBadge) {
+    paperBadge.textContent = `PAPER BROKER: ${(state.runtimeConfig.paper_broker || "INTERNAL").toUpperCase()}`;
+  }
+  if (executionBadge) {
+    executionBadge.textContent = `EXECUTION: ${(state.runtimeConfig.execution_provider || "DISABLED").toUpperCase()}`;
+  }
+  if (signalBadge) {
+    signalBadge.textContent = `SIGNAL SOURCE: ${(state.runtimeConfig.signal_provider || "NONE").toUpperCase()}`;
+  }
+}
+
+async function refreshSignalSource() {
+  const statusEl = document.getElementById("signalSourceStatus");
+  const sourceBadge = document.getElementById("signalSourceBadge");
+  const { ok, json } = await apiGet("/api/signals?limit=1");
+  if (!ok || !json.success) {
+    if (statusEl) {
+      statusEl.textContent = "Signal queue unavailable";
+    }
+    return;
+  }
+
+  const first = (json.data.signals || [])[0];
+  if (!first) {
+    if (statusEl) {
+      statusEl.textContent = "No signal received yet.";
+    }
+    if (sourceBadge) {
+      sourceBadge.textContent = "SIGNAL SOURCE: NONE";
+    }
+    return;
+  }
+
+  if (statusEl) {
+    statusEl.textContent = `${first.symbol} ${first.direction} | ${first.strategy} | Status: ${first.status} | Received: ${first.received_at}`;
+  }
+  if (sourceBadge) {
+    sourceBadge.textContent = `SIGNAL SOURCE: ${String(first.source || "NONE").toUpperCase()}`;
+  }
+}
+
+function ensureTradingViewScript() {
+  return new Promise((resolve, reject) => {
+    if (window.TradingView) {
+      resolve();
+      return;
+    }
+
+    const existing = document.getElementById("tradingview-script");
+    if (existing) {
+      existing.addEventListener("load", () => resolve());
+      existing.addEventListener("error", () => reject(new Error("TradingView script failed to load")));
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.id = "tradingview-script";
+    script.src = "https://s3.tradingview.com/tv.js";
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("TradingView script failed to load"));
+    document.head.appendChild(script);
+  });
+}
+
+async function renderTradingViewChart(symbol, interval) {
+  const status = document.getElementById("tradingViewChartStatus");
+  const fallback = document.getElementById("tradingViewChartFallback");
+  const host = document.getElementById("tradingViewChart");
+  if (!host) {
+    return;
+  }
+
+  if (status) {
+    status.textContent = "Loading TradingView chart...";
+  }
+  if (fallback) {
+    fallback.textContent = "";
+  }
+
+  host.innerHTML = "";
+
+  try {
+    await ensureTradingViewScript();
+    if (!window.TradingView || typeof window.TradingView.widget !== "function") {
+      throw new Error("TradingView widget API unavailable");
+    }
+
+    const widgetId = "tv_chart_container";
+    const container = document.createElement("div");
+    container.id = widgetId;
+    container.style.width = "100%";
+    container.style.height = "360px";
+    host.appendChild(container);
+
+    window.TradingView.widget({
+      width: "100%",
+      height: 360,
+      symbol,
+      interval,
+      timezone: "Etc/UTC",
+      theme: "dark",
+      style: "1",
+      locale: "en",
+      enable_publishing: false,
+      allow_symbol_change: false,
+      hide_top_toolbar: false,
+      save_image: false,
+      container_id: widgetId,
+    });
+
+    if (status) {
+      status.textContent = `TradingView visual chart loaded: ${symbol} (${interval})`;
+    }
+  } catch (_error) {
+    if (status) {
+      status.textContent = "TradingView chart unavailable";
+    }
+    if (fallback) {
+      fallback.textContent = "Chart load failed. Backend market data remains available below.";
+    }
+  }
+}
+
+async function apiGet(url, options = {}) {
+  const { ttlMs = 0, force = false } = options;
+  if (!force && ttlMs > 0) {
+    const cached = state.apiCache.get(url);
+    if (cached && (Date.now() - cached.createdAt) <= ttlMs) {
+      return cached.value;
+    }
+  }
+
+  if (!force && state.inFlightGets.has(url)) {
+    return state.inFlightGets.get(url);
+  }
+
+  const start = performance.now();
+  const isMarketEndpoint = url.startsWith("/api/market") || url.startsWith("/api/stock") || url.startsWith("/api/chart");
+  const requestPromise = (async () => {
+    try {
+      const response = await fetch(url);
+      const json = await response.json();
+      const result = { ok: response.ok, json };
+      setConnectionStatus("connected", performance.now() - start);
+      if (isMarketEndpoint) {
+        updateStreamStatus(json.data_status);
+      }
+      if (ttlMs > 0 && response.ok) {
+        state.apiCache.set(url, { createdAt: Date.now(), value: result });
+      }
+      return result;
+    } catch (_error) {
+      setConnectionStatus("reconnecting");
+      if (isMarketEndpoint) {
+        updateStreamStatus("UNAVAILABLE");
+      }
+      return {
+        ok: false,
+        json: {
+          success: false,
+          error: "Data unavailable",
+          data: {},
+          timestamp: new Date().toISOString(),
+          data_status: "unavailable",
+          provider: "Unavailable",
+        },
+      };
+    } finally {
+      state.inFlightGets.delete(url);
+    }
+  })();
+
+  state.inFlightGets.set(url, requestPromise);
+  return requestPromise;
 }
 
 async function apiPost(url, payload) {
@@ -145,17 +366,26 @@ async function apiPost(url, payload) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      credentials: "same-origin",
     });
-    const json = await response.json();
+    let json;
+    try {
+      json = await response.json();
+    } catch (_parseError) {
+      json = { success: false, error: `Server returned HTTP ${response.status} without a JSON body`, data: {} };
+    }
     setConnectionStatus("connected", performance.now() - start);
-    return { ok: response.ok, json };
+    // A state-changing call makes every cached read potentially stale.
+    state.apiCache.clear();
+    return { ok: response.ok, status: response.status, json };
   } catch (_error) {
     setConnectionStatus("reconnecting");
     return {
       ok: false,
+      status: 0,
       json: {
         success: false,
-        error: "Data unavailable",
+        error: "Could not reach the server; the action was NOT confirmed. Reload and check the signal status before retrying.",
         data: {},
         timestamp: new Date().toISOString(),
         data_status: "unavailable",
@@ -180,6 +410,682 @@ function renderMetricGrid(targetId, pairs) {
     card.className = "metric";
     card.innerHTML = `<div class="label">${item.label}</div><div class="value">${item.value}</div>`;
     target.appendChild(card);
+  });
+}
+
+function renderSummaryCards(targetId, cards) {
+  const target = document.getElementById(targetId);
+  if (!target) return;
+  target.innerHTML = "";
+  cards.forEach((card) => {
+    const node = document.createElement("article");
+    node.className = `metric-card ${card.tone ? `metric-card--${card.tone}` : ""}`;
+    node.innerHTML = `
+      <div class="metric-card__label">${card.label}</div>
+      <div class="metric-card__value">${card.value}</div>
+      <div class="metric-card__subtext">${card.subtext || ""}</div>
+    `;
+    target.appendChild(node);
+  });
+}
+
+function renderStackList(targetId, rows, emptyMessage = "Nothing to show.") {
+  const target = document.getElementById(targetId);
+  if (!target) return;
+  target.innerHTML = "";
+  if (!rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = emptyMessage;
+    target.appendChild(empty);
+    return;
+  }
+  rows.forEach((row) => {
+    const node = document.createElement("article");
+    node.className = `stack-card ${row.tone ? `stack-card--${row.tone}` : ""}`;
+    node.innerHTML = `
+      <div class="stack-card__header">
+        <div>
+          <div class="stack-card__title">${row.title}</div>
+          <div class="stack-card__meta">${row.meta || ""}</div>
+        </div>
+        <div class="stack-card__value">${row.value || ""}</div>
+      </div>
+      <div class="stack-card__body">${row.body || ""}</div>
+    `;
+    target.appendChild(node);
+  });
+}
+
+function sortRows(rows, sortState) {
+  const direction = sortState.direction === "asc" ? 1 : -1;
+  return [...rows].sort((left, right) => {
+    const a = left?.[sortState.key];
+    const b = right?.[sortState.key];
+    if (a === b) return 0;
+    if (a === null || a === undefined) return 1;
+    if (b === null || b === undefined) return -1;
+    if (typeof a === "number" && typeof b === "number") return (a - b) * direction;
+    return String(a).localeCompare(String(b)) * direction;
+  });
+}
+
+function paginate(rows, page, perPage = 8) {
+  const safePage = Math.max(1, page);
+  const start = (safePage - 1) * perPage;
+  return rows.slice(start, start + perPage);
+}
+
+function renderMiniLineChart(targetId, values, options = {}) {
+  const target = document.getElementById(targetId);
+  if (!target) return;
+  target.innerHTML = "";
+  if (!values.length) {
+    target.innerHTML = '<div class="empty-state">No chart points are available for this period yet. Try a broader timeframe or retry after provider refresh.</div>';
+    return;
+  }
+  const width = 520;
+  const height = 180;
+  const padding = 16;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const points = values.map((value, index) => {
+    const x = padding + ((width - padding * 2) * index) / Math.max(values.length - 1, 1);
+    const y = height - padding - (((value - min) / span) * (height - padding * 2));
+    return `${x},${y}`;
+  }).join(" ");
+  const stroke = options.stroke || "#4fe0b9";
+  target.innerHTML = `
+    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" class="chart-svg">
+      <defs>
+        <linearGradient id="${targetId}-fill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="${stroke}" stop-opacity="0.35"></stop>
+          <stop offset="100%" stop-color="${stroke}" stop-opacity="0.02"></stop>
+        </linearGradient>
+      </defs>
+      <polyline fill="none" stroke="${stroke}" stroke-width="3" points="${points}"></polyline>
+    </svg>
+  `;
+}
+
+function renderMiniBars(targetId, items) {
+  const target = document.getElementById(targetId);
+  if (!target) return;
+  target.innerHTML = "";
+  if (!items.length) {
+    target.innerHTML = '<div class="empty-state">No distribution data yet.</div>';
+    return;
+  }
+  const max = Math.max(...items.map((item) => Number(item.value) || 0), 1);
+  items.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "bar-row";
+    row.innerHTML = `
+      <div class="bar-row__label">${item.label}</div>
+      <div class="bar-row__track"><span class="bar-row__fill" style="width:${(Number(item.value) / max) * 100}%"></span></div>
+      <div class="bar-row__value">${item.display ?? item.value}</div>
+    `;
+    target.appendChild(row);
+  });
+}
+
+async function loadWorkspaceOverlay(ticker) {
+  const statusId = "workspaceOverlayStatus";
+  setStatus(statusId, "Loading AI overlay metrics...");
+  const [overview, trend, levels, risk, signals] = await Promise.all([
+    apiGet(`/api/brains/${encodeURIComponent(ticker)}`, { ttlMs: 8000 }),
+    apiGet(`/api/brains/trend/${encodeURIComponent(ticker)}`, { ttlMs: 8000 }),
+    apiGet(`/api/brains/support-resistance/${encodeURIComponent(ticker)}`, { ttlMs: 8000 }),
+    apiGet(`/api/brains/risk/${encodeURIComponent(ticker)}`, { ttlMs: 8000 }),
+    apiGet("/api/signals?limit=20", { ttlMs: 5000 }),
+  ]);
+
+  if (!overview.ok || !overview.json.success) {
+    setStatus(statusId, overview.json.error || "AI overlay could not be generated right now. Quote data may still be available.");
+    renderMetricGrid("workspaceOverlayCards", []);
+    return;
+  }
+
+  const signalRows = (signals.json?.data?.signals || []).filter((row) => row.symbol === ticker);
+  const latestSignal = signalRows[0];
+  renderMetricGrid("workspaceOverlayCards", [
+    { label: "AI Confidence", value: `${overview.json.data.confidence ?? "--"}%` },
+    { label: "Trend", value: trend.json?.data?.trend || "Unavailable" },
+    { label: "Support", value: levels.json?.data?.support !== undefined ? fmtCurrency(levels.json.data.support) : "Unavailable" },
+    { label: "Resistance", value: levels.json?.data?.resistance !== undefined ? fmtCurrency(levels.json.data.resistance) : "Unavailable" },
+    { label: "Risk/Reward", value: risk.json?.data?.risk_reward_ratio ?? "Unavailable" },
+    { label: "Data Freshness", value: overview.json.data.data_quality || overview.json.data.data_status || "Unavailable" },
+  ]);
+  const signalTarget = document.getElementById("workspaceSignalContext");
+  if (signalTarget) {
+    signalTarget.innerHTML = latestSignal ? `
+      <div class="detail-item"><strong>Direction</strong>: ${escapeHtml(latestSignal.direction)}</div>
+      <div class="detail-item"><strong>Status</strong>: ${escapeHtml(latestSignal.status)}</div>
+      <div class="detail-item"><strong>Strategy</strong>: ${escapeHtml(latestSignal.strategy)}</div>
+      <div class="detail-item"><strong>Entry</strong>: ${latestSignal.analysis?.entry_zone ?? latestSignal.price ?? "Unavailable"}</div>
+      <div class="detail-item"><strong>Stop</strong>: ${latestSignal.analysis?.stop_loss ?? latestSignal.stop_loss ?? "Unavailable"}</div>
+      <div class="detail-item"><strong>Target</strong>: ${latestSignal.analysis?.primary_target ?? latestSignal.take_profit ?? "Unavailable"}</div>
+    ` : '<div class="empty-state">No TradingView signal has been recorded for this symbol yet.</div>';
+  }
+  setStatus(statusId, `Confidence ${overview.json.data.confidence ?? "--"}% | Trend ${trend.json?.data?.trend || "Unavailable"} | Risk ${risk.json?.data?.risk_status || "Unavailable"}`);
+}
+
+function calculateConfidenceAverage(signals) {
+  const values = signals.map((row) => Number(row.analysis?.confidence_score ?? row.confidence_hint)).filter((value) => !Number.isNaN(value));
+  if (!values.length) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function calculateTodaysPl(performance, account) {
+  const curve = performance.equity_curve || [];
+  if (curve.length < 2) {
+    return Number(account.realized_pl || 0) + Number(account.unrealized_pl || 0);
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  const todayRows = curve.filter((point) => String(point.timestamp || "").startsWith(today));
+  if (todayRows.length >= 2) {
+    return Number(todayRows[todayRows.length - 1].equity) - Number(todayRows[0].equity);
+  }
+  return Number(account.realized_pl || 0) + Number(account.unrealized_pl || 0);
+}
+
+async function loadDashboardCommandCenter() {
+  const [accountResp, perfResp, signalsResp] = await Promise.all([
+    apiGet("/api/paper/account", { ttlMs: 8000 }),
+    apiGet("/api/paper/performance", { ttlMs: 8000 }),
+    apiGet("/api/signals?limit=20", { ttlMs: 5000 }),
+  ]);
+
+  const account = accountResp.json?.data || {};
+  const performance = perfResp.json?.data || {};
+  const signals = signalsResp.json?.data?.signals || [];
+  const activeSignals = signals.filter((row) => ["VALIDATED", "ANALYZING", "AWAITING_APPROVAL"].includes(row.status));
+  const confidenceAverage = calculateConfidenceAverage(signals);
+  const todaysPl = calculateTodaysPl(performance, account);
+
+  renderSummaryCards("dashboardCommandCards", [
+    { label: "Portfolio Value", value: fmtCurrency(account.equity), subtext: "Internal paper equity", tone: "neutral" },
+    { label: "Buying Power", value: fmtCurrency(account.buying_power), subtext: "Available for new paper positions", tone: "neutral" },
+    { label: "Open Positions", value: String(account.open_positions ?? 0), subtext: "Currently active", tone: "neutral" },
+    { label: "Unrealized P/L", value: fmtSignedCurrency(account.unrealized_pl), subtext: "Mark-to-market", tone: Number(account.unrealized_pl || 0) >= 0 ? "long" : "short" },
+    { label: "Today's P/L", value: fmtSignedCurrency(todaysPl), subtext: "Session-to-session change", tone: Number(todaysPl || 0) >= 0 ? "long" : "short" },
+    { label: "Win Rate", value: fmtPct(performance.win_rate || 0), subtext: `${performance.wins || 0} wins / ${performance.losses || 0} losses`, tone: "neutral" },
+    { label: "Confidence Average", value: confidenceAverage !== null ? `${confidenceAverage.toFixed(1)}%` : "Unavailable", subtext: "Across recent signals", tone: "neutral" },
+    { label: "Active Signals", value: String(activeSignals.length), subtext: "Awaiting action or analysis", tone: "watch" },
+  ]);
+
+  setStatus("dashboardSignalsStatus", `Signals loaded: ${signals.length}`);
+  renderStackList("dashboardSignalsFeed", activeSignals.slice(0, 4).map((row) => ({
+    title: `${row.symbol} ${row.direction}`,
+    meta: `${row.strategy} | ${row.status}`,
+    value: row.analysis?.confidence_score ? `${row.analysis.confidence_score}%` : "--",
+    body: `Entry ${row.analysis?.entry_zone ?? row.price ?? "--"} | Stop ${row.analysis?.stop_loss ?? row.stop_loss ?? "--"} | Target ${row.analysis?.primary_target ?? row.take_profit ?? "--"}`,
+    tone: signalTone(row.direction),
+  })), "No active signals.");
+
+  setStatus("dashboardPortfolioStatus", `Equity ${fmtCurrency(account.equity)} | Open positions ${account.open_positions ?? 0}`);
+  const portfolioTarget = document.getElementById("dashboardPortfolioSummary");
+  if (portfolioTarget) {
+    portfolioTarget.innerHTML = [
+      ["Cash", fmtCurrency(account.cash)],
+      ["Buying Power", fmtCurrency(account.buying_power)],
+      ["Realized P/L", fmtSignedCurrency(account.realized_pl)],
+      ["Unrealized P/L", fmtSignedCurrency(account.unrealized_pl)],
+      ["Expectancy", performance.expectancy ?? "Unavailable"],
+      ["Max Drawdown", fmtPct(performance.maximum_drawdown || 0)],
+    ].map(([label, value]) => `<div class="detail-item"><strong>${label}</strong>: ${value}</div>`).join("");
+  }
+}
+
+async function loadPortfolioOverview() {
+  const [accountResp, positionsResp, tradesResp, performanceResp, signalsResp] = await Promise.all([
+    apiGet("/api/paper/account", { ttlMs: 5000 }),
+    apiGet("/api/paper/positions", { ttlMs: 5000 }),
+    apiGet("/api/paper/trades", { ttlMs: 5000 }),
+    apiGet("/api/paper/performance", { ttlMs: 5000 }),
+    apiGet("/api/signals?limit=20", { ttlMs: 5000 }),
+  ]);
+
+  const account = accountResp.json?.data || {};
+  const positions = positionsResp.json?.data?.positions || [];
+  const trades = tradesResp.json?.data?.trades || [];
+  const performance = performanceResp.json?.data || {};
+  const signals = signalsResp.json?.data?.signals || [];
+  renderSummaryCards("portfolioSummaryCards", [
+    { label: "Portfolio Value", value: fmtCurrency(account.equity), subtext: "Internal paper ledger", tone: "neutral" },
+    { label: "Buying Power", value: fmtCurrency(account.buying_power), subtext: "Deployable cash", tone: "neutral" },
+    { label: "Open Positions", value: String(account.open_positions ?? 0), subtext: "Current exposure", tone: "neutral" },
+    { label: "Unrealized P/L", value: fmtSignedCurrency(account.unrealized_pl), subtext: "Open mark-to-market", tone: Number(account.unrealized_pl || 0) >= 0 ? "long" : "short" },
+  ]);
+
+  setStatus("portfolioPositionsStatus", `${positions.length} open positions`);
+  renderStackList("portfolioPositionsPreview", positions.slice(0, 5).map((row) => ({
+    title: `${row.symbol} ${row.direction}`,
+    meta: `Qty ${row.quantity} | Entry ${fmtCurrency(row.entry_price)}`,
+    value: fmtSignedCurrency(row.unrealized_pl),
+    body: `Stop ${fmtCurrency(row.stop_loss)} | Target ${fmtCurrency(row.take_profit)}`,
+    tone: signalTone(row.direction),
+  })), "No open positions.");
+
+  const pendingSignals = signals.filter((row) => row.status === "AWAITING_APPROVAL");
+  setStatus("portfolioSignalStatus", `${pendingSignals.length} signals awaiting approval`);
+  renderStackList("portfolioSignalPreview", pendingSignals.slice(0, 5).map((row) => ({
+    title: `${row.symbol} ${row.direction}`,
+    meta: `${row.strategy} | ${row.received_at}`,
+    value: row.analysis?.confidence_score ? `${row.analysis.confidence_score}%` : "--",
+    body: `Risk/Reward ${row.analysis?.risk_reward_ratio ?? "--"} | Status ${row.status}`,
+    tone: signalTone(row.direction),
+  })), "No pending signals.");
+
+  const closedTrades = trades.filter((row) => row.status === "CLOSED");
+  setStatus("portfolioTradesStatus", `${closedTrades.length} closed trades recorded`);
+  renderStackList("portfolioTradesPreview", closedTrades.slice(0, 5).map((row) => ({
+    title: `${row.symbol} ${row.direction}`,
+    meta: `${row.created_at || ""}`,
+    value: fmtSignedCurrency(row.realized_pl),
+    body: `Entry ${fmtCurrency(row.entry_price)} | Exit ${fmtCurrency(row.exit_price)} | Status ${row.status}`,
+    tone: Number(row.realized_pl || 0) >= 0 ? "long" : "short",
+  })), "No closed trades yet.");
+
+  setStatus("portfolioPerformanceStatus", `Win rate ${fmtPct(performance.win_rate || 0)} | Expectancy ${performance.expectancy ?? "--"}`);
+  const perfTarget = document.getElementById("portfolioPerformanceSummary");
+  if (perfTarget) {
+    perfTarget.innerHTML = [
+      ["Win Rate", fmtPct(performance.win_rate || 0)],
+      ["Average Win", fmtCurrency(performance.average_win)],
+      ["Average Loss", fmtCurrency(performance.average_loss)],
+      ["Expectancy", performance.expectancy ?? "Unavailable"],
+      ["Maximum Drawdown", fmtPct(performance.maximum_drawdown || 0)],
+      ["Trades Total", performance.trades_total ?? 0],
+    ].map(([label, value]) => `<div class="detail-item"><strong>${label}</strong>: ${value}</div>`).join("");
+  }
+}
+
+function filterSignals(rows) {
+  const query = (document.getElementById("signalSearchInput")?.value || "").trim().toUpperCase();
+  const direction = document.getElementById("signalDirectionFilter")?.value || "ALL";
+  const status = document.getElementById("signalStatusFilter")?.value || "ALL";
+  return rows.filter((row) => {
+    const matchesQuery = !query || [row.symbol, row.strategy, row.status].join(" ").toUpperCase().includes(query);
+    const matchesDirection = direction === "ALL" || row.direction === direction;
+    const matchesStatus = status === "ALL" || row.status === status;
+    return matchesQuery && matchesDirection && matchesStatus;
+  });
+}
+
+const signalActionsInFlight = new Set();
+
+async function takeSignalAction(signalId, action) {
+  if (signalActionsInFlight.has(signalId)) {
+    return;
+  }
+  const needsReason = action === "decline";
+  const message = action === "approve" ? "Approve this signal and create a paper trade?" : "Decline this signal?";
+  if (!window.confirm(message)) {
+    return;
+  }
+  let payload = {};
+  if (needsReason) {
+    const reason = window.prompt("Decline rationale", "Risk not acceptable");
+    if (reason === null) {
+      return;
+    }
+    payload = { reason };
+  }
+  signalActionsInFlight.add(signalId);
+  try {
+    const url = `/api/signals/${encodeURIComponent(signalId)}/${action}`;
+    let result = await apiPost(url, payload);
+    if (!result.ok && result.json?.data?.code === "STALE_DATA" && action === "approve") {
+      if (window.confirm(`${result.json.error}\n\nApprove anyway using stale data?`)) {
+        result = await apiPost(url, { ...payload, acknowledge_stale: true });
+      }
+    }
+    const { ok, json } = result;
+    let text;
+    if (ok && json.success) {
+      text = json.data?.idempotent ? `Signal was already ${action}d` : `Signal ${action}d`;
+    } else if (result.status === 401) {
+      text = "Sign in to approve or decline signals";
+    } else if (result.status === 403) {
+      text = json.error || "Your account is not permitted to do this";
+    } else {
+      text = json.error || `Signal ${action} failed`;
+    }
+    showToast(text, ok && json.success ? "success" : "error");
+  } finally {
+    signalActionsInFlight.delete(signalId);
+  }
+  if (pageId === "alerts") {
+    await initAlertsPage(false);
+  }
+  if (pageId === "portfolio") {
+    await loadPortfolioOverview();
+  }
+}
+
+async function initAlertsPage(enablePolling = true) {
+  const { ok, json } = await apiGet("/api/signals?limit=100", { ttlMs: 3000, force: true });
+  if (!ok || !json.success) {
+    setStatus("signalFeedStatus", json.error || "Signal feed unavailable");
+    return;
+  }
+  const allSignals = json.data.signals || [];
+  const filtered = filterSignals(allSignals);
+  const pageRows = paginate(filtered, state.signalsPage, 8);
+  const target = document.getElementById("signalFeed");
+  const empty = document.getElementById("signalFeedEmpty");
+  if (target) {
+    target.innerHTML = "";
+    pageRows.forEach((row) => {
+      const node = document.createElement("article");
+      node.className = `signal-card signal-card--${signalTone(row.direction)}`;
+      const canApprove = row.status === "AWAITING_APPROVAL";
+      const canDecline = ["VALIDATED", "ANALYZING", "AWAITING_APPROVAL"].includes(row.status);
+      const reason = row.status_reason ? `<div class="signal-card__meta">${escapeHtml(row.status_reason)}</div>` : "";
+      const id = escapeHtml(row.signal_id);
+      node.innerHTML = `
+        <div class="signal-card__header">
+          <div>
+            <div class="signal-card__ticker">${escapeHtml(row.symbol)}</div>
+            <div class="signal-card__meta">${escapeHtml(row.strategy)} | ${escapeHtml(row.timeframe)} | ${escapeHtml(row.received_at)}</div>
+          </div>
+          <span class="signal-badge signal-badge--${signalTone(row.direction)}">${escapeHtml(row.direction)}</span>
+        </div>
+        <div class="signal-card__grid">
+          <div><span>Confidence</span><strong>${escapeHtml(row.analysis?.confidence_score ?? row.confidence_hint ?? "--")}</strong></div>
+          <div><span>Risk</span><strong>${escapeHtml(row.analysis?.risk_reward_ratio ?? "--")}</strong></div>
+          <div><span>Entry</span><strong>${escapeHtml(row.analysis?.entry_zone ?? row.price ?? "--")}</strong></div>
+          <div><span>Stop</span><strong>${escapeHtml(row.analysis?.stop_loss ?? row.stop_loss ?? "--")}</strong></div>
+          <div><span>Targets</span><strong>${escapeHtml(row.analysis?.primary_target ?? row.take_profit ?? "--")}${row.analysis?.secondary_target ? ` / ${escapeHtml(row.analysis.secondary_target)}` : ""}</strong></div>
+          <div><span>Status</span><strong>${escapeHtml(row.status)}</strong></div>
+        </div>
+        ${reason}
+        <div class="signal-card__footer">
+          <span class="status-pill">Freshness: ${escapeHtml(row.analysis?.data_freshness || "UNKNOWN")}</span>
+          <div class="toolbar-group">
+            <button class="stock-action signal-approve" data-signal-id="${id}" ${canApprove ? "" : "disabled"}>Approve</button>
+            <button class="stock-action signal-decline" data-signal-id="${id}" ${canDecline ? "" : "disabled"}>Decline</button>
+          </div>
+        </div>
+      `;
+      target.appendChild(node);
+    });
+    target.querySelectorAll(".signal-approve").forEach((button) => button.addEventListener("click", () => takeSignalAction(button.dataset.signalId, "approve")));
+    target.querySelectorAll(".signal-decline").forEach((button) => button.addEventListener("click", () => takeSignalAction(button.dataset.signalId, "decline")));
+  }
+  if (empty) {
+    empty.hidden = filtered.length > 0;
+  }
+  const label = document.getElementById("signalPaginationLabel");
+  if (label) {
+    const totalPages = Math.max(1, Math.ceil(filtered.length / 8));
+    label.textContent = `Page ${state.signalsPage} / ${totalPages}`;
+  }
+  setStatus("signalFeedStatus", `${filtered.length} signals in view | ${allSignals.length} total loaded`);
+
+  const refreshBtn = document.getElementById("refreshSignalsButton");
+  if (refreshBtn && !refreshBtn.dataset.bound) {
+    refreshBtn.dataset.bound = "true";
+    refreshBtn.addEventListener("click", () => initAlertsPage(false));
+  }
+  ["signalSearchInput", "signalDirectionFilter", "signalStatusFilter"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el && !el.dataset.bound) {
+      el.dataset.bound = "true";
+      el.addEventListener("input", () => {
+        state.signalsPage = 1;
+        initAlertsPage(false);
+      });
+      el.addEventListener("change", () => {
+        state.signalsPage = 1;
+        initAlertsPage(false);
+      });
+    }
+  });
+  const prevBtn = document.getElementById("signalPrevPage");
+  const nextBtn = document.getElementById("signalNextPage");
+  if (prevBtn && !prevBtn.dataset.bound) {
+    prevBtn.dataset.bound = "true";
+    prevBtn.addEventListener("click", () => {
+      state.signalsPage = Math.max(1, state.signalsPage - 1);
+      initAlertsPage(false);
+    });
+  }
+  if (nextBtn && !nextBtn.dataset.bound) {
+    nextBtn.dataset.bound = "true";
+    nextBtn.addEventListener("click", () => {
+      state.signalsPage += 1;
+      initAlertsPage(false);
+    });
+  }
+  if (enablePolling) {
+    startPolling(() => initAlertsPage(false), POLL_INTERVALS.alerts);
+  }
+}
+
+function filterPaperRows(rows) {
+  const query = (document.getElementById("paperSearchInput")?.value || "").trim().toUpperCase();
+  const direction = document.getElementById("paperDirectionFilter")?.value || "ALL";
+  const status = document.getElementById("paperStatusFilter")?.value || "ALL";
+  return rows.filter((row) => {
+    const haystack = [row.symbol, row.direction, row.status, row.position_id, row.trade_id].join(" ").toUpperCase();
+    const matchesQuery = !query || haystack.includes(query);
+    const matchesDirection = direction === "ALL" || row.direction === direction;
+    const matchesStatus = status === "ALL" || row.status === status;
+    return matchesQuery && matchesDirection && matchesStatus;
+  });
+}
+
+function wireSortableTable(tableId, sortState, rerender) {
+  const table = document.getElementById(tableId);
+  if (!table || table.dataset.bound) return;
+  table.dataset.bound = "true";
+  table.querySelectorAll("th[data-sort]").forEach((header) => {
+    header.addEventListener("click", () => {
+      const key = header.dataset.sort;
+      if (sortState.key === key) {
+        sortState.direction = sortState.direction === "asc" ? "desc" : "asc";
+      } else {
+        sortState.key = key;
+        sortState.direction = "asc";
+      }
+      rerender();
+    });
+  });
+}
+
+async function initPaperTradingPage(enablePolling = true) {
+  const [positionsResp, tradesResp] = await Promise.all([
+    apiGet("/api/paper/positions", { ttlMs: 4000, force: true }),
+    apiGet("/api/paper/trades", { ttlMs: 4000, force: true }),
+  ]);
+  const allPositions = positionsResp.json?.data?.positions || [];
+  const allTrades = tradesResp.json?.data?.trades || [];
+
+  const filteredPositions = sortRows(filterPaperRows(allPositions), state.paperSort);
+  const filteredTrades = sortRows(filterPaperRows(allTrades), state.tradesSort);
+  const pagePositions = paginate(filteredPositions, state.paperPage, 6);
+  const pageTrades = paginate(filteredTrades, state.paperPage, 6);
+
+  const openBody = document.querySelector("#paperOpenTable tbody");
+  if (openBody) {
+    openBody.innerHTML = "";
+    pagePositions.forEach((row) => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${escapeHtml(row.symbol || "-")}</td>
+        <td><span class="signal-badge signal-badge--${signalTone(row.direction)}">${row.direction || "-"}</span></td>
+        <td>${row.quantity ?? "-"}</td>
+        <td>${fmtCurrency(row.entry_price)}</td>
+        <td>${fmtCurrency(row.last_mark_price)}</td>
+        <td class="${Number(row.unrealized_pl || 0) >= 0 ? "positive" : "negative"}">${fmtSignedCurrency(row.unrealized_pl)}</td>
+        <td>${fmtCurrency(row.take_profit)}</td>
+      `;
+      openBody.appendChild(tr);
+    });
+  }
+  const tradeBody = document.querySelector("#paperTradesTable tbody");
+  if (tradeBody) {
+    tradeBody.innerHTML = "";
+    pageTrades.forEach((row) => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${escapeHtml(row.symbol || "-")}</td>
+        <td><span class="signal-badge signal-badge--${signalTone(row.direction)}">${row.direction || "-"}</span></td>
+        <td>${escapeHtml(row.status || "-")}</td>
+        <td>${fmtCurrency(row.entry_price)}</td>
+        <td>${fmtCurrency(row.avg_exit_price ?? row.exit_price)}</td>
+        <td class="${Number(row.net_realized_pl ?? row.realized_pl ?? 0) >= 0 ? "positive" : "negative"}">${fmtSignedCurrency(row.net_realized_pl ?? row.realized_pl)}</td>
+        <td>${row.created_at || "-"}</td>
+      `;
+      tradeBody.appendChild(tr);
+    });
+  }
+
+  const pages = Math.max(1, Math.ceil(Math.max(filteredPositions.length, filteredTrades.length) / 6));
+  const label = document.getElementById("paperPaginationLabel");
+  if (label) label.textContent = `Page ${state.paperPage} / ${pages}`;
+  setStatus("paperOpenStatus", `${filteredPositions.length} positions in view`);
+  setStatus("paperTradesStatus", `${filteredTrades.length} trades in view`);
+  const openEmpty = document.getElementById("paperOpenEmpty");
+  if (openEmpty) openEmpty.hidden = filteredPositions.length > 0;
+  const tradesEmpty = document.getElementById("paperTradesEmpty");
+  if (tradesEmpty) tradesEmpty.hidden = filteredTrades.length > 0;
+
+  ["paperSearchInput", "paperDirectionFilter", "paperStatusFilter"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el && !el.dataset.bound) {
+      el.dataset.bound = "true";
+      el.addEventListener("input", () => {
+        state.paperPage = 1;
+        initPaperTradingPage(false);
+      });
+      el.addEventListener("change", () => {
+        state.paperPage = 1;
+        initPaperTradingPage(false);
+      });
+    }
+  });
+  const prevBtn = document.getElementById("paperPrevPage");
+  const nextBtn = document.getElementById("paperNextPage");
+  if (prevBtn && !prevBtn.dataset.bound) {
+    prevBtn.dataset.bound = "true";
+    prevBtn.addEventListener("click", () => {
+      state.paperPage = Math.max(1, state.paperPage - 1);
+      initPaperTradingPage(false);
+    });
+  }
+  if (nextBtn && !nextBtn.dataset.bound) {
+    nextBtn.dataset.bound = "true";
+    nextBtn.addEventListener("click", () => {
+      state.paperPage += 1;
+      initPaperTradingPage(false);
+    });
+  }
+  wireSortableTable("paperOpenTable", state.paperSort, () => initPaperTradingPage(false));
+  wireSortableTable("paperTradesTable", state.tradesSort, () => initPaperTradingPage(false));
+
+  if (enablePolling) {
+    startPolling(() => initPaperTradingPage(false), POLL_INTERVALS["paper-trading"]);
+  }
+}
+
+async function initPerformancePage(enablePolling = true) {
+  const [performanceResp, tradesResp, signalsResp] = await Promise.all([
+    apiGet("/api/paper/performance", { ttlMs: 4000, force: true }),
+    apiGet("/api/paper/trades", { ttlMs: 4000, force: true }),
+    apiGet("/api/signals?limit=200", { ttlMs: 4000, force: true }),
+  ]);
+  const performance = performanceResp.json?.data || {};
+  const trades = tradesResp.json?.data?.trades || [];
+  const closedTrades = trades.filter((row) => row.status === "CLOSED");
+  const signals = signalsResp.json?.data?.signals || [];
+
+  renderSummaryCards("performanceMetricCards", [
+    { label: "Equity", value: fmtCurrency(performance.equity), subtext: "Current portfolio value", tone: "neutral" },
+    { label: "Win %", value: fmtPct(performance.win_rate || 0), subtext: `${performance.wins || 0} winning trades`, tone: "neutral" },
+    { label: "Drawdown", value: fmtPct(performance.maximum_drawdown || 0), subtext: "Peak-to-trough", tone: "short" },
+    { label: "Expectancy", value: performance.expectancy ?? "Unavailable", subtext: "Per closed trade", tone: "neutral" },
+  ]);
+
+  const equityValues = (performance.equity_curve || []).map((point) => Number(point.equity)).filter((value) => !Number.isNaN(value));
+  renderMiniLineChart("equityCurveChart", equityValues, { stroke: "#4fe0b9" });
+  renderMiniLineChart("dailyPlChart", equityValues.map((value, index, list) => index === 0 ? 0 : value - list[index - 1]), { stroke: "#ffc857" });
+
+  const drawdowns = [];
+  let peak = 0;
+  equityValues.forEach((value) => {
+    peak = Math.max(peak, value);
+    drawdowns.push(peak > 0 ? ((peak - value) / peak) * 100 : 0);
+  });
+  renderMiniLineChart("drawdownChart", drawdowns, { stroke: "#ef6461" });
+
+  renderMiniBars("tradeDistributionChart", [
+    { label: "Wins", value: performance.wins || 0 },
+    { label: "Losses", value: performance.losses || 0 },
+    { label: "Closed", value: performance.trades_total || 0 },
+  ]);
+
+  renderMiniBars("riskDistributionChart", closedTrades.slice(0, 8).map((row) => ({
+    label: row.symbol,
+    value: Math.abs(Number(row.entry_price || 0) - Number(row.stop_loss || 0)) || 0.1,
+    display: fmtCurrency(Math.abs(Number(row.entry_price || 0) - Number(row.stop_loss || 0))),
+  })));
+
+  const accuracyBuckets = signals.filter((row) => row.status === "PAPER_EXECUTED").slice(0, 8).map((row) => ({
+    label: row.symbol,
+    value: Number(row.analysis?.confidence_score || row.confidence_hint || 0),
+    display: `${Number(row.analysis?.confidence_score || row.confidence_hint || 0).toFixed(0)}%`,
+  }));
+  renderMiniBars("confidenceAccuracyChart", accuracyBuckets);
+
+  setStatus("equityCurveStatus", `Points: ${equityValues.length}`);
+  setStatus("dailyPlStatus", `Closed trades: ${performance.trades_total || 0}`);
+  setStatus("drawdownStatus", `Max drawdown ${fmtPct(performance.maximum_drawdown || 0)}`);
+
+  const sortedByRealized = [...closedTrades].sort((a, b) => Number(b.realized_pl || 0) - Number(a.realized_pl || 0));
+  renderStackList("bestTradesList", sortedByRealized.slice(0, 5).map((row) => ({
+    title: `${row.symbol} ${row.direction}`,
+    meta: row.closed_at || row.created_at || "",
+    value: fmtSignedCurrency(row.realized_pl),
+    body: `Entry ${fmtCurrency(row.entry_price)} | Exit ${fmtCurrency(row.exit_price)}`,
+    tone: "long",
+  })), "No closed trades yet.");
+  renderStackList("worstTradesList", sortedByRealized.slice(-5).reverse().map((row) => ({
+    title: `${row.symbol} ${row.direction}`,
+    meta: row.closed_at || row.created_at || "",
+    value: fmtSignedCurrency(row.realized_pl),
+    body: `Entry ${fmtCurrency(row.entry_price)} | Exit ${fmtCurrency(row.exit_price)}`,
+    tone: "short",
+  })), "No closed trades yet.");
+
+  if (enablePolling) {
+    startPolling(() => initPerformancePage(false), POLL_INTERVALS.performance);
+  }
+}
+
+function bindKeyboardShortcuts() {
+  if (document.body.dataset.shortcutsBound === "true") return;
+  document.body.dataset.shortcutsBound = "true";
+  document.addEventListener("keydown", (event) => {
+    if (event.target && ["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName)) {
+      return;
+    }
+    if (event.key === "/") {
+      event.preventDefault();
+      document.getElementById("tickerInput")?.focus();
+    }
+    if (event.key.toLowerCase() === "s") {
+      window.location.href = "/opportunities/alerts";
+    }
+    if (event.key.toLowerCase() === "p") {
+      window.location.href = "/portfolio";
+    }
+    if (event.key === "Escape") {
+      document.getElementById("cancelMissionPanel")?.click();
+    }
   });
 }
 
@@ -289,8 +1195,9 @@ async function loadTickerSuggestions(seed = "") {
   const list = document.getElementById("tickerSuggestions");
   if (!list) return;
 
-  const { ok, json } = await apiGet(`/api/tickers/suggest?q=${encodeURIComponent(seed)}`);
-  const serverItems = ok && json.success ? (json.data.items || []) : [];
+  const { ok, json } = await apiGet(`/api/symbols/search?q=${encodeURIComponent(seed)}`);
+  const serverRows = ok && json.success ? (json.data.items || []) : [];
+  const serverItems = serverRows.map((row) => row.symbol).filter(Boolean);
   const merged = [...new Set([...getStoredList("pluto:favorite-tickers"), ...getStoredList("pluto:recent-tickers"), ...serverItems])].slice(0, 24);
 
   list.innerHTML = "";
@@ -408,7 +1315,15 @@ function createChart(targetId) {
     timeScale: { borderColor: "#2e3c57" },
   });
 
-  const candleSeries = chart.addCandlestickSeries({
+  const addCandle = typeof chart.addCandlestickSeries === "function"
+    ? (opts) => chart.addCandlestickSeries(opts)
+    : (opts) => chart.addSeries(LightweightCharts.CandlestickSeries, opts);
+
+  const addHistogram = typeof chart.addHistogramSeries === "function"
+    ? (opts) => chart.addHistogramSeries(opts)
+    : (opts) => chart.addSeries(LightweightCharts.HistogramSeries, opts);
+
+  const candleSeries = addCandle({
     upColor: "#23d18b",
     downColor: "#e34f4f",
     borderVisible: false,
@@ -416,7 +1331,7 @@ function createChart(targetId) {
     wickDownColor: "#e34f4f",
   });
 
-  const volumeSeries = chart.addHistogramSeries({
+  const volumeSeries = addHistogram({
     priceFormat: { type: "volume" },
     priceScaleId: "",
     color: "#4f81ff",
@@ -464,7 +1379,9 @@ function addPriceLine(series, value, title, color) {
 
 function addLineSeries(chart, lineData, color) {
   if (!Array.isArray(lineData) || !lineData.length) return null;
-  const series = chart.addLineSeries({ color, lineWidth: 1 });
+  const series = typeof chart.addLineSeries === "function"
+    ? chart.addLineSeries({ color, lineWidth: 1 })
+    : chart.addSeries(LightweightCharts.LineSeries, { color, lineWidth: 1 });
   series.setData(lineData);
   return { kind: "series", series };
 }
@@ -505,30 +1422,52 @@ function renderObjectDetails(targetId, payload) {
 
 async function loadSnapshot(ticker, statusId, metricId) {
   setStatus(statusId, "Loading market data...");
-  const { ok, json } = await apiGet(`/api/stock/${encodeURIComponent(ticker)}`);
+  const { ok, json } = await apiGet(`/api/stocks/${encodeURIComponent(ticker)}/overview`);
   if (!ok || !json.success) {
-    setStatus(statusId, json.error || "Data unavailable");
+    setStatus(statusId, json.error || "Research overview unavailable. This may be a provider outage or unsupported symbol. Retry to use cached data if available.");
     renderMetricGrid(metricId, []);
     return null;
   }
 
-  const d = json.data;
+  const d = json.data || {};
+  const identity = d.identity || {};
+  const market = d.market_data || {};
+  const tech = d.technicals || {};
+  const freshness = market.freshness || {};
+  const providers = d.providers || {};
+
   const metrics = [
-    { label: "Company/Ticker", value: `${d.company} (${d.ticker})` },
-    { label: "Asset Type", value: d.asset_type || "Unavailable" },
-    { label: "Current Price", value: `$${fmtNumber(d.current_price)}` },
-    { label: "Daily Change", value: `${fmtNumber(d.daily_change)} (${fmtNumber(d.daily_change_percent)}%)` },
-    { label: "Session", value: d.market_session || "Unavailable" },
-    { label: "Volume", value: d.volume ?? "Unavailable" },
-    { label: "Relative Volume", value: d.relative_volume ? `${fmtNumber(d.relative_volume)}x` : "Unavailable" },
-    { label: "Data Provider", value: d.data_source || json.provider || "Unavailable" },
-    { label: "Status", value: d.market_data_status || json.data_status || "Unavailable" },
-    { label: "Age", value: d.market_data_age_seconds !== null && d.market_data_age_seconds !== undefined ? `${d.market_data_age_seconds}s` : "Unavailable" },
-    { label: "Last Updated", value: d.last_updated || "Unavailable" },
+    { label: "Symbol", value: identity.symbol || ticker },
+    { label: "Name", value: identity.name || "Unavailable" },
+    { label: "Exchange", value: identity.exchange || "Unavailable" },
+    { label: "Asset Type", value: identity.asset_type || "Unavailable" },
+    { label: "Sector", value: identity.sector || "Unavailable" },
+    { label: "Industry", value: identity.industry || "Unavailable" },
+    { label: "Current Price", value: market.price !== null && market.price !== undefined ? `$${fmtNumber(market.price)}` : "Unavailable" },
+    { label: "Daily Change", value: `${fmtNumber(market.change)} (${fmtNumber(market.change_percent)}%)` },
+    { label: "Open / Prev Close", value: `${market.open ?? "--"} / ${market.previous_close ?? "--"}` },
+    { label: "High / Low", value: `${market.high ?? "--"} / ${market.low ?? "--"}` },
+    { label: "Bid / Ask", value: `${market.bid ?? "--"} / ${market.ask ?? "--"}` },
+    { label: "Volume", value: market.volume ?? "Unavailable" },
+    { label: "Avg Volume", value: market.average_volume ?? "Unavailable" },
+    { label: "Relative Volume", value: market.relative_volume ? `${fmtNumber(market.relative_volume)}x` : "Unavailable" },
+    { label: "Market Cap", value: market.market_cap ?? identity.market_cap ?? "Unavailable" },
+    { label: "52W High / Low", value: `${market.week_52_high ?? "--"} / ${market.week_52_low ?? "--"}` },
+    { label: "Trend", value: tech.trend || "Unavailable" },
+    { label: "Momentum", value: tech.momentum ?? "Unavailable" },
+    { label: "Volatility", value: tech.volatility ?? "Unavailable" },
+    { label: "RSI", value: tech.rsi ?? "Unavailable" },
+    { label: "Support / Resistance", value: `${tech.support_levels?.major_support ?? "--"} / ${tech.resistance_levels?.major_resistance ?? "--"}` },
+    { label: "Breakout Status", value: tech.breakout_status || "Unavailable" },
+    { label: "Gap Status", value: tech.gap_status || "Unavailable" },
+    { label: "Data Provider", value: providers.quote_provider || json.provider || "Unavailable" },
+    { label: "Status", value: freshness.status || json.data_status || "Unavailable" },
+    { label: "Age", value: freshness.age_seconds !== null && freshness.age_seconds !== undefined ? `${freshness.age_seconds}s` : "Unavailable" },
+    { label: "Last Updated", value: freshness.last_updated || d.last_updated || "Unavailable" },
   ];
 
   renderMetricGrid(metricId, metrics);
-  setStatus(statusId, `Provider: ${json.provider} | Status: ${d.market_data_status || json.data_status} | Session: ${d.market_session || "unavailable"} | Age: ${d.market_data_age_seconds ?? "--"}s | Timestamp: ${json.timestamp}`);
+  setStatus(statusId, `Quote: ${providers.quote_provider || json.provider} | History: ${providers.history_provider || "Unavailable"} | News: ${providers.news_provider || "Unavailable"} | Status: ${freshness.status || json.data_status || "unavailable"} | Updated: ${freshness.last_updated || json.timestamp}`);
   return json;
 }
 
@@ -536,7 +1475,7 @@ async function loadChart(ticker, timeframe, chartCtx, statusId) {
   setStatus(statusId, "Loading chart...");
   const { ok, json } = await apiGet(`/api/chart/${encodeURIComponent(ticker)}?timeframe=${encodeURIComponent(timeframe)}`);
   if (!ok || !json.success) {
-    setStatus(statusId, json.error || "Data unavailable");
+    setStatus(statusId, json.error || "Chart provider timeout. If cache exists, historical candles will be shown on next refresh.");
     chartCtx.candleSeries.setData([]);
     chartCtx.volumeSeries.setData([]);
     clearOverlayLines(chartCtx);
@@ -727,6 +1666,11 @@ function updateSnapshotMetricStatus(statusId, metricId, quote) {
   const metricsHost = document.getElementById(metricId);
   if (!metricsHost || !quote) return;
 
+  let quoteStatus = quote.cache_status || quote.source_status || "UNAVAILABLE";
+  if ((quote.source_status || "").toUpperCase() === "DELAYED" && (quote.cache_status || "").toUpperCase() === "LIVE") {
+    quoteStatus = "CACHED";
+  }
+
   const metricRows = [...metricsHost.querySelectorAll(".metric")];
   metricRows.forEach((row) => {
     const label = row.querySelector(".label")?.textContent || "";
@@ -736,7 +1680,7 @@ function updateSnapshotMetricStatus(statusId, metricId, quote) {
       value.textContent = `$${fmtNumber(quote.price)}`;
     }
     if (label === "Status") {
-      value.textContent = quote.cache_status || quote.source_status || "UNAVAILABLE";
+      value.textContent = quoteStatus;
     }
     if (label === "Age") {
       value.textContent = quote.age_seconds !== null && quote.age_seconds !== undefined ? `${quote.age_seconds}s` : "Unavailable";
@@ -751,14 +1695,18 @@ function updateSnapshotMetricStatus(statusId, metricId, quote) {
 
   const statusEl = document.getElementById(statusId);
   if (statusEl) {
-    statusEl.textContent = `Provider: ${quote.provider || "Unavailable"} | Status: ${quote.cache_status || quote.source_status || "UNAVAILABLE"} | Age: ${quote.age_seconds ?? "--"}s | Timestamp: ${quote.timestamp || "unavailable"}`;
+    statusEl.textContent = `Provider: ${quote.provider || "Unavailable"} | Status: ${quoteStatus} | Age: ${quote.age_seconds ?? "--"}s | Timestamp: ${quote.timestamp || "unavailable"}`;
   }
 }
 
 function handleSocketMarketUpdate(payload) {
   const quote = payload?.quote;
   if (!quote || !quote.symbol) return;
-  updateStreamStatus(quote.cache_status || quote.source_status || "UNAVAILABLE");
+  let streamHint = quote.cache_status || quote.source_status || "UNAVAILABLE";
+  if ((quote.source_status || "").toUpperCase() === "DELAYED" && (quote.cache_status || "").toUpperCase() === "LIVE") {
+    streamHint = "CACHED";
+  }
+  updateStreamStatus(streamHint);
 
   if (pageId === "dashboard" && quote.symbol === rootTicker) {
     updateSnapshotMetricStatus("dashboardChartStatus", "dashboardSnapshot", quote);
@@ -779,7 +1727,7 @@ function ensureSocketConnection() {
     return;
   }
   if (!state.socket) {
-    state.socket = io({ transports: ["websocket", "polling"], reconnection: true, reconnectionAttempts: Infinity });
+    state.socket = io({ transports: ["polling"], reconnection: true, reconnectionAttempts: Infinity });
   }
   if (state.socketBound) {
     return;
@@ -855,6 +1803,7 @@ async function initDashboard() {
   await loadSnapshot(rootTicker, "dashboardChartStatus", "dashboardSnapshot");
   await loadChart(rootTicker, "1M", chartCtx, "dashboardChartStatus");
   await refreshMissionSummaryWidgets();
+  await loadDashboardCommandCenter();
 
   wireTimeframeButtons(async (timeframe) => {
     await loadChart(rootTicker, timeframe, chartCtx, "dashboardChartStatus");
@@ -863,6 +1812,7 @@ async function initDashboard() {
   startPolling(async () => {
     await loadSnapshot(rootTicker, "dashboardChartStatus", "dashboardSnapshot");
     await refreshMissionSummaryWidgets();
+    await loadDashboardCommandCenter();
   }, POLL_INTERVALS.dashboard);
 }
 
@@ -871,9 +1821,27 @@ async function initStockWorkspace() {
   const chartCtx = createChart("stockChart");
   if (!chartCtx) return;
 
+  const tvIntervalSelect = document.getElementById("tvInterval");
+  const tvReloadButton = document.getElementById("reloadTradingViewChart");
+  const tvInterval = tvIntervalSelect ? tvIntervalSelect.value : "60";
+  await renderTradingViewChart(ticker, tvInterval);
+  if (tvReloadButton) {
+    tvReloadButton.addEventListener("click", async () => {
+      const selected = tvIntervalSelect ? tvIntervalSelect.value : "60";
+      await renderTradingViewChart(ticker, selected);
+    });
+  }
+  if (tvIntervalSelect) {
+    tvIntervalSelect.addEventListener("change", async () => {
+      await renderTradingViewChart(ticker, tvIntervalSelect.value);
+    });
+  }
+
   await loadSnapshot(ticker, "stockDataStatus", "stockMetrics");
   await loadChart(ticker, "1M", chartCtx, "stockChartStatus");
   await loadMissionTimeline(ticker, "stockMissionTimelineStatus", "stockMissionTimelineSummary", "stockMissionTimelineTrack");
+  await refreshSignalSource();
+  await loadWorkspaceOverlay(ticker);
 
   const workspaceForm = document.getElementById("workspaceTickerForm");
   const workspaceInput = document.getElementById("workspaceTickerInput");
@@ -907,7 +1875,7 @@ async function initStockWorkspace() {
       }
 
       if (action === "chart") {
-        document.getElementById("stockChart")?.scrollIntoView({ behavior: "smooth" });
+        document.getElementById("tradingViewChart")?.scrollIntoView({ behavior: "smooth" });
         return;
       }
 
@@ -916,6 +1884,25 @@ async function initStockWorkspace() {
         renderSearchMemory();
         await loadTickerSuggestions(ticker);
         showToast(`${ticker} added to favorites`, "success");
+        return;
+      }
+
+      if (action === "watchlist") {
+        const payload = {
+          ticker_symbol: ticker,
+          mission_type: "Research",
+          quick_action: "Analyze Everywhere",
+          priority: "★★★ Medium",
+          assigned_scanners: ["Scanner Center"],
+          assigned_brains: ["Confidence Engine"],
+          monitoring_flags: ["Monitor Continuously"],
+        };
+        const { ok, json } = await apiPost("/api/watchlist", payload);
+        if (!ok || !json.success) {
+          showToast(json.error || "Unable to add watchlist symbol", "error");
+          return;
+        }
+        showToast(`${ticker} added to watchlist`, "success");
         return;
       }
 
@@ -953,36 +1940,52 @@ async function initStockWorkspace() {
   startPolling(async () => {
     await loadSnapshot(ticker, "stockDataStatus", "stockMetrics");
     await loadMissionTimeline(ticker, "stockMissionTimelineStatus", "stockMissionTimelineSummary", "stockMissionTimelineTrack");
+    await refreshSignalSource();
+    await loadWorkspaceOverlay(ticker);
   }, POLL_INTERVALS["stock-workspace"]);
 }
 
 async function initScannersPage(enablePolling = true) {
   const active = document.body.dataset.activeScanner || "overview";
   setStatus("scannersStatus", "Loading scanner output...");
-  const path = active === "overview" ? "/api/scanners" : `/api/scanners/${encodeURIComponent(active)}`;
+  const path = "/api/market/scanners";
   const { ok, json } = await apiGet(path);
 
   if (!ok || !json.success) {
-    setStatus("scannersStatus", json.error || "Scanner unavailable");
+    setStatus("scannersStatus", json.error || "Market scanner is temporarily unavailable. Showing the last successful snapshot when cache is present.");
     return;
   }
 
-  const data = json.data;
-  setStatus("scannersStatus", `${data.scanner || "Scanner"} | Provider: ${json.provider || "Unavailable"} | Status: ${json.data_status || "unavailable"} | Last scan: ${data.last_scan_time || "unavailable"}`);
+  const data = json.data || {};
+  const scanners = data.scanners || {};
+  const normalizeName = (value) => String(value || "overview").toLowerCase().replaceAll("-", "_");
+  const activeName = normalizeName(active);
+  const keyMap = {
+    overview: "plutotrade_high_confidence",
+    movers: "top_gainers",
+    volume: "unusual_relative_volume",
+    reversals: "reversal_candidates",
+    breakouts: "breakout_candidates",
+    "extended_hours": "most_active",
+    futures: "high_volatility",
+    "sector_rotation": "near_resistance",
+    watchlist: "plutotrade_high_confidence",
+    upcoming: "momentum_leaders",
+  };
+  const activeScannerKey = keyMap[activeName] || "plutotrade_high_confidence";
+  const rows = active === "overview" ? (scanners.plutotrade_high_confidence || []) : (scanners[activeScannerKey] || []);
+
+  setStatus("scannersStatus", `${active} | Provider: ${json.provider || "Unavailable"} | Status: ${data.freshness?.status || json.data_status || "unavailable"} | Last scan: ${data.generated_at || "unavailable"}`);
 
   const summaryTarget = document.getElementById("scannersSummary");
   if (summaryTarget) {
     summaryTarget.innerHTML = "";
     [
-      ["Best Opportunity", data.highest_confidence_setup?.ticker],
-      ["Largest Mover", data.largest_mover?.ticker],
-      ["Best Breakout", data.best_breakout_candidate?.ticker],
-      ["Best Reversal", data.best_reversal_candidate?.ticker],
-      ["Highest Relative Volume", data.strongest_relative_volume?.ticker],
-      ["Highest Risk", data.highest_risk_setup?.ticker],
-      ["Scanner Health", data.data_health],
-      ["Provider Status", data.provider_status || json.data_status],
-      ["Last Scan", data.last_scan_time],
+      ["Universe Limit", data.universe?.configured_limit],
+      ["Snapshot Symbols", data.universe?.snapshot_size],
+      ["Freshness", data.freshness?.status],
+      ["Refresh Age", data.freshness?.age_seconds !== undefined ? `${data.freshness.age_seconds}s` : "Unavailable"],
+      ["Last Scan", data.generated_at],
     ].forEach(([label, value]) => {
       if (!value) return;
       const row = document.createElement("div");
@@ -992,19 +1995,21 @@ async function initScannersPage(enablePolling = true) {
     });
   }
 
-  const rows = data.rows || [];
   const body = document.querySelector("#scannersTable tbody");
   if (!body) return;
 
   body.innerHTML = "";
+  if (!rows.length) {
+    setStatus("scannersStatus", `${active}: No stocks currently match this scanner's thresholds.`);
+  }
   rows.forEach((row) => {
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td>${row.ticker || "-"}</td>
+      <td><a href="/stock/${encodeURIComponent(row.symbol || row.ticker || "")}">${row.symbol || row.ticker || "-"}</a></td>
       <td>${row.price ?? "-"}</td>
       <td>${row.percent_change ?? "-"}</td>
       <td>${row.relative_volume ?? "-"}</td>
-      <td>${row.scanner_score ?? "-"}</td>
+      <td>${row.confidence ?? row.scanner_score ?? "-"}</td>
     `;
     body.appendChild(tr);
   });
@@ -1025,7 +2030,7 @@ async function initBrainsPage(enablePolling = true) {
 
   const { ok, json } = await apiGet(path);
   if (!ok || !json.success) {
-    setStatus("brainsStatus", json.error || "Brain unavailable");
+    setStatus("brainsStatus", json.error || "AI brain output is unavailable right now. Quote and technical layers may still be healthy.");
     return;
   }
 
@@ -1041,7 +2046,7 @@ async function initFuturesPage(enablePolling = true) {
   setStatus("futuresStatus", "Loading futures command...");
   const { ok, json } = await apiGet("/api/futures");
   if (!ok || !json.success) {
-    setStatus("futuresStatus", json.error || "Futures command unavailable");
+    setStatus("futuresStatus", json.error || "Futures research is unavailable at the moment. Retry to refresh provider connectivity.");
     return;
   }
 
@@ -1091,7 +2096,7 @@ async function initMissionsPage(enablePolling = true) {
 
   const { ok, json } = await apiGet("/api/missions");
   if (!ok || !json.success) {
-    setStatus("missionControlStatus", json.error || "Mission profiles unavailable");
+    setStatus("missionControlStatus", json.error || "Mission profiles are unavailable. Stored mission data may still be recoverable from session cache.");
     return;
   }
 
@@ -1134,6 +2139,8 @@ async function initMissionsPage(enablePolling = true) {
 function init() {
   setConnectionStatus("offline");
   updateStreamStatus("UNAVAILABLE");
+  syncRuntimeConfig();
+  bindKeyboardShortcuts();
   setupRealtimeMode();
   setupTopTickerMemory();
   loadTickerSuggestions();
@@ -1163,6 +2170,19 @@ function init() {
   }
   if (pageId === "futures") {
     initFuturesPage();
+  }
+  if (pageId === "alerts") {
+    initAlertsPage();
+  }
+  if (pageId === "portfolio") {
+    loadPortfolioOverview();
+    startPolling(() => loadPortfolioOverview(), POLL_INTERVALS.portfolio);
+  }
+  if (pageId === "paper-trading") {
+    initPaperTradingPage();
+  }
+  if (pageId === "performance") {
+    initPerformancePage();
   }
 }
 

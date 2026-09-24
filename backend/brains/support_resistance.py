@@ -1,25 +1,19 @@
-import yfinance as yf
-
-
-def get_number(value):
-    try:
-        return float(value.item())
-    except AttributeError:
-        return float(value)
+from backend.services.market_data_service import get_chart_data, get_stock_snapshot
 
 
 def find_support_resistance(ticker, period="3mo", interval="1d"):
-    data = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
-
-    if data.empty or len(data) < 20:
+    chart = get_chart_data(ticker, timeframe="3M")
+    snapshot = get_stock_snapshot(ticker)
+    if not chart.get("success") or not snapshot.get("success"):
         return None
 
-    recent_lows = data["Low"].tail(20)
-    recent_highs = data["High"].tail(20)
-    latest_close = get_number(data["Close"].iloc[-1])
+    levels = chart.get("data", {}).get("indicators", {})
+    latest_close = snapshot.get("data", {}).get("current_price")
+    support = levels.get("major_support")
+    resistance = levels.get("major_resistance")
 
-    support = get_number(recent_lows.min())
-    resistance = get_number(recent_highs.max())
+    if latest_close in (None, 0) or support is None or resistance is None:
+        return None
 
     distance_to_support = ((latest_close - support) / latest_close) * 100
     distance_to_resistance = ((resistance - latest_close) / latest_close) * 100

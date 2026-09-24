@@ -1,0 +1,90 @@
+{% extends 'base.html' %}
+{% block page_id %}paper-trading{% endblock %}
+{% block content %}
+<section class="hero-card hero-card--immersive">
+  <div>
+    <p class="eyebrow">Execution Ledger</p>
+    <h1>Paper Portfolio Blotter</h1>
+    <p>Searchable and sortable view of open positions, closed trades, and approval-driven activity inside the PlutoTrade internal broker.</p>
+  </div>
+  <div class="hero-actions">
+    <a class="tab" href="{{ url_for('portfolio_command') }}">Overview</a>
+    <a class="tab is-active" href="{{ url_for('paper_trading_workspace') }}">Positions & Trades</a>
+    <a class="tab" href="{{ url_for('performance_workspace') }}">Performance</a>
+  </div>
+</section>
+
+<section class="toolbar-card">
+  <div class="toolbar-group">
+    <input id="paperSearchInput" class="toolbar-input" placeholder="Search TSLA, LONG, OPEN">
+    <select id="paperDirectionFilter" class="toolbar-input">
+      <option value="ALL">All Directions</option>
+      <option value="LONG">LONG</option>
+      <option value="SHORT">SHORT</option>
+      <option value="EXIT">EXIT</option>
+    </select>
+    <select id="paperStatusFilter" class="toolbar-input">
+      <option value="ALL">All Statuses</option>
+      <option value="OPEN">OPEN</option>
+      <option value="CLOSED">CLOSED</option>
+    </select>
+  </div>
+  <div class="toolbar-group">
+    <button id="paperPrevPage" class="stock-action" type="button">Prev</button>
+    <span id="paperPaginationLabel" class="status-pill">Page 1</span>
+    <button id="paperNextPage" class="stock-action" type="button">Next</button>
+  </div>
+</section>
+
+<section class="grid-two">
+  <article class="panel glow-panel">
+    <div class="panel-heading">
+      <div>
+        <p class="eyebrow">Live Exposure</p>
+        <h3>Open Positions</h3>
+      </div>
+    </div>
+    <div id="paperOpenStatus" class="status-line">Loading open positions...</div>
+    <table class="data-table data-table--interactive" id="paperOpenTable">
+      <thead>
+        <tr>
+          <th data-sort="symbol">Symbol</th>
+          <th data-sort="direction">Direction</th>
+          <th data-sort="quantity">Qty</th>
+          <th data-sort="entry_price">Entry</th>
+          <th data-sort="last_mark_price">Mark</th>
+          <th data-sort="unrealized_pl">Unrealized P/L</th>
+          <th data-sort="take_profit">Target</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div id="paperOpenEmpty" class="empty-state" hidden>No open positions yet.</div>
+  </article>
+
+  <article class="panel glow-panel">
+    <div class="panel-heading">
+      <div>
+        <p class="eyebrow">Closed & Historical</p>
+        <h3>Trade History</h3>
+      </div>
+    </div>
+    <div id="paperTradesStatus" class="status-line">Loading trades...</div>
+    <table class="data-table data-table--interactive" id="paperTradesTable">
+      <thead>
+        <tr>
+          <th data-sort="symbol">Symbol</th>
+          <th data-sort="direction">Direction</th>
+          <th data-sort="status">Status</th>
+          <th data-sort="entry_price">Entry</th>
+          <th data-sort="exit_price">Exit</th>
+          <th data-sort="realized_pl">Realized P/L</th>
+          <th data-sort="created_at">Opened</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div id="paperTradesEmpty" class="empty-state" hidden>No trade history matches the current filters.</div>
+  </article>
+</section>
+{% endblock %}

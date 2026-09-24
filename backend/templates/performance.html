@@ -1,0 +1,59 @@
+{% extends 'base.html' %}
+{% block page_id %}performance{% endblock %}
+{% block content %}
+<section class="hero-card hero-card--immersive">
+  <div>
+    <p class="eyebrow">Analytics Deck</p>
+    <h1>Performance Analytics</h1>
+    <p>Equity curve, drawdown, risk distribution, confidence accuracy, and best-versus-worst trade views for daily personal trading review.</p>
+  </div>
+  <div class="hero-actions">
+    <a class="tab" href="{{ url_for('portfolio_command') }}">Overview</a>
+    <a class="tab" href="{{ url_for('paper_trading_workspace') }}">Positions & Trades</a>
+    <a class="tab is-active" href="{{ url_for('performance_workspace') }}">Analytics</a>
+  </div>
+</section>
+
+<section class="dashboard-grid dashboard-grid--wide" id="performanceMetricCards"></section>
+
+<section class="analytics-grid">
+  <article class="panel glow-panel">
+    <h3>Equity Curve</h3>
+    <div id="equityCurveStatus" class="status-line">Loading equity curve...</div>
+    <div id="equityCurveChart" class="mini-chart"></div>
+  </article>
+  <article class="panel glow-panel">
+    <h3>Daily P/L</h3>
+    <div id="dailyPlStatus" class="status-line">Loading daily P/L...</div>
+    <div id="dailyPlChart" class="mini-chart"></div>
+  </article>
+  <article class="panel glow-panel">
+    <h3>Drawdown</h3>
+    <div id="drawdownStatus" class="status-line">Loading drawdown...</div>
+    <div id="drawdownChart" class="mini-chart"></div>
+  </article>
+  <article class="panel glow-panel">
+    <h3>Trade Distribution</h3>
+    <div id="tradeDistributionChart" class="mini-chart mini-chart--bars"></div>
+  </article>
+  <article class="panel glow-panel">
+    <h3>Risk Distribution</h3>
+    <div id="riskDistributionChart" class="mini-chart mini-chart--bars"></div>
+  </article>
+  <article class="panel glow-panel">
+    <h3>Confidence Accuracy</h3>
+    <div id="confidenceAccuracyChart" class="mini-chart mini-chart--bars"></div>
+  </article>
+</section>
+
+<section class="grid-two">
+  <article class="panel glow-panel">
+    <h3>Best Trades</h3>
+    <div id="bestTradesList" class="stack-list"></div>
+  </article>
+  <article class="panel glow-panel">
+    <h3>Worst Trades</h3>
+    <div id="worstTradesList" class="stack-list"></div>
+  </article>
+</section>
+{% endblock %}

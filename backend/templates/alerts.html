@@ -1,0 +1,51 @@
+{% extends 'base.html' %}
+{% block page_id %}alerts{% endblock %}
+{% block content %}
+<section class="hero-card hero-card--immersive">
+  <div>
+    <p class="eyebrow">Signal Center</p>
+    <h1>Live Signal Feed</h1>
+    <p>TradingView-originated signals normalized by PlutoTrade, enriched by backend analysis, and ready for manual approval or decline.</p>
+  </div>
+  <div class="hero-actions">
+    <button id="refreshSignalsButton" class="stock-action" type="button">Refresh Feed</button>
+  </div>
+</section>
+
+<section class="toolbar-card">
+  <div class="toolbar-group">
+    <input id="signalSearchInput" class="toolbar-input" placeholder="Search ticker or strategy">
+    <select id="signalDirectionFilter" class="toolbar-input">
+      <option value="ALL">All Directions</option>
+      <option value="LONG">LONG</option>
+      <option value="SHORT">SHORT</option>
+      <option value="WATCH">WATCH</option>
+      <option value="EXIT">EXIT</option>
+    </select>
+    <select id="signalStatusFilter" class="toolbar-input">
+      <option value="ALL">All Statuses</option>
+      <option value="AWAITING_APPROVAL">Awaiting Approval</option>
+      <option value="PAPER_EXECUTED">Paper Executed</option>
+      <option value="DECLINED">Declined</option>
+      <option value="FAILED">Failed</option>
+    </select>
+  </div>
+  <div class="toolbar-group">
+    <button id="signalPrevPage" class="stock-action" type="button">Prev</button>
+    <span id="signalPaginationLabel" class="status-pill">Page 1</span>
+    <button id="signalNextPage" class="stock-action" type="button">Next</button>
+  </div>
+</section>
+
+<section class="panel glow-panel">
+  <div class="panel-heading">
+    <div>
+      <p class="eyebrow">Approval Workflow</p>
+      <h3>Signal Feed</h3>
+    </div>
+  </div>
+  <div id="signalFeedStatus" class="status-line">Loading signal feed...</div>
+  <div id="signalFeed" class="signal-feed"></div>
+  <div id="signalFeedEmpty" class="empty-state" hidden>No signals match the current filters.</div>
+</section>
+{% endblock %}

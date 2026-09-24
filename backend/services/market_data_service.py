@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Protocol, Tuple
 import pandas as pd
 import yfinance as yf
 
-DEFAULT_PROVIDER = "ResearchProvider"
+DEFAULT_PROVIDER = "YFinanceProvider"
 DEFAULT_DATA_STATUS = "DELAYED"
 DEFAULT_MARKET_SESSION = "regular"
 TICKER_PATTERN = re.compile(r"^[A-Z0-9.\-\^=]{1,12}$")
@@ -213,7 +213,7 @@ class MarketDataProvider(Protocol):
 
 
 class ResearchMarketDataProvider:
-    name = "ResearchProvider"
+    name = "YFinanceProvider"
 
     def fetch_history(self, ticker: str, period: str, interval: str) -> pd.DataFrame:
         history = yf.download(
@@ -264,19 +264,20 @@ class StreamingMarketDataProvider:
 
 
 _PROVIDER_REGISTRY: Dict[str, MarketDataProvider] = {
+    "yfinance": ResearchMarketDataProvider(),
     "research": ResearchMarketDataProvider(),
     "streaming": StreamingMarketDataProvider(),
 }
 
 
 def _active_provider() -> MarketDataProvider:
-    key = os.getenv("PLUTO_MARKET_PROVIDER", "research").strip().lower()
+    key = os.getenv("PLUTO_MARKET_PROVIDER", "yfinance").strip().lower()
     provider = _PROVIDER_REGISTRY.get(key)
     if provider is None:
-        return _PROVIDER_REGISTRY["research"]
+        return _PROVIDER_REGISTRY["yfinance"]
     if key == "streaming":
         # Keep runtime stable while WebSocket ingestion is not wired yet.
-        return _PROVIDER_REGISTRY["research"]
+        return _PROVIDER_REGISTRY["yfinance"]
     return provider
 
 

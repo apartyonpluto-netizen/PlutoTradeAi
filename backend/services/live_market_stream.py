@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import threading
 import time
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -21,6 +23,7 @@ from backend.services.market_data_service import normalize_ticker, validate_tick
 
 
 DEFAULT_SYMBOLS = ["SPY", "QQQ", "IWM", "DIA", "TSLA", "NVDA"]
+LOGGER = logging.getLogger(__name__)
 
 
 def utc_now_iso() -> str:
@@ -102,11 +105,12 @@ class MarketDataProvider(ABC):
 
 
 class MarketDataCache:
-    def __init__(self, ttl_seconds: int = 15, stale_seconds: int = 120) -> None:
+    def __init__(self, ttl_seconds: int = 15, stale_seconds: int = 120, max_symbols: int = 256) -> None:
         self.ttl_seconds = max(1, ttl_seconds)
         self.stale_seconds = max(self.ttl_seconds, stale_seconds)
+        self.max_symbols = max(1, max_symbols)
         self._lock = threading.Lock()
-        self._rows: Dict[str, Dict[str, Any]] = {}
+        self._rows: OrderedDict[str, Dict[str, Any]] = OrderedDict()
         self._sequence = 0
 
     def update(self, symbol: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -121,7 +125,13 @@ class MarketDataCache:
                 "timestamp": utc_now_iso(),
                 "sequence": seq,
             }
+            if symbol in self._rows:
+                self._rows.pop(symbol, None)
             self._rows[symbol] = row
+
+            while len(self._rows) > self.max_symbols:
+                self._rows.popitem(last=False)
+
             return dict(row)
 
     def get(self, symbol: str) -> Tuple[Optional[Dict[str, Any]], str, Optional[int]]:
@@ -139,6 +149,24 @@ class MarketDataCache:
 
     def get_many(self, symbols: Sequence[str]) -> Dict[str, Tuple[Optional[Dict[str, Any]], str, Optional[int]]]:
         return {symbol: self.get(symbol) for symbol in symbols}
+
+    def cleanup_stale(self) -> int:
+        now = _now_epoch()
+        removed = 0
+        with self._lock:
+            for key in list(self._rows.keys()):
+                row = self._rows.get(key)
+                if not row:
+                    continue
+                age = now - row.get("updated_at", 0)
+                if age > self.stale_seconds:
+                    self._rows.pop(key, None)
+                    removed += 1
+        return removed
+
+    def size(self) -> int:
+        with self._lock:
+            return len(self._rows)
 
 
 class ConnectionHealthService:
@@ -190,6 +218,10 @@ class ConnectionHealthService:
                 "last_disconnect_at": self._last_disconnect_at,
                 "reconnect_attempts": self._reconnect_attempts,
             }
+
+    def is_connected(self) -> bool:
+        with self._lock:
+            return self._connected
 
 
 class YFinancePollingProvider(MarketDataProvider):
@@ -247,9 +279,15 @@ class YFinancePollingProvider(MarketDataProvider):
 class AlpacaStreamingProvider(MarketDataProvider):
     name = "AlpacaStreamingProvider"
 
-    def __init__(self, on_quote: Callable[[Dict[str, Any]], None], health: ConnectionHealthService) -> None:
+    def __init__(
+        self,
+        on_quote: Callable[[Dict[str, Any]], None],
+        health: ConnectionHealthService,
+        on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+    ) -> None:
         self._on_quote = on_quote
         self._health = health
+        self._on_event = on_event
         self._key = os.getenv("ALPACA_API_KEY", "").strip()
         self._secret = os.getenv("ALPACA_API_SECRET", "").strip()
         self._feed = os.getenv("ALPACA_DATA_FEED", "iex").strip().lower() or "iex"
@@ -264,12 +302,24 @@ class AlpacaStreamingProvider(MarketDataProvider):
         self._running = False
         self._stop = threading.Event()
         self._ws = None
+        self._last_auth_at: Optional[str] = None
+        self._last_subscribe_at: Optional[str] = None
+        self._last_message_at: Optional[str] = None
+        self._message_counts: Dict[str, int] = {"quote": 0, "trade": 0}
+
+    def _emit_event(self, name: str, payload: Optional[Dict[str, Any]] = None) -> None:
+        if not self._on_event:
+            return
+        try:
+            self._on_event(name, payload or {})
+        except Exception:
+            return
 
     def _can_stream(self) -> Tuple[bool, Optional[str]]:
-        if websocket is None:
-            return False, "websocket-client library unavailable"
         if not self._key or not self._secret:
             return False, "alpaca credentials missing"
+        if websocket is None:
+            return False, "websocket-client library unavailable"
         return True, None
 
     def start(self, symbols: Sequence[str]) -> None:
@@ -277,6 +327,8 @@ class AlpacaStreamingProvider(MarketDataProvider):
         ok, reason = self._can_stream()
         if not ok:
             self._health.set_fallback(True, reason)
+            LOGGER.warning("Alpaca stream unavailable; fallback enabled: %s", reason)
+            self._emit_event("provider_error", {"error": reason or "alpaca stream unavailable"})
             return
         if self._running:
             return
@@ -285,6 +337,7 @@ class AlpacaStreamingProvider(MarketDataProvider):
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, daemon=True, name="alpaca-stream")
         self._thread.start()
+        self._emit_event("provider_start", {"provider": self.name})
 
     def stop(self) -> None:
         self._running = False
@@ -294,6 +347,10 @@ class AlpacaStreamingProvider(MarketDataProvider):
                 self._ws.close()
         except Exception:
             pass
+        self._emit_event("provider_stop", {"provider": self.name})
+        thread = self._thread
+        if thread and thread.is_alive():
+            thread.join(timeout=2.0)
 
     def set_symbols(self, symbols: Sequence[str]) -> None:
         with self._lock:
@@ -317,8 +374,13 @@ class AlpacaStreamingProvider(MarketDataProvider):
                 continue
             msg_type = item.get("T")
             if msg_type in {"success", "subscription", "error"}:
+                self._last_message_at = utc_now_iso()
                 if msg_type == "error":
-                    self._health.disconnected(str(item.get("msg") or "alpaca stream error"))
+                    error_msg = str(item.get("msg") or "alpaca stream error")
+                    self._health.disconnected(error_msg)
+                    self._emit_event("provider_error", {"error": error_msg, "payload": item})
+                if msg_type == "subscription":
+                    self._emit_event("provider_subscription", {"payload": item})
                 continue
             if msg_type not in {"q", "t"}:
                 continue
@@ -345,12 +407,20 @@ class AlpacaStreamingProvider(MarketDataProvider):
 
             with self._lock:
                 self._latest[symbol] = quote
+                self._last_message_at = quote["timestamp"]
+                if msg_type == "q":
+                    self._message_counts["quote"] += 1
+                if msg_type == "t":
+                    self._message_counts["trade"] += 1
 
             self._on_quote(quote)
+            self._emit_event("provider_message", {"type": msg_type, "symbol": symbol})
 
     def _authenticate_and_subscribe(self, ws: Any) -> None:
         auth_payload = {"action": "auth", "key": self._key, "secret": self._secret}
         ws.send(json.dumps(auth_payload))
+        self._last_auth_at = utc_now_iso()
+        self._emit_event("provider_auth", {"timestamp": self._last_auth_at})
 
         symbols = self._snapshot_symbols()
         if not symbols:
@@ -362,24 +432,46 @@ class AlpacaStreamingProvider(MarketDataProvider):
             "trades": symbols,
         }
         ws.send(json.dumps(subscribe_payload))
+        self._last_subscribe_at = utc_now_iso()
+        self._emit_event(
+            "provider_subscribe",
+            {
+                "timestamp": self._last_subscribe_at,
+                "symbols": symbols,
+            },
+        )
 
     def _run(self) -> None:
         backoff = 1.0
         while self._running and not self._stop.is_set():
             try:
-                self._health.reconnecting()
-                self._health.set_fallback(False)
+                attempts = self._health.reconnecting()
+                self._emit_event("provider_reconnecting", {"attempt": attempts, "backoff_seconds": backoff})
+
+                def _on_open(ws_ref: Any) -> None:
+                    self._health.connected()
+                    self._health.set_fallback(False)
+                    self._emit_event("provider_connected", {"timestamp": utc_now_iso()})
+                    self._authenticate_and_subscribe(ws_ref)
+
                 ws = websocket.WebSocketApp(  # type: ignore[union-attr]
                     self._stream_url,
-                    on_open=lambda ws_ref: (self._health.connected(), self._authenticate_and_subscribe(ws_ref)),
+                    on_open=_on_open,
                     on_message=self._on_message,
-                    on_error=lambda _ws_ref, err: self._health.disconnected(str(err)),
-                    on_close=lambda _ws_ref, _code, _msg: self._health.disconnected("alpaca socket closed"),
+                    on_error=lambda _ws_ref, err: (
+                        self._health.disconnected(str(err)),
+                        self._emit_event("provider_error", {"error": str(err)}),
+                    ),
+                    on_close=lambda _ws_ref, _code, _msg: (
+                        self._health.disconnected("alpaca socket closed"),
+                        self._emit_event("provider_disconnected", {"reason": "alpaca socket closed"}),
+                    ),
                 )
                 self._ws = ws
                 ws.run_forever(ping_interval=20, ping_timeout=10)
             except Exception as err:
                 self._health.disconnected(str(err))
+                self._emit_event("provider_error", {"error": str(err)})
 
             if self._stop.is_set() or not self._running:
                 break
@@ -402,6 +494,10 @@ class AlpacaStreamingProvider(MarketDataProvider):
         base = self._health.snapshot()
         base["provider"] = self.name
         base["symbols"] = self._snapshot_symbols()
+        base["last_auth_at"] = self._last_auth_at
+        base["last_subscribe_at"] = self._last_subscribe_at
+        base["last_message_at"] = self._last_message_at
+        base["message_counts"] = dict(self._message_counts)
         return base
 
 
@@ -409,13 +505,20 @@ class MarketStreamService:
     def __init__(self, socketio: Any = None) -> None:
         self._socketio = socketio
         self._lock = threading.Lock()
-        self._watch_symbols: Set[str] = set(DEFAULT_SYMBOLS)
+        self._max_symbols = max(1, int(os.getenv("PLUTO_MARKET_MAX_SYMBOLS", "256")))
+        self._watch_symbols: OrderedDict[str, None] = OrderedDict()
+        for symbol in DEFAULT_SYMBOLS:
+            self._watch_symbols[symbol] = None
+            if len(self._watch_symbols) >= self._max_symbols:
+                break
         self._cache = MarketDataCache(
             ttl_seconds=int(os.getenv("PLUTO_MARKET_CACHE_SECONDS", "30")),
             stale_seconds=int(os.getenv("PLUTO_MARKET_STALE_SECONDS", "300")),
+            max_symbols=self._max_symbols,
         )
         self._health = ConnectionHealthService()
-        self._provider_key = os.getenv("PLUTO_MARKET_PROVIDER", "research").strip().lower()
+        self._provider_key = os.getenv("PLUTO_MARKET_PROVIDER", "yfinance").strip().lower()
+        self._streaming_mode = self._provider_key in {"alpaca", "streaming"}
         self._provider: MarketDataProvider
         self._poll_provider = YFinancePollingProvider()
         self._poll_interval = max(5, int(os.getenv("PLUTO_MARKET_POLL_SECONDS", "15")))
@@ -423,12 +526,18 @@ class MarketStreamService:
         self._poll_stop = threading.Event()
         self._started = False
         self._last_status_state: Optional[str] = None
+        self._last_status_error: Optional[str] = None
 
-        if self._provider_key in {"alpaca", "streaming"}:
-            self._provider = AlpacaStreamingProvider(self._ingest_provider_quote, self._health)
+        if self._streaming_mode:
+            self._provider = AlpacaStreamingProvider(self._ingest_provider_quote, self._health, on_event=self._provider_event)
         else:
             self._provider = self._poll_provider
             self._health.set_fallback(True)
+
+    def _provider_event(self, event_name: str, payload: Dict[str, Any]) -> None:
+        if event_name == "provider_error":
+            self._emit("market_data_error", {"error": payload.get("error", "provider error"), "timestamp": utc_now_iso()})
+        self._emit_status_events()
 
     def bind_socketio(self, socketio: Any) -> None:
         self._socketio = socketio
@@ -444,12 +553,16 @@ class MarketStreamService:
     def _emit_status_events(self) -> None:
         status = self.connection_status()
         state = status.get("state")
+        error_text = status.get("last_error")
         if state != self._last_status_state:
             if state == "polling":
                 self._emit("fallback_activated", status)
             if self._last_status_state in {"polling", "reconnecting"} and state == "live":
                 self._emit("stream_recovered", status)
+        if error_text and error_text != self._last_status_error:
+            self._emit("market_data_error", {"error": error_text, "timestamp": utc_now_iso()})
         self._last_status_state = state
+        self._last_status_error = error_text
         self._emit("connection_status", status)
 
     def _normalized_quote_from_cache_row(self, row: Dict[str, Any], cache_status: str, age_seconds: Optional[int]) -> NormalizedQuote:
@@ -484,9 +597,18 @@ class MarketStreamService:
 
     def _poll_loop(self) -> None:
         while not self._poll_stop.is_set():
+            self._cache.cleanup_stale()
+            if self._streaming_mode and self._health.is_connected():
+                self._health.set_fallback(False)
+                self._emit_status_events()
+                if self._poll_stop.wait(self._poll_interval):
+                    break
+                continue
+
             symbols = self.symbols()
             if not symbols:
-                time.sleep(self._poll_interval)
+                if self._poll_stop.wait(self._poll_interval):
+                    break
                 continue
 
             rows = self._poll_provider.get_quotes(symbols)
@@ -494,16 +616,18 @@ class MarketStreamService:
                 self._emit("market_data_error", {"error": "No polling quotes available", "timestamp": utc_now_iso()})
                 self._health.set_fallback(True, "polling quotes unavailable")
                 self._emit_status_events()
-                time.sleep(self._poll_interval)
+                if self._poll_stop.wait(self._poll_interval):
+                    break
                 continue
 
             for payload in rows.values():
                 self._broadcast_quote(payload)
 
-            # Polling is a fallback stream state.
+            # Polling is primary mode for research and fallback mode for streaming outages.
             self._health.set_fallback(True)
             self._emit_status_events()
-            time.sleep(self._poll_interval)
+            if self._poll_stop.wait(self._poll_interval):
+                break
 
     def _ensure_polling_thread(self) -> None:
         if self._poll_thread and self._poll_thread.is_alive():
@@ -529,7 +653,11 @@ class MarketStreamService:
                 return
             self._started = False
         self._provider.stop()
+        self._poll_provider.stop()
         self._poll_stop.set()
+        poll_thread = self._poll_thread
+        if poll_thread and poll_thread.is_alive():
+            poll_thread.join(timeout=2.0)
 
     def add_symbol(self, symbol: str) -> Tuple[bool, Optional[str]]:
         normalized = normalize_ticker(symbol)
@@ -537,24 +665,35 @@ class MarketStreamService:
         if not is_valid:
             return False, error
         with self._lock:
-            self._watch_symbols.add(normalized)
-            symbols = sorted(self._watch_symbols)
+            if normalized in self._watch_symbols:
+                self._watch_symbols.move_to_end(normalized)
+            else:
+                self._watch_symbols[normalized] = None
+
+            while len(self._watch_symbols) > self._max_symbols:
+                self._watch_symbols.popitem(last=False)
+
+            symbols = list(self._watch_symbols.keys())
         self._provider.set_symbols(symbols)
         return True, None
 
     def symbols(self) -> List[str]:
         with self._lock:
-            return sorted(self._watch_symbols)
+            return list(self._watch_symbols.keys())
 
     def connection_status(self) -> Dict[str, Any]:
         status = self._health.snapshot()
+        effective_provider = self._poll_provider.name if status.get("fallback_active") else self._provider.name
         status.update(
             {
                 "provider": self._provider.name,
+                "effective_provider": effective_provider,
                 "active_provider": self._provider_key,
                 "watch_symbols": self.symbols(),
+                "max_symbols": self._max_symbols,
                 "cache_ttl_seconds": self._cache.ttl_seconds,
                 "stale_ttl_seconds": self._cache.stale_seconds,
+                "cache_size": self._cache.size(),
                 "timestamp": utc_now_iso(),
             }
         )
@@ -660,11 +799,13 @@ class MarketStreamService:
                 "provider": self._provider.name,
             }
 
+        response_provider = quotes[0].get("provider") or self._provider.name
+
         return {
             "success": True,
             "error": None,
             "data": {"quotes": quotes, "validation_errors": validation_errors},
             "timestamp": utc_now_iso(),
             "data_status": best,
-            "provider": self._provider.name,
+            "provider": response_provider,
         }

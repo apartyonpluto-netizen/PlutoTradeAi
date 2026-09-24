@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 
 from backend.scanner.market_scanner import SCAN_LIST, analyze_stock, scan_market
 from backend.scanner.watchlist import get_watchlist
+from backend.services.market_data_service import get_stock_snapshot
 
 
 def _utc_now_iso() -> str:
@@ -28,6 +29,7 @@ class ScannerRegistry:
             "breakouts": self._breakouts,
             "extended-hours": self._extended_hours,
             "futures": self._futures,
+            "sector-rotation": self._sector_rotation,
             "watchlist": self._watchlist,
             "upcoming": self._upcoming,
         }
@@ -175,7 +177,45 @@ class ScannerRegistry:
             "best_breakout_candidate": breakouts.get("best_breakout_candidate"),
             "highest_risk_setup": risk_candidate,
             "data_health": "ok" if all_rows else "degraded",
+            "provider_status": (highest_confidence or {}).get("status", "UNAVAILABLE"),
+            "provider": (highest_confidence or {}).get("provider", "ResearchProvider"),
             "last_scan_time": _utc_now_iso(),
             "rows": all_rows,
             "tracked_symbols": SCAN_LIST,
+        }
+
+    def _sector_rotation(self) -> Dict[str, Any]:
+        sector_etfs = ["XLF", "XLK", "XLE", "XLI", "XLV", "XLB", "XLY", "XLP", "XLU", "XLRE"]
+        rows = []
+
+        for symbol in sector_etfs:
+            snapshot = get_stock_snapshot(symbol)
+            if not snapshot.get("success"):
+                continue
+
+            data = snapshot.get("data", {})
+            rows.append(
+                {
+                    "ticker": symbol,
+                    "price": data.get("current_price"),
+                    "percent_change": data.get("daily_change_percent"),
+                    "relative_volume": data.get("relative_volume"),
+                    "scanner_score": abs(_safe_float(data.get("daily_change_percent"))) * 10,
+                    "provider": snapshot.get("provider"),
+                    "timestamp": snapshot.get("timestamp"),
+                    "market_session": data.get("market_session"),
+                    "status": data.get("market_data_status") or snapshot.get("data_status"),
+                    "age": data.get("market_data_age_seconds"),
+                }
+            )
+
+        rows.sort(key=lambda x: _safe_float(x.get("percent_change")), reverse=True)
+
+        return {
+            "scanner": "Sector Rotation",
+            "rows": rows,
+            "leading_sector": rows[0] if rows else None,
+            "lagging_sector": rows[-1] if rows else None,
+            "data_health": "ok" if rows else "degraded",
+            "last_scan_time": _utc_now_iso(),
         }

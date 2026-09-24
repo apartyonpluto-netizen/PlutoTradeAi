@@ -1,10 +1,20 @@
 {% extends 'base.html' %}
 {% block page_id %}dashboard{% endblock %}
 {% block content %}
-<section class="hero-card">
-  <h1>Mission Control</h1>
-  <p>Unified command center for market research, scanner intelligence, and AI trade planning.</p>
+<section class="hero-card hero-card--immersive">
+  <div>
+    <p class="eyebrow">Desktop Command Center</p>
+    <h1>Mission Control</h1>
+    <p>Unified command center for market research, paper execution, signal triage, and performance monitoring.</p>
+  </div>
+  <div class="hero-actions">
+    <a class="tab" href="{{ url_for('alerts_workspace') }}">Open Signal Center</a>
+    <a class="tab" href="{{ url_for('portfolio_command') }}">Open Portfolio</a>
+    <a class="tab" href="{{ url_for('performance_workspace') }}">Open Analytics</a>
+  </div>
 </section>
+
+<section class="dashboard-grid dashboard-grid--wide" id="dashboardCommandCards"></section>
 
 <section class="panel">
   <h3>Daily Mission Brief</h3>
@@ -37,6 +47,32 @@
   <article class="panel">
     <h3>Live Snapshot</h3>
     <div id="dashboardSnapshot" class="metric-grid"></div>
+  </article>
+</section>
+
+<section class="grid-two grid-two--asymmetric">
+  <article class="panel glow-panel">
+    <div class="panel-heading">
+      <div>
+        <p class="eyebrow">Approval Queue</p>
+        <h3>Active Signals</h3>
+      </div>
+      <a class="tab" href="{{ url_for('alerts_workspace') }}">Open full feed</a>
+    </div>
+    <div id="dashboardSignalsStatus" class="status-line">Loading signal feed...</div>
+    <div id="dashboardSignalsFeed" class="signal-feed signal-feed--compact"></div>
+  </article>
+
+  <article class="panel glow-panel">
+    <div class="panel-heading">
+      <div>
+        <p class="eyebrow">Portfolio Pulse</p>
+        <h3>Paper Portfolio</h3>
+      </div>
+      <a class="tab" href="{{ url_for('portfolio_command') }}">Open portfolio</a>
+    </div>
+    <div id="dashboardPortfolioStatus" class="status-line">Loading portfolio...</div>
+    <div id="dashboardPortfolioSummary" class="detail-body"></div>
   </article>
 </section>
 {% endblock %}

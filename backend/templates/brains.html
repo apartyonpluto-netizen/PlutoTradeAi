@@ -7,17 +7,18 @@
 </section>
 
 <section class="tabs">
-  <a class="tab {% if active_brain == 'overview' %}is-active{% endif %}" href="{{ url_for('brains_overview') }}?ticker={{ ticker }}">Brain Overview</a>
-  <a class="tab {% if active_brain == 'candle' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='candle') }}?ticker={{ ticker }}">Candle Brain</a>
+  <a class="tab {% if active_brain == 'overview' %}is-active{% endif %}" href="{{ url_for('brains_overview') }}?ticker={{ ticker }}">Brain Center</a>
   <a class="tab {% if active_brain == 'pattern' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='pattern') }}?ticker={{ ticker }}">Pattern Brain</a>
-  <a class="tab {% if active_brain == 'trend' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='trend') }}?ticker={{ ticker }}">Trend Brain</a>
-  <a class="tab {% if active_brain == 'volume' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='volume') }}?ticker={{ ticker }}">Volume Brain</a>
-  <a class="tab {% if active_brain == 'support-resistance' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='support-resistance') }}?ticker={{ ticker }}">Support &amp; Resistance Brain</a>
   <a class="tab {% if active_brain == 'strategy' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='strategy') }}?ticker={{ ticker }}">Strategy Brain</a>
-  <a class="tab {% if active_brain == 'options' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='options') }}?ticker={{ ticker }}">Options Brain</a>
+  <a class="tab {% if active_brain == 'candle' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='candle') }}?ticker={{ ticker }}">Candle Brain</a>
+  <a class="tab {% if active_brain == 'trend' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='trend') }}?ticker={{ ticker }}">Trend Brain</a>
   <a class="tab {% if active_brain == 'risk' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='risk') }}?ticker={{ ticker }}">Risk Brain</a>
+  <a class="tab {% if active_brain == 'confidence' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='confidence') }}?ticker={{ ticker }}">Confidence Engine</a>
+  <a class="tab {% if active_brain == 'support-resistance' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='support') }}?ticker={{ ticker }}">Support</a>
+  <a class="tab {% if active_brain == 'support-resistance' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='resistance') }}?ticker={{ ticker }}">Resistance</a>
+  <a class="tab {% if active_brain == 'volume' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='volume') }}?ticker={{ ticker }}">Volume</a>
   <a class="tab {% if active_brain == 'market-readiness' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='market-readiness') }}?ticker={{ ticker }}">Market Readiness</a>
-  <a class="tab {% if active_brain == 'confidence' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='confidence') }}?ticker={{ ticker }}">Neural/Confidence Engine</a>
+  <a class="tab {% if active_brain == 'options' %}is-active{% endif %}" href="{{ url_for('brains_workspace', brain_name='options') }}?ticker={{ ticker }}">Options Brain</a>
 </section>
 
 <section class="panel">

@@ -1,0 +1,69 @@
+{% extends 'base.html' %}
+{% block page_id %}portfolio{% endblock %}
+{% block content %}
+<section class="hero-card hero-card--immersive">
+  <div>
+    <p class="eyebrow">PlutoTrade Internal Ledger</p>
+    <h1>Paper Portfolio Command</h1>
+    <p>Professional paper-trading overview with live account metrics, active exposure, and signal-linked execution context.</p>
+  </div>
+  <div class="hero-actions">
+    <a class="tab is-active" href="{{ url_for('portfolio_command') }}">Overview</a>
+    <a class="tab" href="{{ url_for('paper_trading_workspace') }}">Open Positions</a>
+    <a class="tab" href="{{ url_for('performance_workspace') }}">Performance</a>
+  </div>
+</section>
+
+<section class="dashboard-grid dashboard-grid--wide" id="portfolioSummaryCards"></section>
+
+<section class="grid-two grid-two--asymmetric">
+  <article class="panel glow-panel">
+    <div class="panel-heading">
+      <div>
+        <p class="eyebrow">Exposure</p>
+        <h3>Open Positions</h3>
+      </div>
+      <a class="tab" href="{{ url_for('paper_trading_workspace') }}">Open detailed blotter</a>
+    </div>
+    <div id="portfolioPositionsStatus" class="status-line">Loading open positions...</div>
+    <div id="portfolioPositionsPreview" class="stack-list"></div>
+  </article>
+
+  <article class="panel glow-panel">
+    <div class="panel-heading">
+      <div>
+        <p class="eyebrow">Signal Pressure</p>
+        <h3>Pending Approval Queue</h3>
+      </div>
+      <a class="tab" href="{{ url_for('alerts_workspace') }}">Open signal center</a>
+    </div>
+    <div id="portfolioSignalStatus" class="status-line">Loading live signals...</div>
+    <div id="portfolioSignalPreview" class="stack-list"></div>
+  </article>
+</section>
+
+<section class="grid-two">
+  <article class="panel glow-panel">
+    <div class="panel-heading">
+      <div>
+        <p class="eyebrow">Closed Trades</p>
+        <h3>Recent Executions</h3>
+      </div>
+    </div>
+    <div id="portfolioTradesStatus" class="status-line">Loading trade history...</div>
+    <div id="portfolioTradesPreview" class="stack-list"></div>
+  </article>
+
+  <article class="panel glow-panel">
+    <div class="panel-heading">
+      <div>
+        <p class="eyebrow">At A Glance</p>
+        <h3>Performance Snapshot</h3>
+      </div>
+      <a class="tab" href="{{ url_for('performance_workspace') }}">Open analytics</a>
+    </div>
+    <div id="portfolioPerformanceStatus" class="status-line">Loading performance...</div>
+    <div id="portfolioPerformanceSummary" class="detail-body"></div>
+  </article>
+</section>
+{% endblock %}

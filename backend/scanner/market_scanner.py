@@ -1,5 +1,5 @@
-import yfinance as yf
-from backend.scanner.watchlist import is_on_watchlist, add_to_watchlist
+from backend.services.market_data_service import get_stock_snapshot
+from backend.scanner.watchlist import is_on_watchlist
 
 
 SCAN_LIST = [
@@ -9,29 +9,17 @@ SCAN_LIST = [
 ]
 
 
-def get_number(value):
-    try:
-        return float(value.item())
-    except AttributeError:
-        return float(value)
-
-
 def analyze_stock(ticker):
-    data = yf.download(ticker, period="5d", interval="1d", progress=False, auto_adjust=True)
-
-    if data.empty or len(data) < 2:
+    snapshot = get_stock_snapshot(ticker)
+    if not snapshot.get("success"):
         return None
 
-    latest = data.iloc[-1]
-    previous = data.iloc[-2]
-
-    latest_close = get_number(latest["Close"])
-    previous_close = get_number(previous["Close"])
-    latest_volume = get_number(latest["Volume"])
-    avg_volume = get_number(data["Volume"].mean())
-
-    percent_change = ((latest_close - previous_close) / previous_close) * 100
-    relative_volume = latest_volume / avg_volume if avg_volume > 0 else 0
+    data = snapshot.get("data", {})
+    latest_close = data.get("current_price")
+    percent_change = data.get("daily_change_percent") or 0
+    relative_volume = data.get("relative_volume") or 0
+    if latest_close is None:
+        return None
 
     score = 0
 
@@ -54,6 +42,11 @@ def analyze_stock(ticker):
         "relative_volume": round(relative_volume, 2),
         "on_watchlist": is_on_watchlist(ticker),
         "scanner_score": score,
+        "provider": snapshot.get("provider"),
+        "timestamp": snapshot.get("timestamp"),
+        "market_session": data.get("market_session"),
+        "status": data.get("market_data_status") or snapshot.get("data_status"),
+        "age": data.get("market_data_age_seconds"),
     }
 
 

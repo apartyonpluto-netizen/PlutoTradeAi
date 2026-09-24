@@ -53,6 +53,11 @@
           <option value="polling" selected>Polling</option>
           <option value="streaming">Streaming</option>
         </select>
+        <span id="chartProviderBadge" class="status-pill">CHART: TRADINGVIEW</span>
+        <span id="backendDataBadge" class="status-pill">BACKEND DATA: UNAVAILABLE</span>
+        <span id="signalSourceBadge" class="status-pill">SIGNAL SOURCE: NONE</span>
+        <span id="paperBrokerBadge" class="status-pill">PAPER BROKER: PLUTOTRADE INTERNAL</span>
+        <span id="executionProviderBadge" class="status-pill">EXECUTION: DISABLED</span>
         <span id="connectionIndicator" class="status-pill connection-pill"><span id="connectionDot" class="dot offline"></span><span id="connectionLabel">Offline</span></span>
         <span id="connectionQuality" class="status-pill">Quality: --</span>
         <span class="status-pill">{{ 'Authenticated Persistent Mode' if admin_mode else 'Public Session Mode' }}</span>
@@ -203,7 +208,7 @@
   <datalist id="tickerSuggestions"></datalist>
 
   <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
-  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" integrity="sha384-mFJVfQvP6L7r6z8TpSY6Qx49S65v6+4NnA2B0mCFY8VJQxq9wL5M3Cy5LQ0Q0X0z" crossorigin="anonymous"></script>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" crossorigin="anonymous"></script>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

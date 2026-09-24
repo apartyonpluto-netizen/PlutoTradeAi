@@ -263,6 +263,8 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(payload["success"])
         self.assertIn("state", payload["data"])
+        self.assertIn("effective_provider", payload["data"])
+        self.assertIn("max_symbols", payload["data"])
 
     @patch("backend.services.live_market_stream.YFinancePollingProvider.get_quotes")
     def test_market_quotes_route(self, mock_get_quotes):

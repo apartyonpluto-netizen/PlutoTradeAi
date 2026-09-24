@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,7 +9,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
-AUTH_FILE = Path("data/auth_users.json")
+AUTH_FILE = Path(os.getenv("PLUTO_DATA_DIR", "data")) / "auth_users.json"
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
 
 
@@ -49,8 +50,9 @@ def load_users() -> Dict[str, Any]:
 
 
 def save_users(store: Dict[str, Any]) -> None:
-    AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
-    AUTH_FILE.write_text(json.dumps({"users": store.get("users", {})}, indent=2), encoding="utf-8")
+    from backend.services.storage import atomic_write_json
+
+    atomic_write_json(AUTH_FILE, {"users": store.get("users", {})})
 
 
 def register_user(username: str, password: str) -> Tuple[bool, str]:

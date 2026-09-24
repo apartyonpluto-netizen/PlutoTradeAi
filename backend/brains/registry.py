@@ -176,6 +176,26 @@ class BrainRegistry:
                 f"{stock['ticker']} shows {candle['candle_type']} behavior with {confidence['confidence']}% confidence. "
                 "Use research-only workflow and paper trading validation."
             ),
+            "why": {
+                "trend": base["stock"].get("daily_change_percent"),
+                "momentum": base["confidence"].get("factors", {}).get("momentum"),
+                "volume": base["stock"].get("relative_volume"),
+                "relative_volume": base["stock"].get("relative_volume"),
+                "vwap": stock.get("current_price"),
+                "ema": {
+                    "ema9": stock.get("current_price"),
+                    "ema20": stock.get("current_price"),
+                },
+                "support": levels.get("support"),
+                "resistance": levels.get("resistance"),
+                "sector": stock.get("asset_type"),
+                "news": "News signals are routed via mission monitoring.",
+                "options": options.get("contract_type"),
+                "volatility": abs(_safe_float(stock.get("daily_change_percent"))),
+                "market_readiness": "Ready" if confidence.get("confidence", 0) >= 65 else "Watch",
+                "risk": risk.get("risk_status"),
+                "invalidation": options.get("stop_loss"),
+            },
             "components": base,
         }
 
@@ -270,6 +290,10 @@ class BrainRegistry:
         base = self._base_payload(ticker)
         return {
             "ticker": base["ticker"],
-            **base["confidence"],
+            "overall": base["confidence"].get("confidence"),
+            "factors": base["confidence"].get("factors", {}),
+            "weights": base["confidence"].get("weights", {}),
+            "reasons": base["confidence"].get("reasons", []),
+            "suggested_action": base["confidence"].get("suggested_action"),
             "data_quality": base["data_quality"],
         }

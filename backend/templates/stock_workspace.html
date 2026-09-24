@@ -4,10 +4,11 @@
 <section class="hero-card">
   <h1>Stock Workspace: <span id="workspaceTicker">{{ ticker }}</span></h1>
   <p>Analyze your own symbol with live/delayed status, chart overlays, and AI-linked actions.</p>
-  <form class="inline-search" action="{{ url_for('stock_redirect') }}" method="get">
-    <input name="ticker" value="{{ ticker }}" placeholder="Type ticker">
+  <form class="inline-search" id="workspaceTickerForm" action="{{ url_for('stock_redirect') }}" method="get">
+    <input id="workspaceTickerInput" name="ticker" value="{{ ticker }}" placeholder="Type ticker" list="tickerSuggestions">
     <button type="submit">Open Workspace</button>
   </form>
+  <div class="detail-body" id="workspaceSearchMemory"></div>
 </section>
 
 <section class="action-row">
@@ -17,17 +18,38 @@
   <button class="stock-action" data-action="thesis">View AI Thesis</button>
   <button class="stock-action" data-action="options">View Options</button>
   <button class="stock-action" data-action="levels">View Key Levels</button>
+  <button class="stock-action" data-action="watchlist">Add to Watchlist</button>
+  <button class="stock-action" data-action="favorite">Add Favorite</button>
 </section>
 
 <section class="grid-two">
   <article class="panel">
     <h3>Market Data</h3>
+    <p class="subtext">BACKEND DATA SOURCE (YFINANCE/CACHE STATUS) is separate from TradingView visual charts.</p>
     <div id="stockDataStatus" class="status-line">Loading ticker data...</div>
     <div id="stockMetrics" class="metric-grid"></div>
   </article>
 
   <article class="panel">
-    <h3>Chart</h3>
+    <h3>TradingView Visual Chart</h3>
+    <p class="subtext">Chart Provider: TradingView. This is visual charting only and does not indicate execution provider.</p>
+    <div class="timeframes">
+      <label for="tvInterval">Interval</label>
+      <select id="tvInterval">
+        <option value="1">1m</option>
+        <option value="5">5m</option>
+        <option value="15">15m</option>
+        <option value="60" selected>1h</option>
+        <option value="D">1D</option>
+        <option value="W">1W</option>
+      </select>
+      <button id="reloadTradingViewChart" type="button">Reload Chart</button>
+    </div>
+    <div id="tradingViewChartStatus" class="status-line">Loading TradingView chart...</div>
+    <div id="tradingViewChart" class="chart tradingview-chart"></div>
+    <div id="tradingViewChartFallback" class="status-line"></div>
+
+    <h3 class="section-title">Pluto Backend Technical Chart</h3>
     <div class="timeframes">
       <button class="time-btn" data-timeframe="1D">1D</button>
       <button class="time-btn" data-timeframe="5D">5D</button>
@@ -43,6 +65,7 @@
       <label><input type="checkbox" data-overlay="breakdown_level" checked> Breakdown level</label>
       <label><input type="checkbox" data-overlay="reversal_zone" checked> Reversal zone</label>
       <label><input type="checkbox" data-overlay="premarket" checked> Premarket high/low</label>
+      <label><input type="checkbox" data-overlay="afterhours" checked> After Hours high/low</label>
       <label><input type="checkbox" data-overlay="ema9" checked> EMA 9</label>
       <label><input type="checkbox" data-overlay="ema20" checked> EMA 20</label>
       <label><input type="checkbox" data-overlay="ema50" checked> EMA 50</label>
@@ -52,6 +75,34 @@
     <div id="stockChartStatus" class="status-line">Loading chart...</div>
     <div id="stockChart" class="chart"></div>
   </article>
+</section>
+
+<section class="grid-two grid-two--asymmetric">
+  <article class="panel glow-panel">
+    <div class="panel-heading">
+      <div>
+        <p class="eyebrow">PlutoTrade Overlay</p>
+        <h3>AI Overlay Metrics</h3>
+      </div>
+    </div>
+    <div id="workspaceOverlayStatus" class="status-line">Loading AI overlay metrics...</div>
+    <div id="workspaceOverlayCards" class="metric-grid"></div>
+  </article>
+
+  <article class="panel glow-panel">
+    <div class="panel-heading">
+      <div>
+        <p class="eyebrow">Latest Signal</p>
+        <h3>TradingView Context</h3>
+      </div>
+    </div>
+    <div id="workspaceSignalContext" class="detail-body"></div>
+  </article>
+</section>
+
+<section class="panel">
+  <h3>Signal Source</h3>
+  <div id="signalSourceStatus" class="status-line">No signal received yet.</div>
 </section>
 
 <section class="panel" id="workspaceDetailPanel">

@@ -40,17 +40,20 @@ Alpaca remains optional and inactive unless explicitly enabled.
 
 ## Key APIs
 
-- `POST /api/webhooks/tradingview`
-- `GET /api/signals`
-- `GET /api/signals/<signal_id>`
-- `POST /api/signals/<signal_id>/approve`
-- `POST /api/signals/<signal_id>/decline`
-- `GET /api/paper/account`
-- `GET /api/paper/positions`
-- `GET /api/paper/trades`
-- `GET /api/paper/performance`
+- `POST /api/webhooks/tradingview` (shared secret)
+- `GET /api/signals`, `GET /api/signals/<signal_id>`
+- `POST /api/signals/<signal_id>/approve`, `POST /api/signals/<signal_id>/decline` (**sign-in required**)
+- `GET /api/paper/account`, `/positions`, `/trades`, `/performance`, `/alerts`, `/monitor`
+- `POST /api/paper/alerts/<id>/dismiss`, `/resolve`, `POST /api/paper/monitor/run` (**sign-in required**)
+- `GET /api/health` (reports `degraded` if the paper ledger is corrupted)
 
-See `docs/tradingview_integration.md` for alert templates, webhook auth options, and secret-rotation guidance.
+Every entry needs a human approval and a protective stop. The internal simulated broker is persistent and
+price driven (targets, stops and manual exits actually fill), and all state survives restarts.
+
+- `docs/OPERATIONS.md` - running, configuring, backing up and deploying; restart/corruption behavior; known limits.
+- `docs/tradingview_integration.md` - alert templates, webhook validation rules, signal lifecycle, secret rotation.
+
+Run the tests with `venv/bin/python -m pytest -q` (they use temp storage and mocked prices).
 
 ## Current Status
 

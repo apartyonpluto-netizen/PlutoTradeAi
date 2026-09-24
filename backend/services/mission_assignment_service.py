@@ -165,26 +165,117 @@ def refresh_mission_profile(
 
 def build_mission_timeline(mission: Dict[str, Any]) -> List[Dict[str, Any]]:
     timeline: List[Dict[str, Any]] = []
-    key_map = [
-        ("Confidence", mission.get("confidence_history", [])),
-        ("Risk", mission.get("risk_history", [])),
-        ("Trade Thesis", mission.get("trade_thesis_history", [])),
-        ("Support", mission.get("support_history", [])),
-        ("Resistance", mission.get("resistance_history", [])),
-        ("Options", mission.get("options_history", [])),
-    ]
 
-    for label, entries in key_map:
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            timeline.append(
-                {
-                    "label": label,
-                    "timestamp": entry.get("timestamp"),
-                    "value": entry.get("value") if label not in {"Options"} else entry,
-                }
-            )
+    confidence_history = mission.get("confidence_history", []) or []
+    risk_history = mission.get("risk_history", []) or []
+    thesis_history = mission.get("trade_thesis_history", []) or []
+    support_history = mission.get("support_history", []) or []
+    resistance_history = mission.get("resistance_history", []) or []
+
+    for idx, current in enumerate(confidence_history):
+        if not isinstance(current, dict):
+            continue
+        previous = confidence_history[idx - 1] if idx > 0 and isinstance(confidence_history[idx - 1], dict) else {}
+        prev_value = previous.get("value")
+        cur_value = current.get("value")
+        label = "Confidence Increased" if prev_value is not None and cur_value is not None and cur_value > prev_value else "Confidence Decreased"
+        if idx == 0:
+            label = "Confidence Initialized"
+        timeline.append(
+            {
+                "label": label,
+                "timestamp": current.get("timestamp"),
+                "reason": "AI confidence recalculated from trend, momentum, volume, support/resistance, and risk.",
+                "previous_confidence": prev_value,
+                "current_confidence": cur_value,
+                "source": "Confidence Engine",
+                "provider": "PlutoTradeAI",
+                "value": cur_value,
+            }
+        )
+
+    for idx, current in enumerate(risk_history):
+        if not isinstance(current, dict):
+            continue
+        previous = risk_history[idx - 1] if idx > 0 and isinstance(risk_history[idx - 1], dict) else {}
+        prev_value = previous.get("value")
+        cur_value = current.get("value")
+        label = "Risk Increased" if prev_value is not None and cur_value is not None and cur_value > prev_value else "Risk Decreased"
+        if idx == 0:
+            label = "Risk Initialized"
+        timeline.append(
+            {
+                "label": label,
+                "timestamp": current.get("timestamp"),
+                "reason": "Risk profile updated from mission parameters and options structure.",
+                "previous_confidence": None,
+                "current_confidence": None,
+                "source": "Risk Brain",
+                "provider": "PlutoTradeAI",
+                "value": cur_value,
+            }
+        )
+
+    for idx, current in enumerate(support_history):
+        if not isinstance(current, dict):
+            continue
+        previous = support_history[idx - 1] if idx > 0 and isinstance(support_history[idx - 1], dict) else {}
+        prev_value = previous.get("value")
+        cur_value = current.get("value")
+        label = "Support Held" if prev_value is not None and cur_value is not None and cur_value >= prev_value else "Support Updated"
+        timeline.append(
+            {
+                "label": label,
+                "timestamp": current.get("timestamp"),
+                "reason": "Support levels recalculated from recent market structure.",
+                "previous_confidence": None,
+                "current_confidence": None,
+                "source": "Support/Resistance Brain",
+                "provider": "PlutoTradeAI",
+                "value": cur_value,
+            }
+        )
+
+    for idx, current in enumerate(resistance_history):
+        if not isinstance(current, dict):
+            continue
+        previous = resistance_history[idx - 1] if idx > 0 and isinstance(resistance_history[idx - 1], dict) else {}
+        prev_value = previous.get("value")
+        cur_value = current.get("value")
+        label = "Resistance Failed" if prev_value is not None and cur_value is not None and cur_value < prev_value else "Resistance Updated"
+        timeline.append(
+            {
+                "label": label,
+                "timestamp": current.get("timestamp"),
+                "reason": "Resistance levels recalculated from recent market structure.",
+                "previous_confidence": None,
+                "current_confidence": None,
+                "source": "Support/Resistance Brain",
+                "provider": "PlutoTradeAI",
+                "value": cur_value,
+            }
+        )
+
+    for idx, current in enumerate(thesis_history):
+        if not isinstance(current, dict):
+            continue
+        previous = thesis_history[idx - 1] if idx > 0 and isinstance(thesis_history[idx - 1], dict) else {}
+        prev_value = previous.get("value")
+        cur_value = current.get("value")
+        if idx > 0 and prev_value == cur_value:
+            continue
+        timeline.append(
+            {
+                "label": "AI Thesis Updated",
+                "timestamp": current.get("timestamp"),
+                "reason": "Trade thesis changed due to refreshed market and signal context.",
+                "previous_confidence": None,
+                "current_confidence": None,
+                "source": "Strategy Brain",
+                "provider": "PlutoTradeAI",
+                "value": cur_value,
+            }
+        )
 
     timeline.sort(key=lambda item: item.get("timestamp") or "")
     return timeline

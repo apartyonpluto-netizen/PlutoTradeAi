@@ -1,15 +1,30 @@
+# State (signals, paper ledger, simulated broker, users) is stored on local disk, and Render disks can be
+# attached to ONE service only. Therefore the web service owns all trading state and runs the order
+# monitor; the worker only refreshes research missions and must not touch the ledger.
 services:
   - type: web
     name: plutotrade-ai-web
     env: python
     plan: starter
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn backend.app:app
+    startCommand: gunicorn backend.app:app --workers 1
+    disk:
+      name: pluto-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: PLUTO_ROLE
         value: web
       - key: PLUTO_ENABLE_WORKER
         value: "false"
+      - key: PLUTO_DATA_DIR
+        value: /var/data
+      - key: PLUTO_SECRET_KEY
+        generateValue: true
+      - key: TRADINGVIEW_WEBHOOK_SECRET
+        sync: false
+      - key: PLUTO_ENABLE_ORDER_MONITOR
+        value: "true"
 
   - type: worker
     name: plutotrade-ai-worker
@@ -21,4 +36,6 @@ services:
       - key: PLUTO_ROLE
         value: worker
       - key: PLUTO_ENABLE_WORKER
+        value: "false"
+      - key: PLUTO_ENABLE_ORDER_MONITOR
         value: "false"

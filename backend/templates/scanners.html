@@ -9,12 +9,13 @@
 <section class="tabs">
   <a class="tab {% if active_scanner == 'overview' %}is-active{% endif %}" href="{{ url_for('scanners_overview') }}">Overview</a>
   <a class="tab {% if active_scanner == 'movers' %}is-active{% endif %}" href="{{ url_for('scanners_workspace', scanner_name='movers') }}">Market Movers</a>
-  <a class="tab {% if active_scanner == 'volume' %}is-active{% endif %}" href="{{ url_for('scanners_workspace', scanner_name='volume') }}">Volume Scanner</a>
-  <a class="tab {% if active_scanner == 'reversals' %}is-active{% endif %}" href="{{ url_for('scanners_workspace', scanner_name='reversals') }}">Reversal Scanner</a>
-  <a class="tab {% if active_scanner == 'breakouts' %}is-active{% endif %}" href="{{ url_for('scanners_workspace', scanner_name='breakouts') }}">Breakout Scanner</a>
+  <a class="tab {% if active_scanner == 'volume' %}is-active{% endif %}" href="{{ url_for('scanners_workspace', scanner_name='volume') }}">Volume</a>
+  <a class="tab {% if active_scanner == 'breakouts' %}is-active{% endif %}" href="{{ url_for('scanners_workspace', scanner_name='breakouts') }}">Breakouts</a>
+  <a class="tab {% if active_scanner == 'reversals' %}is-active{% endif %}" href="{{ url_for('scanners_workspace', scanner_name='reversals') }}">Reversals</a>
   <a class="tab {% if active_scanner == 'extended-hours' %}is-active{% endif %}" href="{{ url_for('scanners_workspace', scanner_name='extended-hours') }}">Extended Hours</a>
   <a class="tab {% if active_scanner == 'futures' %}is-active{% endif %}" href="{{ url_for('scanners_workspace', scanner_name='futures') }}">Futures</a>
-  <a class="tab {% if active_scanner == 'watchlist' %}is-active{% endif %}" href="{{ url_for('scanners_workspace', scanner_name='watchlist') }}">Watchlist Scanner</a>
+  <a class="tab {% if active_scanner == 'sector-rotation' %}is-active{% endif %}" href="{{ url_for('scanners_workspace', scanner_name='sector-rotation') }}">Sector Rotation</a>
+  <a class="tab {% if active_scanner == 'watchlist' %}is-active{% endif %}" href="{{ url_for('scanners_workspace', scanner_name='watchlist') }}">Watchlist</a>
   <a class="tab {% if active_scanner == 'upcoming' %}is-active{% endif %}" href="{{ url_for('scanners_workspace', scanner_name='upcoming') }}">Upcoming Opportunities</a>
 </section>
 

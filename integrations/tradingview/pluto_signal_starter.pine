@@ -1,0 +1,26 @@
+//@version=5
+indicator("Pluto Signal Starter", overlay=true)
+
+// Transparent starter logic for integration testing only.
+fastLen = input.int(9, "Fast EMA", minval=2)
+slowLen = input.int(21, "Slow EMA", minval=3)
+
+emaFast = ta.ema(close, fastLen)
+emaSlow = ta.ema(close, slowLen)
+
+longSignal = ta.crossover(emaFast, emaSlow)
+shortSignal = ta.crossunder(emaFast, emaSlow)
+exitSignal = ta.cross(close, emaSlow)
+
+plot(emaFast, color=color.new(color.green, 0), title="EMA Fast")
+plot(emaSlow, color=color.new(color.orange, 0), title="EMA Slow")
+
+plotshape(longSignal, title="LONG", style=shape.triangleup, color=color.new(color.green, 0), location=location.belowbar, size=size.tiny, text="LONG")
+plotshape(shortSignal, title="SHORT", style=shape.triangledown, color=color.new(color.red, 0), location=location.abovebar, size=size.tiny, text="SHORT")
+plotshape(exitSignal, title="EXIT", style=shape.circle, color=color.new(color.blue, 0), location=location.belowbar, size=size.tiny, text="EXIT")
+
+alertcondition(longSignal, title="Pluto LONG", message='{"token":"PASTE_WEBHOOK_SECRET_IN_ALERT_DIALOG","signal_id":"{{ticker}}-{{interval}}-{{time}}-pluto-starter-long","symbol":"{{ticker}}","exchange":"{{exchange}}","strategy":"pluto-starter-ema-v1","direction":"LONG","timeframe":"{{interval}}","price":{{close}},"bar_time":"{{time}}"}')
+alertcondition(shortSignal, title="Pluto SHORT", message='{"token":"PASTE_WEBHOOK_SECRET_IN_ALERT_DIALOG","signal_id":"{{ticker}}-{{interval}}-{{time}}-pluto-starter-short","symbol":"{{ticker}}","exchange":"{{exchange}}","strategy":"pluto-starter-ema-v1","direction":"SHORT","timeframe":"{{interval}}","price":{{close}},"bar_time":"{{time}}"}')
+alertcondition(exitSignal, title="Pluto EXIT", message='{"token":"PASTE_WEBHOOK_SECRET_IN_ALERT_DIALOG","signal_id":"{{ticker}}-{{interval}}-{{time}}-pluto-starter-exit","symbol":"{{ticker}}","exchange":"{{exchange}}","strategy":"pluto-starter-ema-v1","direction":"EXIT","timeframe":"{{interval}}","price":{{close}},"bar_time":"{{time}}"}')
+
+// This script is a starter for integration validation and does not claim profitability.

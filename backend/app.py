@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import os
 import secrets
+import sys
+import threading
 from datetime import datetime, timezone
+import logging
+import time
 from typing import Any, Dict, List
 from datetime import timedelta
 
-from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, jsonify, redirect, render_template, request, session, url_for, g
 try:
     from flask_socketio import SocketIO
 except Exception:  # pragma: no cover - fallback for environments without optional dependency
@@ -29,7 +33,6 @@ except Exception:  # pragma: no cover - fallback for environments without option
 from backend.services.auth_service import authenticate_user, normalize_username, register_user, user_namespace
 from backend.brains.registry import BrainRegistry
 from backend.scanner.registry import ScannerRegistry
-from backend.scanner.market_scanner import SCAN_LIST
 from backend.services.market_data_service import (
     build_api_response,
     get_chart_data,
@@ -47,6 +50,12 @@ from backend.services.mission_assignment_service import (
 )
 from backend.services.mission_refresh_worker import MissionRefreshWorker
 from backend.services.live_market_stream import MarketStreamService
+from backend.services.paper_engine import InternalPaperEngine, OrderMonitorWorker, RETRYABLE_REJECTIONS
+from backend.services.storage import StorageCorruptionError
+from backend.services.market_scanner_engine import MarketScannerEngine
+from backend.services.research_service import ResearchService
+from backend.services.symbol_universe_service import SymbolUniverseService
+from backend.services.tradingview_signals import TradingViewSignalService
 
 DEFAULT_TICKER = "SPY"
 
@@ -62,6 +71,19 @@ SCANNER_ROUTES = {
     "watchlist": "watchlist",
     "upcoming": "upcoming",
 }
+
+SCANNER_PAGE_ORDER = [
+    "overview",
+    "movers",
+    "volume",
+    "reversals",
+    "breakouts",
+    "extended-hours",
+    "futures",
+    "sector-rotation",
+    "watchlist",
+    "upcoming",
+]
 
 BRAIN_ROUTES = {
     "overview": "overview",
@@ -137,13 +159,72 @@ QUICK_ACTIONS = [
 
 FUTURES_SYMBOLS = ["ES=F", "NQ=F", "YM=F", "RTY=F", "CL=F", "GC=F"]
 
+_MARKET_STREAM_SINGLETON: MarketStreamService | None = None
+_MARKET_STREAM_SINGLETON_PID: int | None = None
+_MARKET_STREAM_LOCK = threading.Lock()
+_RELIABILITY_LOGGER = logging.getLogger("plutotrade.reliability")
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _is_truthy(value: str) -> bool:
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _is_test_runtime() -> bool:
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return True
+    if "pytest" in sys.modules:
+        return True
+    return False
+
+
 def _is_admin_mode() -> bool:
     return os.getenv("PLUTO_ADMIN_MODE", "false").lower() in {"1", "true", "yes", "on"}
+
+
+def _is_api_request() -> bool:
+    return request.path.startswith("/api/")
+
+
+def _json_error_response(code: int, message: str, error_kind: str = "UNAVAILABLE"):
+    payload = build_api_response(
+        False,
+        data={"error_kind": error_kind, "path": request.path},
+        error=message,
+        data_status="unavailable",
+        provider="PlutoTradeAI",
+    )
+    return jsonify(payload), code
+
+
+def _status_from_error_kind(error_kind: str) -> int:
+    mapping = {
+        "INVALID_TICKER": 400,
+        "UNSUPPORTED_SECURITY": 404,
+        "PROVIDER_OUTAGE": 503,
+        "TEMPORARY_TIMEOUT": 504,
+    }
+    return mapping.get(error_kind, 404)
+
+
+def _build_market_stream(socketio: SocketIO) -> MarketStreamService:
+    global _MARKET_STREAM_SINGLETON, _MARKET_STREAM_SINGLETON_PID
+
+    if _is_test_runtime():
+        return MarketStreamService(socketio=socketio)
+
+    with _MARKET_STREAM_LOCK:
+        current_pid = os.getpid()
+        if _MARKET_STREAM_SINGLETON is None or _MARKET_STREAM_SINGLETON_PID != current_pid:
+            _MARKET_STREAM_SINGLETON = MarketStreamService(socketio=socketio)
+            _MARKET_STREAM_SINGLETON_PID = current_pid
+        else:
+            _MARKET_STREAM_SINGLETON.bind_socketio(socketio)
+
+    return _MARKET_STREAM_SINGLETON
 
 
 def _is_authenticated() -> bool:
@@ -322,18 +403,162 @@ def _futures_analysis(ticker: str, brain_registry: BrainRegistry) -> Dict[str, A
 def create_app() -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     app.config["SECRET_KEY"] = os.getenv("PLUTO_SECRET_KEY") or secrets.token_hex(32)
+    app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("PLUTO_MAX_REQUEST_BYTES", str(256 * 1024)))
+    if not os.getenv("PLUTO_SECRET_KEY") and not _is_test_runtime():
+        _RELIABILITY_LOGGER.warning("PLUTO_SECRET_KEY is not set: a random key is used, so logins are lost on every restart and differ per worker")
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = os.getenv("PLUTO_SESSION_SAMESITE", "Lax")
     app.config["SESSION_COOKIE_SECURE"] = os.getenv("PLUTO_SESSION_SECURE", "false").lower() in {"1", "true", "yes", "on"}
     app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=int(os.getenv("PLUTO_SESSION_DAYS", "7")))
 
-    scanner_registry = ScannerRegistry()
     brain_registry = BrainRegistry()
+    paper_engine = InternalPaperEngine()
+    universe_service = SymbolUniverseService()
+    research_service = ResearchService(universe_service, brain_registry)
+    scanner_engine = MarketScannerEngine(universe_service, research_service)
+
+    def _analyze_tradingview_signal(signal: Dict[str, Any]) -> Dict[str, Any]:
+        ticker = normalize_ticker(signal.get("symbol") or "")
+        snapshot = get_stock_snapshot(ticker)
+        overview = brain_registry.run_overview(ticker)
+        trend = brain_registry.run("trend", ticker)
+        confidence = brain_registry.run("confidence", ticker)
+        risk = brain_registry.run("risk", ticker)
+
+        snapshot_data = snapshot.get("data", {}) if snapshot.get("success") else {}
+        overview_data = overview.get("data", {}) if overview.get("success") else {}
+        trend_data = trend.get("data", {}) if trend.get("success") else {}
+        confidence_data = confidence.get("data", {}) if confidence.get("success") else {}
+        risk_data = risk.get("data", {}) if risk.get("success") else {}
+
+        data_freshness = (snapshot_data.get("market_data_status") or snapshot.get("data_status") or "UNAVAILABLE").upper()
+        direction_hint = trend_data.get("trend")
+        if direction_hint == "Uptrend":
+            market_direction = "BULLISH"
+        elif direction_hint == "Downtrend":
+            market_direction = "BEARISH"
+        else:
+            market_direction = "NEUTRAL"
+
+        recommended_entry = overview_data.get("entry_zone")
+        signal_price = signal.get("price")
+        entry_zone = recommended_entry if recommended_entry is not None else signal_price
+
+        stop_loss = signal.get("stop_loss")
+        if stop_loss is None:
+            stop_loss = overview_data.get("stop_invalidation")
+
+        targets = overview_data.get("targets") if isinstance(overview_data.get("targets"), list) else []
+        primary_target = signal.get("take_profit") if signal.get("take_profit") is not None else (targets[0] if targets else None)
+        secondary_target = targets[1] if len(targets) > 1 else None
+
+        warning_flags: List[str] = []
+        if data_freshness in {"STALE", "UNAVAILABLE"}:
+            warning_flags.append("BACKEND_DATA_NOT_FRESH")
+        if not snapshot.get("success"):
+            warning_flags.append("SNAPSHOT_UNAVAILABLE")
+        if not overview.get("success"):
+            warning_flags.append("OVERVIEW_ANALYSIS_UNAVAILABLE")
+
+        return {
+            "market_direction": market_direction,
+            "confidence_score": confidence_data.get("overall") or overview_data.get("confidence"),
+            "entry_zone": entry_zone,
+            "stop_loss": stop_loss,
+            "primary_target": primary_target,
+            "secondary_target": secondary_target,
+            "risk_reward_ratio": risk_data.get("risk_reward_ratio") or overview_data.get("risk_score"),
+            "invalidation_condition": stop_loss,
+            "timeframe": signal.get("timeframe"),
+            "rationale": overview_data.get("trade_thesis") or overview_data.get("recommended_strategy") or "Analysis available with limited context",
+            "warning_flags": warning_flags,
+            "warnings": warning_flags,
+            "data_freshness": data_freshness,
+            "data_source": {
+                "chart_provider": os.getenv("PLUTO_CHART_PROVIDER", "tradingview"),
+                "backend_market_provider": os.getenv("PLUTO_MARKET_PROVIDER", "yfinance"),
+                "signal_source": "TRADINGVIEW",
+            },
+        }
+
+    signal_service = TradingViewSignalService(analyzer=_analyze_tradingview_signal)
+
+    @app.before_request
+    def _capture_request_start():
+        g.request_started_at = time.perf_counter()
+
+    @app.after_request
+    def _log_failed_api_response(response):
+        if not _is_api_request():
+            return response
+
+        elapsed_ms = None
+        started = getattr(g, "request_started_at", None)
+        if started is not None:
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+
+        if response.status_code >= 400:
+            ticker = request.view_args.get("ticker") if isinstance(request.view_args, dict) else None
+            symbol = request.view_args.get("symbol") if isinstance(request.view_args, dict) else None
+            _RELIABILITY_LOGGER.warning(
+                "api_failure endpoint=%s status=%s ticker=%s symbol=%s provider=%s latency_ms=%s timestamp=%s",
+                request.path,
+                response.status_code,
+                ticker,
+                symbol,
+                response.headers.get("X-Provider", "PlutoTradeAI"),
+                elapsed_ms,
+                _utc_now_iso(),
+            )
+        return response
+
     worker = None
+    order_monitor_worker = None
     socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
-    market_stream = MarketStreamService(socketio=socketio)
-    if not os.getenv("PYTEST_CURRENT_TEST"):
+    market_stream = _build_market_stream(socketio)
+    signal_sync_processing = _is_test_runtime() or _is_truthy(os.getenv("PLUTO_SIGNAL_SYNC_PROCESSING", "false"))
+    if not _is_test_runtime() and os.getenv("PLUTO_DISABLE_MARKET_STREAM", "false").lower() not in {"1", "true", "yes", "on"}:
         market_stream.start()
+    if not signal_sync_processing:
+        signal_service.start_worker()
+
+    def _recover_interrupted_work() -> None:
+        """After a restart: re-queue signals whose analysis never finished and settle approvals
+        that were claimed but whose execution outcome was never recorded."""
+        try:
+            recovered = signal_service.recover_pending(process_inline=signal_sync_processing)
+            if recovered:
+                _RELIABILITY_LOGGER.warning("recovered %s signal(s) awaiting analysis: %s", len(recovered), ", ".join(recovered[:10]))
+            now = datetime.now(timezone.utc)
+            for row in signal_service.list_signals(limit=500):
+                if row.get("status") != "APPROVED":
+                    continue
+                approved_at = (row.get("approval") or {}).get("timestamp")
+                try:
+                    age = (now - datetime.fromisoformat(str(approved_at))).total_seconds()
+                except (TypeError, ValueError):
+                    age = 3600.0
+                if age < 30:
+                    continue  # another process may still be executing this approval
+                lifecycle = paper_engine.lifecycle_for_signal(str(row.get("signal_id")))
+                if lifecycle:
+                    signal_service.finish_execution(str(row["signal_id"]), executed=True, message="", position=lifecycle)
+                else:
+                    signal_service.revert_interrupted_approval(str(row["signal_id"]), "approval was interrupted before execution; review and approve again")
+        except StorageCorruptionError as exc:
+            _RELIABILITY_LOGGER.critical("startup recovery skipped, state file is corrupted: %s", exc)
+        except Exception:  # noqa: BLE001 - recovery must never prevent the app from starting
+            _RELIABILITY_LOGGER.exception("startup recovery failed")
+
+    _recover_interrupted_work()
+
+    if not _is_test_runtime() and os.getenv("PLUTO_ENABLE_ORDER_MONITOR", "true").lower() in {"1", "true", "yes", "on"}:
+        order_monitor_worker = OrderMonitorWorker(
+            engine=paper_engine,
+            interval_seconds=int(os.getenv("PLUTO_ORDER_MONITOR_INTERVAL_SECONDS", "45")),
+        )
+        if os.getenv("PLUTO_ROLE", "web").lower() == "web":
+            order_monitor_worker.start()
 
     @socketio.on("connect")
     def socket_connect():
@@ -466,6 +691,8 @@ def create_app() -> Flask:
 
     @app.post("/auth/register")
     def register_submit():
+        if not _is_truthy(os.getenv("PLUTO_ALLOW_REGISTRATION", "true")):
+            return render_template("error.html", code=403, title="Registration Closed", message="New accounts are disabled on this deployment."), 403
         username = request.form.get("username", "")
         password = request.form.get("password", "")
         confirm_password = request.form.get("confirm_password", "")
@@ -526,7 +753,7 @@ def create_app() -> Flask:
 
     @app.get("/portfolio")
     def portfolio_command():
-        return render_template("workspace_section.html", title="Portfolio Command", subtitle="Portfolio tools are in founder preview and remain research-only.")
+        return render_template("portfolio.html", ticker=DEFAULT_TICKER)
 
     @app.get("/account")
     def account_hub():
@@ -534,15 +761,15 @@ def create_app() -> Flask:
 
     @app.get("/portfolio/paper-trading")
     def paper_trading_workspace():
-        return render_template("workspace_section.html", title="Paper Trading", subtitle="Paper trading mode only. No live broker execution is enabled in founder preview.")
+        return render_template("paper_trading.html", ticker=DEFAULT_TICKER)
 
     @app.get("/portfolio/performance")
     def performance_workspace():
-        return render_template("workspace_section.html", title="Performance", subtitle="Performance analytics for mission outcomes and paper-only execution logs.")
+        return render_template("performance.html", ticker=DEFAULT_TICKER)
 
     @app.get("/opportunities/alerts")
     def alerts_workspace():
-        return render_template("workspace_section.html", title="Alerts", subtitle="Opportunity alerts and mission signal changes with research-only safeguards.")
+        return render_template("alerts.html", ticker=DEFAULT_TICKER)
 
     @app.get("/journal")
     def journal():
@@ -564,16 +791,16 @@ def create_app() -> Flask:
 
     @app.get("/scanners")
     def scanners_overview():
-        return render_template("scanners.html", active_scanner="overview", scanners=scanner_registry.list_scanners())
+        return render_template("scanners.html", active_scanner="overview", scanners=SCANNER_PAGE_ORDER)
 
     @app.get("/scanners/<scanner_name>")
     def scanners_workspace(scanner_name: str):
         normalized = scanner_name.lower()
         active_scanner = SCANNER_ROUTES.get(normalized)
         if not active_scanner:
-            return render_template("scanners.html", active_scanner="overview", scanners=scanner_registry.list_scanners()), 404
+            return render_template("scanners.html", active_scanner="overview", scanners=SCANNER_PAGE_ORDER), 404
 
-        return render_template("scanners.html", active_scanner=active_scanner, scanners=scanner_registry.list_scanners())
+        return render_template("scanners.html", active_scanner=active_scanner, scanners=SCANNER_PAGE_ORDER)
 
     @app.get("/brains")
     def brains_overview():
@@ -603,7 +830,11 @@ def create_app() -> Flask:
         return jsonify(
             {
                 "success": True,
-                "data": {"status": "ok", "deployment": "render-ready"},
+                "data": {
+                    "status": "ok" if paper_engine.storage_health()["ok"] else "degraded",
+                    "deployment": "render-ready",
+                    "paper_storage": paper_engine.storage_health(),
+                },
                 "error": None,
                 "timestamp": _utc_now_iso(),
                 "data_status": "live",
@@ -615,13 +846,231 @@ def create_app() -> Flask:
     def api_status():
         return api_health()
 
+    @app.get("/api/runtime/config")
+    def api_runtime_config():
+        universe_service.ensure_fresh()
+        payload = {
+            "signal_provider": os.getenv("PLUTO_SIGNAL_PROVIDER", "tradingview").upper(),
+            "chart_provider": os.getenv("PLUTO_CHART_PROVIDER", "tradingview").upper(),
+            "market_provider": os.getenv("PLUTO_MARKET_PROVIDER", "yfinance").upper(),
+            "paper_broker": os.getenv("PLUTO_PAPER_BROKER", "internal").upper(),
+            "execution_provider": os.getenv("PLUTO_EXECUTION_PROVIDER", "disabled").upper(),
+            "auto_paper_execution": paper_engine.auto_execution_enabled(),
+            "autonomy_enabled": paper_engine.autonomy_enabled(),
+            "order_monitor": paper_engine.monitor_status(),
+            "providers": research_service.provider_map(),
+            "symbol_universe": universe_service.status(),
+        }
+        return jsonify(build_api_response(True, data=payload, data_status="cached", provider="PlutoTradeAI"))
+
+    def _api_error(message: str, code: int, data: Dict[str, Any] | None = None):
+        return jsonify(build_api_response(False, error=message, data=data, data_status="unavailable", provider="PlutoTradeAI")), code
+
+    def _operator_name() -> str:
+        return _current_username() or "admin-mode"
+
+    def _require_operator():
+        """State-changing endpoints need a signed-in user (or admin mode); PLUTO_APPROVER_USERS narrows that further."""
+        if not _is_authenticated():
+            return _api_error("Authentication required", 401)
+        allowed = {normalize_username(name) for name in os.getenv("PLUTO_APPROVER_USERS", "").split(",") if name.strip()}
+        if allowed and not _is_admin_mode() and _current_username() not in allowed:
+            return _api_error("Your account is not permitted to approve or change paper trades", 403)
+        return None
+
+    def _json_object_body():
+        """Empty body -> {}; anything else must be a JSON object. Returns (body, error_response)."""
+        raw = request.get_data(cache=True)
+        if not raw or not raw.strip():
+            return {}, None
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return None, _api_error("Request body must be a JSON object", 400)
+        return body, None
+
+    def _text_field(body: Dict[str, Any], key: str, limit: int = 500):
+        value = body.get(key)
+        if value is None:
+            return None, None
+        if not isinstance(value, str) or len(value) > limit:
+            return None, _api_error(f"{key} must be a string of at most {limit} characters", 400)
+        return value.strip(), None
+
+    @app.post("/api/webhooks/tradingview")
+    def api_webhook_tradingview():
+        payload = request.get_json(silent=True)
+        if payload is None:
+            return jsonify(build_api_response(False, error="Malformed JSON payload", data_status="unavailable", provider="PlutoTradeAI")), 400
+
+        if not isinstance(payload, dict):
+            return jsonify(build_api_response(False, error="JSON payload must be an object", data_status="unavailable", provider="PlutoTradeAI")), 400
+
+        enriched = dict(payload)
+        enriched["_header_secret"] = request.headers.get("X-Pluto-Webhook-Secret", "")
+        ok, code, response = signal_service.normalize_and_store(enriched)
+        if not ok:
+            return jsonify(build_api_response(False, error=response.get("error", "Webhook rejected"), data=response, data_status="unavailable", provider="PlutoTradeAI")), code
+
+        signal_id = response.get("data", {}).get("signal_id")
+        if signal_sync_processing and signal_id:
+            signal_service.process_signal(signal_id)
+
+        return jsonify(build_api_response(True, data=response.get("data", {}), data_status="cached", provider="TradingViewWebhook")), code
+
+    @app.get("/api/signals")
+    def api_signals_list():
+        try:
+            limit = int(request.args.get("limit", "100"))
+        except ValueError:
+            limit = 100
+        rows = signal_service.list_signals(limit=limit)
+        return jsonify(build_api_response(True, data={"signals": rows}, data_status="cached", provider="PlutoTradeAI"))
+
+    @app.get("/api/signals/<signal_id>")
+    def api_signal_detail(signal_id: str):
+        row = signal_service.get_signal(signal_id)
+        if not row:
+            return jsonify(build_api_response(False, error="Signal not found", data_status="unavailable", provider="PlutoTradeAI")), 404
+        return jsonify(build_api_response(True, data=row, data_status="cached", provider="PlutoTradeAI"))
+
+    @app.post("/api/signals/<signal_id>/approve")
+    def api_signal_approve(signal_id: str):
+        denied = _require_operator()
+        if denied:
+            return denied
+        body, error = _json_object_body()
+        if error:
+            return error
+        note, error = _text_field(body, "note")
+        if error:
+            return error
+        if body.get("acknowledge_stale") not in (None, True, False):
+            return _api_error("acknowledge_stale must be true or false", 400)
+        approver = _operator_name()
+
+        outcome, row, message = signal_service.begin_approval(signal_id, approver, note, acknowledge_stale=body.get("acknowledge_stale") is True)
+        if outcome == "NOT_FOUND":
+            return _api_error(message, 404)
+        if outcome == "ALREADY_EXECUTED":
+            return jsonify(build_api_response(True, data={"signal": row, "paper_position": (row or {}).get("paper_position"), "message": message, "idempotent": True}, data_status="cached", provider="PlutoTradeAI"))
+        if outcome == "STALE_DATA":
+            return _api_error(message, 409, {"code": "STALE_DATA", "signal_id": signal_id})
+        if outcome in {"NOT_READY", "CONFLICT", "EXPIRED"}:
+            return _api_error(message, 409, {"code": outcome, "signal_id": signal_id})
+
+        try:
+            executed, message, position = paper_engine.execute_approved_signal(row, approved_by=approver, validate_market=True)
+        except Exception as exc:  # noqa: BLE001 - never leave a claimed approval dangling on an unexpected failure
+            _RELIABILITY_LOGGER.exception("approval execution failed for %s", signal_id)
+            signal_service.finish_execution(signal_id, executed=False, message=f"execution error: {type(exc).__name__}", retryable=True)
+            status = 503 if isinstance(exc, StorageCorruptionError) else 500
+            return _api_error("Execution failed unexpectedly; the approval was released, check the ledger before retrying", status, {"signal_id": signal_id})
+
+        if not executed:
+            retryable = message in RETRYABLE_REJECTIONS
+            signal_service.finish_execution(signal_id, executed=False, message=message, retryable=retryable)
+            return _api_error(message, 422, {"signal_id": signal_id, "retryable": retryable})
+
+        executed_row = signal_service.finish_execution(signal_id, executed=True, message=message, position=position)
+        return jsonify(build_api_response(True, data={"signal": executed_row, "paper_position": position, "message": message}, data_status="cached", provider="PlutoTradeAI"))
+
+    @app.post("/api/signals/<signal_id>/decline")
+    def api_signal_decline(signal_id: str):
+        denied = _require_operator()
+        if denied:
+            return denied
+        body, error = _json_object_body()
+        if error:
+            return error
+        reason, error = _text_field(body, "reason")
+        if error:
+            return error
+        if reason is None:
+            reason, error = _text_field(body, "note")
+            if error:
+                return error
+        outcome, row, message = signal_service.decline(signal_id, _operator_name(), reason or "No rationale provided")
+        if outcome == "NOT_FOUND":
+            return _api_error(message, 404)
+        if outcome == "CONFLICT":
+            return _api_error(message, 409, {"code": "CONFLICT", "signal_id": signal_id})
+        return jsonify(build_api_response(True, data={"signal": row, "message": message, "idempotent": outcome == "ALREADY_DECLINED"}, data_status="cached", provider="PlutoTradeAI"))
+
+    @app.get("/api/paper/account")
+    def api_paper_account():
+        return jsonify(build_api_response(True, data=paper_engine.account(), data_status="cached", provider="PlutoTradeInternal"))
+
+    @app.get("/api/paper/positions")
+    def api_paper_positions():
+        return jsonify(build_api_response(True, data={"positions": paper_engine.positions()}, data_status="cached", provider="PlutoTradeInternal"))
+
+    @app.get("/api/paper/trades")
+    def api_paper_trades():
+        return jsonify(build_api_response(True, data={"trades": paper_engine.trades()}, data_status="cached", provider="PlutoTradeInternal"))
+
+    @app.get("/api/paper/alerts")
+    def api_paper_alerts():
+        return jsonify(build_api_response(True, data={"alerts": paper_engine.alerts()}, data_status="cached", provider="PlutoTradeInternal"))
+
+    @app.post("/api/paper/alerts/<alert_id>/dismiss")
+    def api_paper_alert_dismiss(alert_id: str):
+        denied = _require_operator()
+        if denied:
+            return denied
+        if not paper_engine.dismiss_alert(alert_id):
+            return jsonify(build_api_response(False, error="Alert not found", data_status="unavailable", provider="PlutoTradeInternal")), 404
+        return jsonify(build_api_response(True, data={"alert_id": alert_id, "dismissed": True}, data_status="cached", provider="PlutoTradeInternal"))
+
+    @app.post("/api/paper/alerts/<alert_id>/resolve")
+    def api_paper_alert_resolve(alert_id: str):
+        denied = _require_operator()
+        if denied:
+            return denied
+        body, error = _json_object_body()
+        if error:
+            return error
+        note, error = _text_field(body, "note")
+        if error:
+            return error
+        if not paper_engine.resolve_alert(alert_id, resolved_by=_operator_name(), note=note or ""):
+            return jsonify(build_api_response(False, error="Alert not found or already resolved", data_status="unavailable", provider="PlutoTradeInternal")), 404
+        return jsonify(build_api_response(True, data={"alert_id": alert_id, "resolved": True, "monitor": paper_engine.monitor_status()}, data_status="cached", provider="PlutoTradeInternal"))
+
+    @app.get("/api/paper/monitor")
+    def api_paper_monitor_status():
+        return jsonify(build_api_response(True, data=paper_engine.monitor_status(), data_status="cached", provider="PlutoTradeInternal"))
+
+    @app.post("/api/paper/monitor/run")
+    def api_paper_monitor_run():
+        expected = (os.getenv("PLUTO_MONITOR_TRIGGER_TOKEN", "")).strip()
+        provided = (request.headers.get("X-Pluto-Monitor-Token") or "").strip()
+        if expected:
+            if not provided or not secrets.compare_digest(provided, expected):
+                return jsonify(build_api_response(False, error="Unauthorized monitor trigger", data_status="unavailable", provider="PlutoTradeInternal")), 401
+        elif not _is_authenticated():
+            return jsonify(build_api_response(False, error="Authentication required", data_status="unavailable", provider="PlutoTradeInternal")), 401
+        result = paper_engine.monitor_once()
+        return jsonify(build_api_response(True, data=result, data_status="live", provider="PlutoTradeInternal"))
+
+    @app.get("/api/paper/performance")
+    def api_paper_performance():
+        return jsonify(build_api_response(True, data=paper_engine.performance(), data_status="cached", provider="PlutoTradeInternal"))
+
     @app.get("/api/market/status")
     def api_market_status():
         status = market_stream.connection_status()
+        universe_service.ensure_fresh()
+        scanner_snapshot = scanner_engine.snapshot(force=False)
+        data = {
+            **status,
+            "providers": research_service.provider_map(),
+            "symbol_universe": universe_service.status(),
+            "scanner_snapshot": scanner_snapshot.get("data", {}).get("freshness", {}),
+        }
         return jsonify(
             {
                 "success": True,
-                "data": status,
+                "data": data,
                 "error": None,
                 "timestamp": _utc_now_iso(),
                 "data_status": status.get("state", "unavailable"),
@@ -645,26 +1094,23 @@ def create_app() -> Flask:
 
     @app.get("/api/validate-symbol/<ticker>")
     def api_validate_symbol(ticker: str):
-        normalized = normalize_ticker(ticker)
-        is_valid, error = validate_ticker(normalized)
-        if not is_valid:
-            return jsonify(build_api_response(False, error=error, data_status="unavailable")), 400
+        resolved = research_service.resolve_symbol(ticker)
+        if not resolved.get("success"):
+            return jsonify(resolved), 404
 
-        snapshot = get_stock_snapshot(normalized)
-        if not snapshot.get("success"):
-            return jsonify(snapshot), 404
-
-        data = snapshot["data"]
+        data = resolved.get("data", {}).get("identity", {})
+        quote = research_service.quote(ticker)
+        quote_data = quote.get("data", {}) if quote.get("success") else {}
         preview = {
-            "ticker": data.get("ticker"),
-            "company_name": data.get("company") or data.get("ticker"),
-            "current_price": data.get("current_price"),
-            "asset_type": data.get("asset_type") or "Stock",
-            "market_status": data.get("session_status") or "unavailable",
-            "data_source": snapshot.get("provider"),
-            "last_updated": data.get("last_updated"),
+            "ticker": data.get("symbol"),
+            "company_name": data.get("name") or data.get("symbol"),
+            "current_price": quote_data.get("price"),
+            "asset_type": data.get("asset_type") or "stock",
+            "market_status": quote_data.get("freshness", {}).get("status") or "unavailable",
+            "data_source": quote.get("provider") or resolved.get("provider"),
+            "last_updated": quote_data.get("freshness", {}).get("last_updated"),
         }
-        return jsonify(build_api_response(True, data=preview, data_status=snapshot.get("data_status", "unavailable"))), 200
+        return jsonify(build_api_response(True, data=preview, data_status=quote.get("data_status", resolved.get("data_status", "unavailable")))), 200
 
     @app.get("/api/stock/<ticker>")
     def api_stock(ticker: str):
@@ -682,10 +1128,86 @@ def create_app() -> Flask:
     @app.get("/api/tickers/suggest")
     def api_ticker_suggest():
         query = normalize_ticker(request.args.get("q", ""))
-        candidates = sorted(set(SCAN_LIST + FUTURES_SYMBOLS + ["SPY", "QQQ", "IWM", "DIA", "XLF", "XLK", "XLE"]))
-        if query:
-            candidates = [item for item in candidates if item.startswith(query)]
-        return jsonify(build_api_response(True, data={"items": candidates[:20]}, data_status="cached", provider="PlutoTradeAI"))
+        universe_service.ensure_fresh()
+        matches = universe_service.search(query, limit=20)
+        candidates = [row.get("symbol") for row in matches if row.get("symbol")]
+        return jsonify(build_api_response(True, data={"items": candidates}, data_status="cached", provider="PlutoTradeAI"))
+
+    @app.get("/api/symbols/search")
+    def api_symbols_search():
+        query = request.args.get("q", "")
+        universe_service.ensure_fresh()
+        matches = universe_service.search(query, limit=25)
+        return jsonify(build_api_response(True, data={"query": query, "items": matches}, data_status="cached", provider="NasdaqTraderDirectory"))
+
+    @app.get("/api/stocks/<symbol>/resolve")
+    def api_stock_resolve(symbol: str):
+        response = research_service.resolve_symbol(symbol)
+        error_kind = response.get("data", {}).get("error_kind") if isinstance(response.get("data"), dict) else None
+        code = 200 if response.get("success") else _status_from_error_kind(str(error_kind or ""))
+        return jsonify(response), code
+
+    @app.get("/api/stocks/<symbol>/overview")
+    def api_stock_overview(symbol: str):
+        response = research_service.overview(symbol)
+        error_kind = response.get("data", {}).get("error_kind") if isinstance(response.get("data"), dict) else None
+        code = 200 if response.get("success") else _status_from_error_kind(str(error_kind or ""))
+        return jsonify(response), code
+
+    @app.get("/api/stocks/<symbol>/quote")
+    def api_stock_quote(symbol: str):
+        response = research_service.quote(symbol)
+        error_kind = response.get("data", {}).get("error_kind") if isinstance(response.get("data"), dict) else None
+        code = 200 if response.get("success") else _status_from_error_kind(str(error_kind or ""))
+        return jsonify(response), code
+
+    @app.get("/api/stocks/<symbol>/history")
+    def api_stock_history(symbol: str):
+        timeframe = request.args.get("timeframe", "3M")
+        response = research_service.history(symbol, timeframe=timeframe)
+        error_kind = response.get("data", {}).get("error_kind") if isinstance(response.get("data"), dict) else None
+        code = 200 if response.get("success") else _status_from_error_kind(str(error_kind or ""))
+        return jsonify(response), code
+
+    @app.get("/api/stocks/<symbol>/technicals")
+    def api_stock_technicals(symbol: str):
+        response = research_service.technicals(symbol)
+        error_kind = response.get("data", {}).get("error_kind") if isinstance(response.get("data"), dict) else None
+        code = 200 if response.get("success") else _status_from_error_kind(str(error_kind or ""))
+        return jsonify(response), code
+
+    @app.get("/api/stocks/<symbol>/analysis")
+    def api_stock_analysis(symbol: str):
+        response = research_service.analysis(symbol)
+        error_kind = response.get("data", {}).get("error_kind") if isinstance(response.get("data"), dict) else None
+        code = 200 if response.get("success") else _status_from_error_kind(str(error_kind or ""))
+        return jsonify(response), code
+
+    @app.get("/api/stocks/<symbol>/news")
+    def api_stock_news(symbol: str):
+        response = research_service.news(symbol)
+        error_kind = response.get("data", {}).get("error_kind") if isinstance(response.get("data"), dict) else None
+        code = 200 if response.get("success") else _status_from_error_kind(str(error_kind or ""))
+        return jsonify(response), code
+
+    @app.get("/api/market/movers")
+    def api_market_movers():
+        force = request.args.get("refresh", "").lower() in {"1", "true", "yes", "on"}
+        response = scanner_engine.movers(force=force)
+        return jsonify(response), 200
+
+    @app.get("/api/market/scanners")
+    def api_market_scanners():
+        force = request.args.get("refresh", "").lower() in {"1", "true", "yes", "on"}
+        response = scanner_engine.scanners(force=force)
+        return jsonify(response), 200
+
+    @app.get("/api/market/scanners/<scanner_name>")
+    def api_market_scanner_by_name(scanner_name: str):
+        force = request.args.get("refresh", "").lower() in {"1", "true", "yes", "on"}
+        response = scanner_engine.scanner_by_name(scanner_name, force=force)
+        code = 200 if response.get("success") else 404
+        return jsonify(response), code
 
     @app.get("/api/futures")
     def api_futures_overview():
@@ -717,7 +1239,50 @@ def create_app() -> Flask:
 
     @app.get("/api/scanners")
     def api_scanner_overview():
-        return jsonify(scanner_registry.run("overview"))
+        response = scanner_engine.scanners(force=False)
+        data = response.get("data", {})
+        raw_rows = data.get("scanners", {}).get("plutotrade_high_confidence", [])
+        rows = [
+            {
+                "ticker": item.get("symbol"),
+                "price": item.get("price"),
+                "percent_change": item.get("percent_change"),
+                "relative_volume": item.get("relative_volume"),
+                "scanner_score": item.get("confidence"),
+                "provider": response.get("provider", "PlutoScannerEngine"),
+                "timestamp": _utc_now_iso(),
+                "status": (item.get("freshness", {}) or {}).get("status"),
+                "age": (item.get("freshness", {}) or {}).get("age_seconds"),
+            }
+            for item in raw_rows
+        ]
+        top_gainers = data.get("scanners", {}).get("top_gainers", [])
+        breakouts = data.get("scanners", {}).get("breakout_candidates", [])
+        reversals = data.get("scanners", {}).get("reversal_candidates", [])
+        high_rvol = data.get("scanners", {}).get("unusual_relative_volume", [])
+        high_volatility = data.get("scanners", {}).get("high_volatility", [])
+        return jsonify(
+            {
+                "success": True,
+                "error": None,
+                "timestamp": _utc_now_iso(),
+                "data_status": response.get("data_status", "cached"),
+                "provider": response.get("provider", "PlutoScannerEngine"),
+                "data": {
+                    "scanner": "Overview",
+                    "rows": rows,
+                    "highest_confidence_setup": rows[0] if rows else None,
+                    "largest_mover": {"ticker": (top_gainers[0] or {}).get("symbol")} if top_gainers else None,
+                    "best_breakout_candidate": {"ticker": (breakouts[0] or {}).get("symbol")} if breakouts else None,
+                    "best_reversal_candidate": {"ticker": (reversals[0] or {}).get("symbol")} if reversals else None,
+                    "strongest_relative_volume": {"ticker": (high_rvol[0] or {}).get("symbol")} if high_rvol else None,
+                    "highest_risk_setup": {"ticker": (high_volatility[0] or {}).get("symbol")} if high_volatility else None,
+                    "data_health": "ok" if rows else "partial",
+                    "provider_status": data.get("freshness", {}).get("status", "UNAVAILABLE"),
+                    "last_scan_time": data.get("generated_at"),
+                },
+            }
+        )
 
     @app.get("/api/scanners/<scanner_name>")
     def api_scanner_by_name(scanner_name: str):
@@ -725,7 +1290,50 @@ def create_app() -> Flask:
         mapped = SCANNER_ROUTES.get(normalized)
         if not mapped:
             return jsonify({"success": False, "data": {}, "error": "Unknown scanner", "timestamp": _utc_now_iso()}), 404
-        return jsonify(scanner_registry.run(mapped))
+        alias_map = {
+            "movers": "top_gainers",
+            "volume": "unusual_relative_volume",
+            "reversals": "reversal_candidates",
+            "breakouts": "breakout_candidates",
+            "watchlist": "plutotrade_high_confidence",
+            "upcoming": "momentum_leaders",
+            "sector-rotation": "near_resistance",
+            "extended-hours": "most_active",
+            "futures": "high_volatility",
+            "overview": "plutotrade_high_confidence",
+        }
+        response = scanner_engine.scanner_by_name(alias_map.get(mapped, "plutotrade_high_confidence"), force=False)
+        if not response.get("success"):
+            return jsonify(response), 404
+        rows = response.get("data", {}).get("rows", [])
+        return jsonify(
+            {
+                "success": True,
+                "error": None,
+                "timestamp": _utc_now_iso(),
+                "data_status": response.get("data_status", "cached"),
+                "provider": response.get("provider", "PlutoScannerEngine"),
+                "data": {
+                    "scanner": mapped,
+                    "rows": [
+                        {
+                            "ticker": item.get("symbol"),
+                            "price": item.get("price"),
+                            "percent_change": item.get("percent_change"),
+                            "relative_volume": item.get("relative_volume"),
+                            "scanner_score": item.get("confidence"),
+                            "provider": response.get("provider", "PlutoScannerEngine"),
+                            "timestamp": _utc_now_iso(),
+                            "status": (item.get("freshness", {}) or {}).get("status"),
+                            "age": (item.get("freshness", {}) or {}).get("age_seconds"),
+                        }
+                        for item in rows
+                    ],
+                    "data_health": "ok" if rows else "partial",
+                    "last_scan_time": response.get("data", {}).get("generated_at"),
+                },
+            }
+        )
 
     @app.get("/api/brains/<ticker>")
     def api_brains_overview(ticker: str):
@@ -780,8 +1388,19 @@ def create_app() -> Flask:
 
     @app.post("/api/missions/assign")
     def api_assign_mission():
-        payload = request.get_json(silent=True) or {}
-        ticker = normalize_ticker(payload.get("ticker_symbol") or payload.get("ticker"))
+        payload = request.get_json(silent=True)
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            return jsonify(build_api_response(False, error="Request body must be a JSON object", data_status="unavailable")), 400
+        raw_ticker = payload.get("ticker_symbol") or payload.get("ticker")
+        if raw_ticker is not None and not isinstance(raw_ticker, str):
+            return jsonify(build_api_response(False, error="ticker must be a string", data_status="unavailable")), 400
+        for list_field in ("assigned_scanners", "assigned_brains", "monitoring_flags"):
+            value = payload.get(list_field, [])
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                return jsonify(build_api_response(False, error=f"{list_field} must be a list of strings", data_status="unavailable")), 400
+        ticker = normalize_ticker(raw_ticker)
 
         is_valid, error = validate_ticker(ticker)
         if not is_valid:
@@ -793,7 +1412,14 @@ def create_app() -> Flask:
 
         snapshot = snapshot_response.get("data", {})
         overview = brain_registry.run_overview(ticker)
-        scanner_overview = scanner_registry.run("overview")
+        scanner_snapshot = scanner_engine.scanners(force=False)
+        scanner_overview = {
+            "success": scanner_snapshot.get("success", False),
+            "data": {
+                "rows": scanner_snapshot.get("data", {}).get("scanners", {}).get("plutotrade_high_confidence", []),
+            },
+            "error": scanner_snapshot.get("error"),
+        }
 
         assigned_scanners = [item for item in payload.get("assigned_scanners", []) if item in SCANNER_ASSIGNMENTS]
         assigned_brains = [item for item in payload.get("assigned_brains", []) if item in BRAIN_ASSIGNMENTS]
@@ -891,22 +1517,64 @@ def create_app() -> Flask:
     if (
         os.getenv("PLUTO_ROLE", "web").lower() == "web"
         and os.getenv("PLUTO_ENABLE_WORKER", "true").lower() in {"1", "true", "yes", "on"}
-        and not os.getenv("PYTEST_CURRENT_TEST")
+        and not _is_test_runtime()
     ):
         worker = MissionRefreshWorker(interval_seconds=int(os.getenv("PLUTO_REFRESH_INTERVAL_SECONDS", "600")))
         worker.start()
 
+    @app.errorhandler(StorageCorruptionError)
+    def storage_corrupted(exc: StorageCorruptionError):
+        _RELIABILITY_LOGGER.critical("storage corruption: %s", exc)
+        if _is_api_request():
+            return _json_error_response(503, "A trading state file is corrupted; paper trading is paused until it is restored. See server logs.", error_kind="PROVIDER_OUTAGE")
+        return render_template("error.html", code=503, title="Trading State Unavailable", message="A state file is corrupted. Paper trading is paused until an operator restores it."), 503
+
+    @app.errorhandler(413)
+    def payload_too_large(_error):
+        if _is_api_request():
+            return _json_error_response(413, "Request body is too large", error_kind="INVALID_TICKER")
+        return render_template("error.html", code=413, title="Request Too Large", message="The request body was too large."), 413
+
     @app.errorhandler(404)
     def not_found(_error):
+        if _is_api_request():
+            return _json_error_response(404, "API route not found", error_kind="UNSUPPORTED_SECURITY")
         return render_template("error.html", code=404, title="Route Not Found", message="The requested route is unavailable in this preview."), 404
 
     @app.errorhandler(500)
     def internal_error(_error):
+        if _is_api_request():
+            return _json_error_response(500, "Internal API error", error_kind="PROVIDER_OUTAGE")
         return render_template("error.html", code=500, title="Server Error", message="PlutoTrade AI encountered an issue. Please retry shortly."), 500
+
+    @app.errorhandler(Exception)
+    def unhandled_error(exc: Exception):
+        if _is_api_request():
+            started = getattr(g, "request_started_at", None)
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 2) if started is not None else None
+            ticker = request.view_args.get("ticker") if isinstance(request.view_args, dict) else None
+            symbol = request.view_args.get("symbol") if isinstance(request.view_args, dict) else None
+            _RELIABILITY_LOGGER.exception(
+                "api_exception endpoint=%s ticker=%s symbol=%s status=500 exception=%s latency_ms=%s timestamp=%s",
+                request.path,
+                ticker,
+                symbol,
+                str(exc),
+                elapsed_ms,
+                _utc_now_iso(),
+            )
+            return _json_error_response(500, "Unhandled API exception", error_kind="PROVIDER_OUTAGE")
+        raise exc
 
     app.extensions["mission_refresh_worker"] = worker
     app.extensions["socketio"] = socketio
     app.extensions["market_stream_service"] = market_stream
+    app.extensions["signal_service"] = signal_service
+    app.extensions["paper_engine"] = paper_engine
+    app.extensions["order_monitor_worker"] = order_monitor_worker
+    app.extensions["research_service"] = research_service
+    app.extensions["symbol_universe_service"] = universe_service
+    app.extensions["scanner_engine"] = scanner_engine
 
     return app
 
