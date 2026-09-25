@@ -15,9 +15,14 @@ name: Autonomous scan scheduler
 # window runs 8:00am-4:00pm ET instead - still covers the full session, just
 # shifted. Not worth the complexity of a DST-aware schedule for a two-person
 # paper-trading app.
+# DISABLED 2026-09-24: the schedule is off. The Render Cron Job
+# (backend/trigger_autonomous_scan.py, see render.yaml) replaced this workflow
+# and calls the same cron-trigger endpoint, so this only generated
+# "run failed" emails. workflow_dispatch is kept so it can still be run by
+# hand; restore the schedule below to re-enable it.
+#   schedule:
+#     - cron: "*/5 13-21 * * 1-5"
 on:
-  schedule:
-    - cron: "*/5 13-21 * * 1-5"
   workflow_dispatch: {}
 
 jobs:
