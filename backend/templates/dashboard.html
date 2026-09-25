@@ -215,20 +215,6 @@
     </section>
 
     <aside class="right-systems">
-        <article class="glass-panel orbital-panel">
-            <div class="panel-head"><h3>AI Trade Navigation</h3><span>Orbital Core</span></div>
-            <div class="orbit-viz" aria-hidden="true">
-                <span class="orbit-ring ring-1"></span>
-                <span class="orbit-ring ring-2"></span>
-                <span class="orbit-ring ring-3"></span>
-                <span class="orbit-core"></span>
-                <span class="orbit-node n-top">Idea</span>
-                <span class="orbit-node n-right">Analyze</span>
-                <span class="orbit-node n-bottom">Confirm</span>
-                <span class="orbit-node n-left">Execute</span>
-            </div>
-            <p class="muted center-text">Our mission: high probability trades</p>
-        </article>
 
         <article class="glass-panel live-data-status-card">
             <div class="panel-head">
@@ -278,46 +264,6 @@
     </aside>
 </section>
 
-{% set top_setup = upcoming_opportunities[0] if upcoming_opportunities else None %}
-<section class="module-grid">
-    <article class="glass-panel module-card"><h4>Daily Mission Brief</h4><p>Auto-opens once each trading day, then mission alerts drive intraday updates.</p></article>
-    <article class="glass-panel module-card"><h4>Upcoming Opportunities</h4><p>{{ upcoming_opportunities|length }} strategy + chart-level setups currently queued.</p></article>
-    <article class="glass-panel module-card">
-        <h4>AI Trade Thesis</h4>
-        <p>
-            {% if top_setup %}
-                {{ top_setup.ticker }}: {{ top_setup.strategy }} ({{ top_setup.confidence }}% · {{ top_setup.bias }})
-            {% else %}
-                Neural status: {{ status_summary.neural_status.final_decision }}
-            {% endif %}
-        </p>
-    </article>
-    <article class="glass-panel module-card">
-        <h4>Options Suggestions</h4>
-        {% if top_setup %}
-            <p>{{ top_setup.ticker }} key levels → breakout {{ top_setup.breakout_level }} / breakdown {{ top_setup.breakdown_level }}</p>
-        {% else %}
-            <p>Top options ticker: {{ options_tickers[0] if options_tickers else "N/A" }}</p>
-        {% endif %}
-    </article>
-    <article class="glass-panel module-card"><h4>Early Trend Radar</h4><p>{{ trend_rows|length }} symbols under trend surveillance.</p></article>
-    <article class="glass-panel module-card"><h4>Support / Resistance</h4><p>{{ reversal_rows|length }} active level maps.</p></article>
-    <article class="glass-panel module-card"><h4>Risk Score</h4><p>{{ status_summary.risk_level }} with confidence {{ status_summary.ai_confidence }}.</p></article>
-    <article class="glass-panel module-card"><h4>News Sentiment</h4><p>{{ status_summary.market_sentiment }} bias from live stream intelligence.</p></article>
-    <article class="glass-panel module-card"><h4>Market Heat</h4><p>{{ scanner_rows|length }} instruments currently monitored.</p></article>
-    <article class="glass-panel module-card">
-        <h4>Mission Queue</h4>
-        {% if mission_queue %}
-            <p>{{ mission_queue[0].priority }} · {{ mission_queue[0].ticker }}: {{ mission_queue[0].reason }}</p>
-        {% else %}
-            <p>Mission queue will populate when strategy/chart confidence is high enough.</p>
-        {% endif %}
-    </article>
-    <article class="glass-panel module-card"><h4>Connected Accounts</h4><p>{{ status_summary.account_status }} across broker modules.</p></article>
-    <article class="glass-panel module-card"><h4>Paper Trading Status</h4><p>{{ "Connected" if status_summary.paper_connected else "Disconnected" }} in simulation stack.</p></article>
-    <article class="glass-panel module-card"><h4>Neural Core Status</h4><p>{{ status_summary.ai_status }} · {{ status_summary.ai_confidence }} confidence.</p></article>
-</section>
-
 <section class="panel">
     <div class="panel-head">
         <h3>Upcoming Opportunities</h3>
@@ -350,6 +296,8 @@
     </table>
 </section>
 
+<details class="more-detail">
+<summary>More detail <span>queue, autonomous status, efficiency, module summaries</span></summary>
 <section class="panel">
     <div class="panel-head"><h3>Mission Queue Priorities</h3><span>Auto-ranked</span></div>
     <div class="brief-list">
@@ -399,6 +347,48 @@
     </div>
 </section>
 
+{% set top_setup = upcoming_opportunities[0] if upcoming_opportunities else None %}
+<section class="module-grid">
+    <article class="glass-panel module-card"><h4>Daily Mission Brief</h4><p>Auto-opens once each trading day, then mission alerts drive intraday updates.</p></article>
+    <article class="glass-panel module-card"><h4>Upcoming Opportunities</h4><p>{{ upcoming_opportunities|length }} strategy + chart-level setups currently queued.</p></article>
+    <article class="glass-panel module-card">
+        <h4>AI Trade Thesis</h4>
+        <p>
+            {% if top_setup %}
+                {{ top_setup.ticker }}: {{ top_setup.strategy }} ({{ top_setup.confidence }}% · {{ top_setup.bias }})
+            {% else %}
+                Neural status: {{ status_summary.neural_status.final_decision }}
+            {% endif %}
+        </p>
+    </article>
+    <article class="glass-panel module-card">
+        <h4>Options Suggestions</h4>
+        {% if top_setup %}
+            <p>{{ top_setup.ticker }} key levels → breakout {{ top_setup.breakout_level }} / breakdown {{ top_setup.breakdown_level }}</p>
+        {% else %}
+            <p>Top options ticker: {{ options_tickers[0] if options_tickers else "N/A" }}</p>
+        {% endif %}
+    </article>
+    <article class="glass-panel module-card"><h4>Early Trend Radar</h4><p>{{ trend_rows|length }} symbols under trend surveillance.</p></article>
+    <article class="glass-panel module-card"><h4>Support / Resistance</h4><p>{{ reversal_rows|length }} active level maps.</p></article>
+    <article class="glass-panel module-card"><h4>Risk Score</h4><p>{{ status_summary.risk_level }} with confidence {{ status_summary.ai_confidence }}.</p></article>
+    <article class="glass-panel module-card"><h4>News Sentiment</h4><p>{{ status_summary.market_sentiment }} bias from live stream intelligence.</p></article>
+    <article class="glass-panel module-card"><h4>Market Heat</h4><p>{{ scanner_rows|length }} instruments currently monitored.</p></article>
+    <article class="glass-panel module-card">
+        <h4>Mission Queue</h4>
+        {% if mission_queue %}
+            <p>{{ mission_queue[0].priority }} · {{ mission_queue[0].ticker }}: {{ mission_queue[0].reason }}</p>
+        {% else %}
+            <p>Mission queue will populate when strategy/chart confidence is high enough.</p>
+        {% endif %}
+    </article>
+    <article class="glass-panel module-card"><h4>Connected Accounts</h4><p>{{ status_summary.account_status }} across broker modules.</p></article>
+    <article class="glass-panel module-card"><h4>Paper Trading Status</h4><p>{{ "Connected" if status_summary.paper_connected else "Disconnected" }} in simulation stack.</p></article>
+    <article class="glass-panel module-card"><h4>Neural Core Status</h4><p>{{ status_summary.ai_status }} · {{ status_summary.ai_confidence }} confidence.</p></article>
+</section>
+
+</details>
+
 <div class="mission-brief-overlay {% if not mission_brief_should_show %}dismissed{% endif %}" id="missionBriefOverlay">
     <article class="mission-brief-card">
         <div class="panel-head">
@@ -408,14 +398,18 @@
         <p class="eyebrow">Daily Mission Brief</p>
         <div class="brief-list">
             <div><span>Market Status</span><b>{{ status_summary.market_status }}</b></div>
-            <div><span>Premarket / Market / After Hours</span><b>{{ status_summary.market_phase }}</b></div>
             <div><span>Neural Core</span><b>{{ status_summary.ai_status }}</b></div>
-            <div><span>AI Confidence</span><b>{{ status_summary.ai_confidence }}</b></div>
             <div><span>System Health</span><b>{{ status_summary.system_health }}</b></div>
             <div><span>Scanner</span><b>{{ status_summary.scanner_status }}</b></div>
             <div><span>High-Priority Opportunities</span><b>{{ status_summary.opportunity_count }}</b></div>
-            <div><span>Reversal Candidates</span><b>{{ status_summary.reversal_count }}</b></div>
             <div><span>Paper Trading</span><b>{{ "Connected" if status_summary.paper_connected else "Disconnected" }}</b></div>
+        </div>
+        <details class="brief-more">
+            <summary>Full brief</summary>
+            <div class="brief-list">
+            <div><span>Premarket / Market / After Hours</span><b>{{ status_summary.market_phase }}</b></div>
+            <div><span>AI Confidence</span><b>{{ status_summary.ai_confidence }}</b></div>
+            <div><span>Reversal Candidates</span><b>{{ status_summary.reversal_count }}</b></div>
             <div><span>E*TRADE</span><b>{{ status_summary.broker_statuses.etrade.status }} (Approval Mode)</b></div>
             <div><span>Mission Queue</span><b>{{ mission_queue|length }} priorities</b></div>
             <div><span>Market Sentiment</span><b>{{ status_summary.market_sentiment }}</b></div>
@@ -426,7 +420,8 @@
             <div><span>Upcoming Breakout Levels</span><b>{{ upcoming_opportunities[0].breakout_level if upcoming_opportunities else 'n/a' }}</b></div>
             <div><span>Gap Watch</span><b>{{ upcoming_opportunities[0].extended_hours.gap_percent if upcoming_opportunities else 'n/a' }}%</b></div>
             <div><span>Extended Hours Summary</span><b>{{ upcoming_opportunities[0].extended_hours.extended_hours_trend if upcoming_opportunities else 'n/a' }}</b></div>
-        </div>
+            </div>
+        </details>
     </article>
 </div>
 {% endblock %}

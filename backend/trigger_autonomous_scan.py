@@ -62,6 +62,9 @@ import sys
 
 import requests
 
+from observability import cron_checkin, init_sentry
+
+CRON_SCHEDULE = "*/5 13-21 * * 1-5"  # keep identical to the schedule in render.yaml
 REQUEST_TIMEOUT_SECONDS = 120.0  # cron-trigger processes every registered user sequentially - generous on purpose
 
 
@@ -84,6 +87,7 @@ def _post(label: str, url: str, secret: str) -> bool:
 
 
 def main() -> int:
+    init_sentry("cron")
     cron_trigger_url = os.environ.get("CRON_TRIGGER_URL", "").strip()
     fast_monitor_url = os.environ.get("FAST_MONITOR_TRIGGER_URL", "").strip()
     secret = os.environ.get("CRON_SECRET", "").strip()
@@ -96,10 +100,13 @@ def main() -> int:
 
     # Attempt both regardless of the other's outcome - one endpoint being
     # down must not hide whether the other one is healthy.
+    check_in_id = cron_checkin("autonomous-scan-trigger", CRON_SCHEDULE, "in_progress")
     cron_trigger_ok = _post("cron-trigger", cron_trigger_url, secret)
     fast_monitor_ok = _post("fast-monitor-trigger", fast_monitor_url, secret)
 
-    return 0 if (cron_trigger_ok and fast_monitor_ok) else 1
+    succeeded = cron_trigger_ok and fast_monitor_ok
+    cron_checkin("autonomous-scan-trigger", CRON_SCHEDULE, "ok" if succeeded else "error", check_in_id)
+    return 0 if succeeded else 1
 
 
 if __name__ == "__main__":

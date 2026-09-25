@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}PlutoTrade AI{% endblock %}</title>
     <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/pluto-space.css">
     <link rel="manifest" href="/static/manifest.json">
     <link rel="icon" href="/static/icons/favicon-32.png" sizes="32x32">
     <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
@@ -192,22 +193,28 @@
         {% if fast_monitor_health and not fast_monitor_health.healthy %}
         <div class="ambiguous-freeze-banner admin-wide-freeze-banner" role="alert" id="fastMonitorUnhealthyBanner">
             <strong>Fast order monitor unhealthy.</strong>
-            {{ fast_monitor_health.reason }}. This monitor is what protects fills and detects exits between the
+            {{ fast_monitor_health.reason }}.
+            <details class="banner-more"><summary>Why this matters</summary>
+            This monitor is what protects fills and detects exits between the
             regular 5-minute scans platform-wide - while it is not running, positions still rely on the slower
             5-minute scan for protection and exit detection. This is visible only to administrators. Check the
             scheduler configuration for the fast-monitor-trigger endpoint. This banner clears automatically once a
             recent run is recorded.
+            </details>
         </div>
         {% endif %}
 
         {% if full_scan_health and not full_scan_health.healthy %}
         <div class="ambiguous-freeze-banner admin-wide-freeze-banner" role="alert" id="fullScanUnhealthyBanner">
             <strong>Full autonomous scan unhealthy.</strong>
-            {{ full_scan_health.reason }}. This is the scan that places new autonomous entries and resumes ordinary
+            {{ full_scan_health.reason }}.
+            <details class="banner-more"><summary>Why this matters</summary>
+            This is the scan that places new autonomous entries and resumes ordinary
             transitional orders when the faster monitor isn't configured - platform-wide, no accounts are getting
             new autonomous trades or their regular 5-minute reconciliation pass while this is stale. This is
             visible only to administrators. Check the scheduler configuration for the cron-trigger endpoint. This
             banner clears automatically once a recent run is recorded.
+            </details>
         </div>
         {% endif %}
 

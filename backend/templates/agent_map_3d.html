@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · Agent Map 3D{% endblock %}
+{% block head_extras %}
+<script type="importmap">{"imports": {"three": "/static/js/vendor/three.module.min.js"}}</script>
+<style>
+  .am3d-shell { position: relative; border: 1px solid var(--line, rgba(154,169,199,.24)); border-radius: 14px; overflow: hidden; background: radial-gradient(ellipse at 50% 40%, #1b1240 0%, #090614 62%, #04030c 100%); }
+  .am3d-canvas { width: 100%; height: clamp(420px, 68vh, 760px); display: block; touch-action: none; cursor: grab; outline: none; }
+  .am3d-canvas:active { cursor: grabbing; }
+  .am3d-canvas:focus-visible { outline: 2px solid #5ee7ff; outline-offset: -2px; }
+  .am3d-hud { position: absolute; left: 12px; top: 12px; display: grid; gap: 6px; max-width: min(360px, 70%); pointer-events: none; }
+  .am3d-hud > * { pointer-events: auto; }
+  .am3d-chip { background: rgba(10,7,26,.82); border: 1px solid rgba(139,92,255,.45); border-radius: 10px; padding: 7px 11px; font-size: 13px; line-height: 1.4; }
+  .am3d-chip b { letter-spacing: .04em; }
+  .am3d-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 7px; background: #7e78a8; vertical-align: middle; }
+  .am3d-dot.is-live { background: #37e39a; box-shadow: 0 0 8px #37e39a; }
+  .am3d-dot.is-bad { background: #ff6b7d; box-shadow: 0 0 8px #ff6b7d; }
+  .am3d-controls { position: absolute; right: 12px; top: 12px; display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+  .am3d-controls button, .am3d-controls a { background: rgba(10,7,26,.85); color: inherit; border: 1px solid rgba(139,92,255,.55); border-radius: 9px; padding: 8px 12px; font: inherit; font-size: 13px; cursor: pointer; text-decoration: none; min-height: 38px; display: inline-flex; align-items: center; }
+  .am3d-controls button[aria-pressed="true"] { background: rgba(139,92,255,.5); }
+  .am3d-tip { position: absolute; pointer-events: none; background: rgba(8,5,24,.96); border: 1px solid rgba(139,92,255,.6); border-radius: 10px; padding: 8px 11px; font-size: 13px; max-width: 280px; z-index: 5; transform: translate(12px, 12px); }
+  .am3d-tip small { display: block; color: #a9a3cf; margin-top: 3px; }
+  .am3d-legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 8px 16px; margin: 0; padding: 0; list-style: none; }
+  .am3d-legend li { display: flex; gap: 9px; align-items: baseline; font-size: 13.5px; }
+  .am3d-swatch { width: 11px; height: 11px; border-radius: 3px; flex: none; transform: translateY(1px); }
+  .am3d-feed { list-style: none; margin: 0; padding: 0; max-height: 240px; overflow: auto; display: grid; gap: 0; }
+  .am3d-feed li { display: grid; grid-template-columns: 62px 58px 1fr; gap: 10px; padding: 6px 0; border-top: 1px solid rgba(154,169,199,.16); font-size: 13px; }
+  .am3d-feed li:first-child { border-top: 0; }
+  .am3d-banner { border-radius: 10px; padding: 9px 12px; margin: 0 0 10px; font-size: 13.5px; border: 1px solid rgba(255,107,125,.7); background: rgba(255,107,125,.1); }
+  .am3d-fallback { padding: 26px; text-align: center; }
+</style>
+{% endblock %}
+{% block content %}
+<section class="panel">
+    <div class="panel-head">
+        <h3>Agent Map · 3D</h3>
+        <span>Live, this account</span>
+    </div>
+    <p class="muted">
+        Every engine PlutoTradeAI runs, orbiting the shared Memory hub. A node glows and sends pulses toward the hub only while
+        the signal it depends on is genuinely recent; dim nodes are idle or shadow-mode by design, not broken. Drag to rotate,
+        scroll or pinch to zoom, hover a node for details. Reporting only: nothing here changes a decision.
+    </p>
+    <div id="am3dBanner" class="am3d-banner" role="alert" hidden></div>
+    <div class="am3d-shell">
+        <canvas id="am3dCanvas" class="am3d-canvas" tabindex="0" aria-label="Interactive 3D map of the agent's engines around a central memory hub. A text list of the same engines follows below."></canvas>
+        <div class="am3d-hud">
+            <div class="am3d-chip" id="am3dStatus" role="status" aria-live="polite"><span class="am3d-dot"></span><b>Loading…</b></div>
+            <div class="am3d-chip" id="am3dMemory" hidden></div>
+        </div>
+        <div class="am3d-controls">
+            <button type="button" id="am3dRotate" aria-pressed="false">Auto-rotate</button>
+            <button type="button" id="am3dReset">Reset view</button>
+            <a href="/agent-map">2D view</a>
+        </div>
+        <div class="am3d-tip" id="am3dTip" hidden></div>
+        <div class="am3d-fallback" id="am3dFallback" hidden>3D graphics are not available in this browser. The list below shows the same live data, and the <a href="/agent-map">2D map</a> works everywhere.</div>
+    </div>
+</section>
+
+<div class="dashboard-grid">
+    <section class="panel">
+        <div class="panel-head"><h3>Engines</h3><span id="am3dCount"></span></div>
+        <ul class="am3d-legend" id="am3dLegend"></ul>
+        <p class="muted" id="am3dWindow"></p>
+    </section>
+    <section class="panel">
+        <div class="panel-head"><h3>Pulse feed</h3><span id="am3dUpdated">not updated yet</span></div>
+        <ul class="am3d-feed" id="am3dFeed"><li><span></span><span></span><span class="muted">Waiting for the first update…</span></li></ul>
+    </section>
+</div>
+{% endblock %}
+{% block page_scripts %}
+<script type="module" src="/static/js/agent_map_3d.js"></script>
+{% endblock %}

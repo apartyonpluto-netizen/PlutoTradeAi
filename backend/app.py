@@ -354,6 +354,12 @@ else:
         update_stock,
     )
 
+try:
+    from .observability import init_sentry
+except ImportError:
+    from observability import init_sentry
+
+init_sentry("web")
 app = Flask(__name__)
 setup_logging()
 logger = get_logger("app")
@@ -2900,23 +2906,10 @@ def _agent_map_feed_description(record: Dict[str, object]) -> str:
     return "Evaluated, no further detail recorded"
 
 
-@app.route("/agent-map")
-def agent_map_page() -> str:
-    """The in-app, LIVE counterpart to docs/AGENT_ARCHITECTURE.md and the
-    published Agent Map artifact - answers "is the memory layer actually
-    being fed" with this account's own real data, not a static diagram.
-    Built 2026-09-11 directly in response to being asked to see the map
-    "within the application" so the memory/real-outcomes work (see
-    research_log.py's signal_snapshot, calibration.py's real-outcomes
-    path, outcomes_analysis.py, and the validated_brains gate) is
-    continuously checkable, not just documented once and trusted.
-
-    include_opportunities=False/include_market_scan=False for the same
-    reason performance_page/daily_digest_page use them - this page only
-    reads this account's own recorded history, never live market data."""
-    user_id = _current_user_id()
-    context = _build_page_context(include_opportunities=False, include_market_scan=False)
-
+def _build_agent_map_data(user_id: str, context: Dict[str, object]) -> Dict[str, object]:
+    """Everything the 2D page, the 3D page and /api/agent-map show, computed once from this
+    account's own recorded history (never live market data). context supplies autonomy_status
+    (for validated_brains)."""
     # Newest first - list_research_decisions returns oldest-first append order.
     recent_records = list(reversed(list_research_decisions(user_id)))[:AGENT_MAP_RECENT_RECORDS]
     pulse_feed = []
@@ -3017,7 +3010,7 @@ def agent_map_page() -> str:
         node["x"] = round(hub_x + ellipse_rx * math.cos(angle), 1)
         node["y"] = round(hub_y + ellipse_ry * math.sin(angle), 1)
 
-    context["agent_map"] = {
+    return {
         "memory_feed_total": len(recent_records),
         "memory_feed_populated": signal_snapshot_populated_count,
         "calibration_status": calibration.get("status", "never_run"),
@@ -3036,7 +3029,60 @@ def agent_map_page() -> str:
         "hub_x": hub_x,
         "hub_y": hub_y,
     }
+
+
+@app.route("/agent-map")
+def agent_map_page() -> str:
+    """The in-app, LIVE counterpart to docs/AGENT_ARCHITECTURE.md and the
+    published Agent Map artifact - answers "is the memory layer actually
+    being fed" with this account's own real data, not a static diagram.
+    Built 2026-09-11 directly in response to being asked to see the map
+    "within the application" so the memory/real-outcomes work (see
+    research_log.py's signal_snapshot, calibration.py's real-outcomes
+    path, outcomes_analysis.py, and the validated_brains gate) is
+    continuously checkable, not just documented once and trusted.
+
+    include_opportunities=False/include_market_scan=False for the same
+    reason performance_page/daily_digest_page use them - this page only
+    reads this account's own recorded history, never live market data."""
+    user_id = _current_user_id()
+    context = _build_page_context(include_opportunities=False, include_market_scan=False)
+    context["agent_map"] = _build_agent_map_data(user_id, context)
     return render_template("agent_map.html", **context)
+
+
+@app.route("/agent-map/3d")
+def agent_map_3d_page() -> str:
+    """Same real data as /agent-map, rendered as an interactive 3D scene that refreshes itself
+    from /api/agent-map. Reporting only: nothing on it changes a decision."""
+    context = _build_page_context(include_opportunities=False, include_market_scan=False)
+    return render_template("agent_map_3d.html", **context)
+
+
+@app.route("/api/agent-map")
+def api_agent_map():
+    user_id = _current_user_id()
+    context = _build_page_context(include_opportunities=False, include_market_scan=False)
+    data = _build_agent_map_data(user_id, context)
+    lifecycle = data.get("lifecycle") or {}
+    return jsonify({
+        "success": True,
+        "generated_at": _now_utc().isoformat(),
+        "data": {
+            "nodes": [{k: node[k] for k in ("id", "label", "icon", "category", "detail", "active")} for node in data["pulse_nodes"]],
+            "feed": data["pulse_feed"],
+            "scan_is_active": data["scan_is_active"],
+            "most_recent_logged_at": data["most_recent_logged_at"],
+            "memory_feed_total": data["memory_feed_total"],
+            "memory_feed_populated": data["memory_feed_populated"],
+            "calibration_status": data["calibration_status"],
+            "closed_trades_since_last_real_recalibration": data["closed_trades_since_last_real_recalibration"],
+            "real_outcomes_recalibration_interval": data["real_outcomes_recalibration_interval"],
+            "activity_window_minutes": AGENT_MAP_ACTIVITY_WINDOW_MINUTES,
+            "calibration_window_hours": AGENT_MAP_CALIBRATION_WINDOW_HOURS,
+            "readiness": {key: lifecycle.get(key) for key in ("since_fixes_clean_count", "readiness_target_clean_trades", "total_closed_trades")},
+        },
+    })
 
 
 @app.route("/daily-digest")

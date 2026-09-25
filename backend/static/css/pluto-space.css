@@ -1,0 +1,105 @@
+/* Calm violet colorway (2026-09-25). Layered after style.css.
+   Same layout as before, just a quieter palette: soft indigo surfaces,
+   one violet accent, teal for "good". No glow, no starfield, no display
+   fonts. Only applies to the default theme; onyx / nebula are untouched. */
+
+:root:not([data-theme="onyx"]):not([data-theme="nebula"]) {
+    --bg-base: #0f1020;
+    --bg-elevated: #161832;
+    --bg-elevated-soft: #1b1d3a;
+    --bg-surface: #151730;
+    --text-primary: #eeeefa;
+    --text-secondary: #b3b4d2;
+    --text-muted: #8082a8;
+    --accent: #a394ff;
+    --accent-soft: rgba(163, 148, 255, 0.14);
+    --accent-primary: #a394ff;
+    --accent-primary-soft: rgba(163, 148, 255, 0.16);
+    --accent-magenta: #a394ff;
+    --accent-gold: #d2b47a;
+    --positive: #5fd4b8;
+    --caution: #e0bb6a;
+    --negative: #f08a94;
+    --border: rgba(163, 148, 255, 0.13);
+    --border-strong: rgba(163, 148, 255, 0.26);
+    --shadow-1: none;
+    --shadow-2: 0 8px 24px rgba(4, 4, 16, 0.4);
+    color-scheme: dark;
+}
+
+:root:not([data-theme="onyx"]):not([data-theme="nebula"]) body {
+    background: linear-gradient(180deg, #12132a 0%, #0f1020 320px) fixed;
+}
+
+/* ---- calm the chrome ---- */
+.sidebar { background: var(--bg-elevated); }
+.nav-menu a { border-radius: 10px; color: var(--text-secondary); }
+.nav-menu a:hover { background: var(--accent-soft); color: var(--text-primary); }
+.nav-menu a.active {
+    background: var(--accent-soft);
+    color: #fff;
+    border-color: transparent;
+    box-shadow: inset 3px 0 0 var(--accent);
+}
+.brand-badges { display: none; }
+.glass-panel, .panel, .metric-card { background: var(--bg-surface); box-shadow: none; }
+.panel-head h3 { font-weight: 600; }
+.view-link, .panel-head a { color: var(--accent); }
+.topbar-brand-tagline { display: none; }
+.topbar-avatar { background: var(--accent-soft) url("/static/img/astronaut.svg") center / 70% no-repeat; }
+
+/* ---- dashboard: one calm row instead of a cockpit ---- */
+.orbital-command-stage { min-height: 0; padding: 14px 18px; margin-bottom: 14px; }
+.orbital-command-grid { display: flex; align-items: center; justify-content: center; }
+.float-module, .core-atmosphere, .core-ring, .core-satellite { display: none; }
+.orbital-core-cinematic { min-height: 0; display: block; position: static; }
+.planetary-core {
+    width: auto; height: auto; min-width: 240px; padding: 14px 28px; border-radius: 12px;
+    display: flex; flex-direction: row; align-items: center; justify-content: center; gap: 14px;
+    background: var(--accent-soft); border: 1px solid var(--border-strong); cursor: pointer;
+    font: inherit; color: var(--text-primary);
+}
+.planetary-core:hover { background: rgba(163, 148, 255, 0.22); }
+.planetary-core small, .planetary-core p { display: inline; font-size: 0.72rem; letter-spacing: 0.04em; }
+.planetary-core h3 { margin: 0; font-size: 1.05rem; color: var(--accent); }
+.orbital-core-active .planetary-core { background: rgba(95, 212, 184, 0.14); border-color: rgba(95, 212, 184, 0.4); }
+.orbital-core-active .planetary-core h3 { color: var(--positive); }
+
+.mission-hero { display: none; }              /* duplicated the metric cards below */
+.module-grid { margin-top: 12px; }
+.mission-control-layout { grid-template-columns: minmax(0, 1fr) 320px; }
+
+.more-detail { margin: 16px 0; }
+.more-detail > summary {
+    cursor: pointer; padding: 12px 16px; border: 1px solid var(--border); border-radius: var(--radius-md);
+    background: var(--bg-surface); color: var(--text-primary); font-weight: 600; list-style: none;
+}
+.more-detail > summary::-webkit-details-marker { display: none; }
+.more-detail > summary::before { content: "+ "; color: var(--accent); }
+.more-detail[open] > summary::before { content: "\2212  "; }
+.more-detail > summary span { color: var(--text-muted); font-weight: 400; margin-left: 8px; font-size: 0.8rem; }
+.more-detail[open] > summary { margin-bottom: 14px; }
+
+@media (max-width: 1100px) { .mission-control-layout { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 560px) { .planetary-core { min-width: 0; width: 100%; } .more-detail > summary span { display: none; } }
+
+/* ---- mission brief popup: six lines up front, the rest one click away ---- */
+.brief-more { margin-top: 12px; }
+.brief-more > summary { cursor: pointer; color: var(--accent); font-size: 0.85rem; margin-bottom: 10px; }
+
+/* ---- topbar: search, two status chips, alerts, avatar. Nothing wraps. ---- */
+.topbar-with-alerts { grid-template-columns: auto minmax(160px, 1fr) auto auto auto auto; gap: 12px; }
+.topbar-with-alerts .topbar-brand { display: none; }   /* name already sits top-left in the sidebar */
+.topbar-with-alerts .top-chip { min-width: 0; }
+.pluto-tab-moon, .pluto-tab-ring { display: none; }
+.ticker-stream:has(.ticker-track:empty), .ticker-stream:has(.ticker-track:not(:has(*))) { display: none; }
+@media (max-width: 900px) {
+    .topbar-with-alerts { grid-template-columns: auto minmax(0, 1fr) auto auto; }
+    .topbar-with-alerts .top-chip { display: none; }
+}
+
+/* ---- admin health banners: headline first, the long explanation on click ---- */
+.banner-more { margin-top: 6px; }
+.banner-more > summary { cursor: pointer; color: var(--text-secondary); font-size: 0.82rem; }
+.ambiguous-freeze-banner { background: rgba(240, 138, 148, 0.09); border-color: rgba(240, 138, 148, 0.35); }
+.ambiguous-freeze-banner strong { color: var(--negative); }
