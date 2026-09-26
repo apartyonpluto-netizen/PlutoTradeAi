@@ -60,6 +60,10 @@ def scrub_event(event: Dict[str, Any], hint: Optional[Dict[str, Any]] = None) ->
     return event
 
 
+def is_active() -> bool:
+    return _initialised
+
+
 def init_sentry(service: str) -> bool:
     """Starts Sentry for `service` ("web" or "cron"). Returns True if it is active."""
     global _initialised

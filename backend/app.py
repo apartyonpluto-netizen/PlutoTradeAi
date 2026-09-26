@@ -93,6 +93,8 @@ if __package__:
     from .integrations.tradingview import get_tradingview_status, save_alert
     from .integrations import webull as webull_api
     from .integrations import alpaca_data
+    from .readiness import build_report as build_readiness_report
+    from .observability import is_active as observability_active
     from .integrations import market_data_aggregator
     from .autonomy.options_selector import select_option_contract
     from .webull_credentials import (
@@ -258,6 +260,8 @@ else:
     from integrations.tradingview import get_tradingview_status, save_alert
     from integrations import webull as webull_api
     from integrations import alpaca_data
+    from readiness import build_report as build_readiness_report
+    from observability import is_active as observability_active
     from integrations import market_data_aggregator
     from autonomy.options_selector import select_option_contract
     from webull_credentials import (
@@ -806,6 +810,31 @@ def admin_user_activity_page(user_id: str):
         }
     )
     return render_template("admin_user_activity.html", **context)
+
+
+@app.route("/api/admin/readiness")
+def api_admin_readiness():
+    """Admin-only "is this safe to run?" report - see readiness.py. Read-only: it never arms live
+    trading and never places an order. The market-data probe makes one small Alpaca request."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    user_id = _current_user_id()
+    try:
+        creds = get_webull_credentials(user_id)
+        webull_connected = bool(creds and creds.get("app_key") and creds.get("app_secret"))
+    except Exception:  # noqa: BLE001 - unreadable credentials just means "not connected" here
+        webull_connected = False
+    report = build_readiness_report(
+        fast_monitor=_fast_monitor_health_status(),
+        full_scan=_full_scan_health_status(),
+        continuous_monitor=_continuous_monitor_health_status(),
+        data_probe=alpaca_data.probe_latest_trade,
+        emergency_stop_enabled=bool(get_autonomy_status(user_id).get("emergency_stop_enabled")),
+        webull_connected=webull_connected,
+        sentry_active=observability_active(),
+    )
+    return _api_success(report)
 
 
 @app.route("/api/admin/approve-user", methods=["POST"])
@@ -3181,6 +3210,7 @@ def api_close_webull_position():
             quantity=quantity,
             limit_price=limit_price,
             trading_session=_current_webull_trading_session(),
+            opens_position=False,  # manual close reduces risk - never blocked by live dollar caps
         )
         entry["status"] = "placed"
         entry["webull_response"] = result
@@ -6252,6 +6282,7 @@ def _check_and_execute_target_exit(
             limit_price=exit_limit_price,
             trading_session=_current_webull_trading_session(),
             client_order_id=sell_client_order_id,
+            opens_position=False,  # target exit reduces risk - never blocked by live dollar caps
         )
     except Exception as error:  # noqa: BLE001
         restore_error = _restore_fallback_stop_after_failed_target_exit(user_id, creds, account_id, ticker, trading_day, entry, quantity)
@@ -7311,6 +7342,7 @@ def _check_and_execute_option_exit(
             quantity=contracts,
             limit_price=exit_limit_price,
             client_order_id=sell_client_order_id,
+            opens_position=False,  # option exit reduces risk - never blocked by live dollar caps
         )
     except Exception as error:  # noqa: BLE001 - placement failed outright; nothing was cancelled first (unlike equity), so no unprotected window to restore - just retry next pass
         raise RuntimeError(f"option exit sell order failed for {ticker} ({close_reason}): {error} - will retry next pass")

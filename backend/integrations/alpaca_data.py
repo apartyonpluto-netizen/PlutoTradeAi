@@ -283,3 +283,25 @@ def get_latest_trade_price(symbol: str) -> Optional[float]:
         return float(price) if price is not None else None
     except (ValueError, requests.exceptions.RequestException, TypeError):
         return None
+
+
+def probe_latest_trade(symbol: str = "SPY") -> float:
+    """Health-check variant of get_latest_trade_price: same request, but a failure raises with the
+    reason (missing keys, HTTP 401/403, no price) instead of returning None. Used only by the
+    readiness report, never on a trading path."""
+    if not is_configured():
+        raise RuntimeError("ALPACA_API_KEY_ID / ALPACA_API_SECRET_KEY are not set.")
+    response = requests.get(
+        _DATA_BASE_URL + _LATEST_TRADE_PATH_TEMPLATE.format(symbol=symbol),
+        headers=_credential_headers(),
+        params={"feed": _feed()},
+        timeout=10,
+    )
+    if response.status_code in (401, 403):
+        raise RuntimeError(f"Alpaca rejected the API keys (HTTP {response.status_code}). Regenerate them in Alpaca and update the environment.")
+    if response.status_code != 200:
+        raise RuntimeError(f"Alpaca returned HTTP {response.status_code}.")
+    price = (response.json().get("trade") or {}).get("p")
+    if price is None:
+        raise RuntimeError("Alpaca responded but included no trade price.")
+    return float(price)

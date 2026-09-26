@@ -588,7 +588,36 @@ def _classify_server_exception(error: "ServerException", action_label: str) -> E
     return AmbiguousOrderSubmission(f"Webull API error ({action_label}): {error}")
 
 
+def _live_limits():
+    try:
+        from .. import live_limits
+    except ImportError:
+        import live_limits
+    return live_limits
+
+
 def _place_order_with_retry(
+    trade_client, account_id: str, order: Dict[str, Any], action_label: str, place_method_name: str = "place_order",
+    opens_position: bool = False,
+) -> Dict[str, Any]:
+    """Applies the live dollar caps (only when live is armed and the order can open
+    or add to a position), then places it via _send_order_with_retry. Sandbox and
+    risk-reducing orders (exits, stops, take-profits) pass straight through."""
+    if not (opens_position and is_live_trading_armed()):
+        return _send_order_with_retry(trade_client, account_id, order, action_label, place_method_name)
+    limits = _live_limits()
+    try:
+        limits.reserve(order)
+    except limits.LiveLimitExceeded as error:
+        raise DefiniteOrderRejection(f"Live dollar cap: {error}") from error
+    try:
+        return _send_order_with_retry(trade_client, account_id, order, action_label, place_method_name)
+    except DefiniteOrderRejection:
+        limits.release(order)
+        raise
+
+
+def _send_order_with_retry(
     trade_client, account_id: str, order: Dict[str, Any], action_label: str, place_method_name: str = "place_order",
 ) -> Dict[str, Any]:
     """Places one order, retrying on rate-limiting, and treating a reused
@@ -1004,6 +1033,7 @@ def place_stock_order(
     limit_price: float,
     trading_session: str = "CORE",
     client_order_id: Optional[str] = None,
+    opens_position: bool = True,
 ) -> Dict[str, Any]:
     """Places a real DAY limit order (sandbox unless is_live_trading_armed -
     see _resolve_endpoint). trading_session must be CORE
@@ -1033,7 +1063,7 @@ def place_stock_order(
         "time_in_force": "DAY",
         "entrust_type": "QTY",
     }
-    return _place_order_with_retry(trade_client, account_id, order, "place order")
+    return _place_order_with_retry(trade_client, account_id, order, "place order", opens_position=opens_position)
 
 
 def place_stop_loss_order(
@@ -1234,6 +1264,7 @@ def place_option_order(
     limit_price: float,
     time_in_force: str = "DAY",
     client_order_id: Optional[str] = None,
+    opens_position: bool = True,
 ) -> Dict[str, Any]:
     """Places a real option order (sandbox unless is_live_trading_armed -
     see _resolve_endpoint). client_order_id should be
@@ -1246,7 +1277,10 @@ def place_option_order(
         symbol, option_type, strike_price, expiration_date, side, quantity,
         limit_price, time_in_force, client_order_id,
     )
-    return _place_order_with_retry(trade_client, account_id, order, "place option order", place_method_name="place_option")
+    return _place_order_with_retry(
+        trade_client, account_id, order, "place option order", place_method_name="place_option",
+        opens_position=opens_position,
+    )
 
 
 def cancel_option_order(app_key: str, app_secret: str, account_id: str, client_order_id: str) -> Dict[str, Any]:

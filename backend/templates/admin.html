@@ -1,6 +1,15 @@
 {% extends "base.html" %}
 {% block title %}PlutoTrade AI · Admin{% endblock %}
 {% block content %}
+<section class="panel" id="readinessPanel">
+    <div class="panel-head">
+        <h3>Readiness</h3>
+        <button class="ghost-button" type="button" id="readinessRefresh">Check now</button>
+    </div>
+    <p class="muted" id="readinessSummary">Loading...</p>
+    <div class="brief-list" id="readinessChecks"></div>
+</section>
+
 <section class="panel panel-table">
     <div class="panel-head">
         <h3>Pending Signups</h3>
@@ -171,6 +180,45 @@
 
 {% block page_scripts %}
 <script>
+(() => {
+    const summary = document.getElementById("readinessSummary");
+    const list = document.getElementById("readinessChecks");
+    const button = document.getElementById("readinessRefresh");
+    if (!summary || !list || !button) return;
+    const labels = {pass: "OK", warn: "Check", fail: "Fix", info: "Info", skip: "n/a"};
+    const colors = {pass: "var(--positive)", warn: "var(--caution)", fail: "var(--negative)", info: "var(--text-muted)", skip: "var(--text-muted)"};
+    async function load() {
+        button.disabled = true;
+        summary.textContent = "Checking...";
+        try {
+            const response = await fetch("/api/admin/readiness");
+            const payload = await response.json();
+            if (!response.ok || !payload.success) throw new Error((payload.error && payload.error.message) || "Request failed.");
+            const report = payload.data;
+            summary.textContent = (report.live_armed ? "LIVE IS ARMED. " : "Live trading is off (sandbox). ")
+                + (report.sandbox_ready ? "Sandbox: ready. " : "Sandbox: needs attention. ")
+                + (report.live_ready ? "Live prerequisites: all met (arming is still your decision)." : "Live prerequisites: not met yet.");
+            list.replaceChildren();
+            for (const check of report.checks) {
+                const row = document.createElement("div");
+                const name = document.createElement("span");
+                name.textContent = check.label + " - " + check.detail;
+                const state = document.createElement("b");
+                state.textContent = labels[check.status] || check.status;
+                state.style.color = colors[check.status] || "inherit";
+                row.append(name, state);
+                list.append(row);
+            }
+        } catch (error) {
+            summary.textContent = "Could not load readiness: " + error.message;
+        } finally {
+            button.disabled = false;
+        }
+    }
+    button.addEventListener("click", load);
+    load();
+})();
+
 (() => {
     async function callAdminApi(path, body) {
         const response = await fetch(path, {
