@@ -205,3 +205,52 @@ def test_full_scan_alerts_when_the_continuous_monitor_is_unhealthy(user_id):
     alerts = [a for a in load_manual_alerts(user_id) if a.get("type") == "continuous_monitor_unhealthy"]
     assert len(alerts) == 1
     assert alerts[0]["priority"] == "critical"
+
+
+def test_health_treats_a_fresh_in_flight_request_as_healthy():
+    """A tick takes ~30s in production and the worker re-calls ~6s after each response, so a request
+    that has arrived but not completed yet is the normal state, not a stall."""
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 26, 12, 0, 0, tzinfo=timezone.utc)
+    heartbeat = {
+        "last_request_received_at": (now - timedelta(seconds=20)).isoformat(),
+        "last_request_run_id": "new-run",
+        "last_completed_at": (now - timedelta(seconds=26)).isoformat(),
+        "last_completed_run_id": "previous-run",
+    }
+    with patch.object(pluto_app, "get_continuous_monitor_heartbeat_status", return_value=heartbeat), \
+         patch.object(pluto_app, "_now_utc", return_value=now):
+        assert pluto_app._continuous_monitor_health_status()["healthy"] is True
+
+
+def test_health_still_flags_a_stalled_completion():
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 26, 12, 0, 0, tzinfo=timezone.utc)
+    heartbeat = {
+        "last_request_received_at": (now - timedelta(seconds=20)).isoformat(),
+        "last_request_run_id": "new-run",
+        "last_completed_at": (now - timedelta(seconds=200)).isoformat(),
+        "last_completed_run_id": "previous-run",
+    }
+    with patch.object(pluto_app, "get_continuous_monitor_heartbeat_status", return_value=heartbeat), \
+         patch.object(pluto_app, "_now_utc", return_value=now):
+        status = pluto_app._continuous_monitor_health_status()
+    assert status["healthy"] is False and "no completed continuous-monitor reconciliation" in status["reason"]
+
+
+def test_health_still_flags_a_worker_that_went_quiet():
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 26, 12, 0, 0, tzinfo=timezone.utc)
+    heartbeat = {
+        "last_request_received_at": (now - timedelta(seconds=200)).isoformat(),
+        "last_request_run_id": "r",
+        "last_completed_at": (now - timedelta(seconds=200)).isoformat(),
+        "last_completed_run_id": "r",
+    }
+    with patch.object(pluto_app, "get_continuous_monitor_heartbeat_status", return_value=heartbeat), \
+         patch.object(pluto_app, "_now_utc", return_value=now):
+        status = pluto_app._continuous_monitor_health_status()
+    assert status["healthy"] is False and "has not called" in status["reason"]

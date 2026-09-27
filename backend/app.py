@@ -8526,18 +8526,19 @@ def _continuous_monitor_health_status() -> Dict[str, object]:
             "age_seconds": received_age_seconds,
         }
 
-    most_recent_completed = heartbeat.get("last_request_run_id") and heartbeat.get("last_request_run_id") == heartbeat.get("last_completed_run_id")
-    if not most_recent_completed:
-        # The worker IS reaching us (received_age_seconds just passed),
-        # but the most recent request never recorded a completion - the
-        # endpoint's own reconciliation logic for that specific request
-        # is what's hung, not the worker.
-        return {
-            "healthy": False,
-            "reason": "the continuous monitor worker is calling this endpoint, but its most recent request never completed - reconciliation logic may be stuck",
-            "heartbeat": heartbeat,
-            "age_seconds": received_age_seconds,
-        }
+    # A request that has arrived but not yet completed is normally just IN
+    # FLIGHT: a real tick takes ~30s+ in production (observed 2026-09-26 -
+    # POST received 23:45:56, 200 returned 23:46:30) while the worker calls
+    # again ~6s after each response, so most of the time a request is
+    # mid-run. This branch is only reached while received_age_seconds is
+    # under CONTINUOUS_MONITOR_HEARTBEAT_STALE_SECONDS, so an in-flight
+    # request cannot be old enough here to be hung; a request that truly
+    # hangs stops the worker's next call and trips the "worker has not
+    # called this endpoint" check above, and a stalled completion trips the
+    # completed_age check below. Flagging every in-flight request as
+    # "never completed" (this branch's old behavior) made the health
+    # endpoint, the admin readiness report, and any external uptime monitor
+    # report unhealthy for most of every minute.
 
     completed_at = _parse_trusted_past_timestamp(heartbeat.get("last_completed_at"), now=now, default=now)
     completed_age_seconds = (now - completed_at).total_seconds()
