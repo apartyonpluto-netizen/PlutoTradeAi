@@ -254,3 +254,15 @@ def test_health_still_flags_a_worker_that_went_quiet():
          patch.object(pluto_app, "_now_utc", return_value=now):
         status = pluto_app._continuous_monitor_health_status()
     assert status["healthy"] is False and "has not called" in status["reason"]
+
+
+def test_status_summary_clock_is_eastern_not_server_time(user_id):
+    """base.html labels this chip 'Eastern Time'; on Render the server clock is UTC, so it was 4-5 hours off."""
+    utc_midnight = datetime(2026, 9, 27, 0, 12, 40, tzinfo=timezone.utc)  # 8:12:40 PM the evening before in New York
+    with pluto_app.app.test_request_context("/"):
+        from flask import session
+
+        session["user_id"] = user_id
+        with patch.object(pluto_app, "_now_utc", return_value=utc_midnight):
+            summary = pluto_app._compute_status([], [])
+    assert summary["current_time"] == "08:12:40 PM"

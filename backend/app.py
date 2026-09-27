@@ -2075,7 +2075,7 @@ def _compute_status(scanner_rows: List[Dict[str, object]], scanner_errors: List[
     return {
         "market_status": phase if scanner_rows else "Monitoring",
         "ai_status": "Online",
-        "current_time": datetime.now().strftime("%I:%M:%S %p"),
+        "current_time": _now_utc().astimezone(ZoneInfo("America/New_York")).strftime("%I:%M:%S %p"),  # labelled Eastern Time in base.html; datetime.now() was server (UTC) time on Render
         "scanner_status": "Running" if not scanner_errors else "Degraded",
         "watchlist_status": "Synced",
         "account_status": "Connected" if any(a.get("status") != "Not Connected" for a in accounts) else "Not Connected",
