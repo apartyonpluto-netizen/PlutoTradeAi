@@ -145,7 +145,7 @@ if __package__:
     from . import order_lifecycle as ol
     from .anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from .autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
-    from .autonomy import trade_tickets
+    from .autonomy import event_journal, trade_tickets
     from .autonomy.research_log import list_research_decisions, record_research_decision
     from .autonomy.scan_run_log import list_scan_runs, record_scan_run
     from .autonomy.ambiguous_resolution_audit import (
@@ -315,7 +315,7 @@ else:
     import order_lifecycle as ol
     from anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
-    from autonomy import trade_tickets
+    from autonomy import event_journal, trade_tickets
     from autonomy.research_log import list_research_decisions, record_research_decision
     from autonomy.scan_run_log import list_scan_runs, record_scan_run
     from autonomy.ambiguous_resolution_audit import (
@@ -10336,8 +10336,13 @@ def _propose_trade_ticket(user_id: str, entry: Dict[str, object], opp: Dict[str,
         "trade_plan": trade_planner.compact_plan(entry["trade_plan"]) if isinstance(entry.get("trade_plan"), dict) else None,
         "llm_verdict": entry.get("llm_verdict"),
         "llm_reasoning": entry.get("llm_reasoning"),
+        "correlation_id": entry.get("correlation_id"),
     }
     ticket, outcome = trade_tickets.create_or_refresh_ticket(user_id, proposal)
+    # A refreshed ticket keeps the id it was created under, so every scan
+    # that re-proposes the same terms joins the same chain.
+    if ticket.get("correlation_id"):
+        entry["correlation_id"] = ticket["correlation_id"]
     entry["status"] = "awaiting_approval"
     entry["skip_category"] = "awaiting_approval"
     entry["ticket_id"] = ticket.get("ticket_id")
@@ -10505,6 +10510,7 @@ def _execute_approved_ticket(user_id: str, creds: Dict[str, str], ticket: Dict[s
         "account_id": account_id, "status": "pending", "trading_day": trading_day,
         "source": "approved_ticket", "ticket_id": ticket.get("ticket_id"), "ticket_version": ticket.get("version"),
         "approved_at": ticket.get("approved_at"), "approved_by": ticket.get("approved_by"),
+        "correlation_id": ticket.get("correlation_id") or f"tkt-{ticket.get('ticket_id')}",
     })
     if ticket.get("instrument_type") == "OPTION":
         option_contract = {key: ticket.get(key) for key in ("option_symbol", "strike", "expiration_date", "option_type")}
@@ -10547,6 +10553,7 @@ def _execute_approved_ticket(user_id: str, creds: Dict[str, str], ticket: Dict[s
             "skip_category": entry.get("skip_category"), "quantity": quantity,
             "entry_client_order_id": entry.get("entry_client_order_id"),
             "approved_ticket_id": ticket.get("ticket_id"), "trade_plan": ticket.get("trade_plan"),
+            "correlation_id": entry.get("correlation_id"),
         })
     except Exception:  # noqa: BLE001
         pass
@@ -10646,6 +10653,40 @@ def api_trade_ticket_decline(ticket_id: str):
     except trade_tickets.TicketConflict as error:
         return _api_failure(str(error), status_code=409, error_code="ticket_conflict", ok=False)
     return _api_success({"ticket": _ticket_for_api(ticket)}, ok=True)
+
+
+@app.route("/api/events", methods=["GET"])
+@api_guard
+def api_events_recent():
+    """The signed-in user's event journal, newest last. Filters: since (ISO,
+    compared to logged_at), type (repeatable), ticker, limit (<= 1000)."""
+    user_id = _current_user_id()
+    limit = max(1, min(request.args.get("limit", default=200, type=int), 1000))
+    events = event_journal.read_events(
+        user_id, since=request.args.get("since") or None, types=request.args.getlist("type") or None,
+        ticker=request.args.get("ticker") or None, limit=limit,
+    )
+    return _api_success({"events": events, "count": len(events), "journal_failures": event_journal.failure_stats()["count"]})
+
+
+@app.route("/api/events/chains", methods=["GET"])
+@api_guard
+def api_event_chains():
+    """Recent trade ideas that got past signal evaluation, newest first."""
+    user_id = _current_user_id()
+    limit = max(1, min(request.args.get("limit", default=30, type=int), 200))
+    return _api_success({"chains": event_journal.recent_chains(user_id, limit=limit, since=request.args.get("since") or None)})
+
+
+@app.route("/api/events/trace/<correlation_id>", methods=["GET"])
+@api_guard
+def api_event_trace(correlation_id: str):
+    """Everything known about one trade idea, signal to exit."""
+    user_id = _current_user_id()
+    trace = event_journal.trace(user_id, correlation_id[:64], records=list_overnight_orders(user_id))
+    if not trace["events"]:
+        return _api_failure("No events for that correlation id.", status_code=404, error_code="not_found", ok=False)
+    return _api_success({"trace": trace})
 
 
 def _option_exit_settings(risk_settings: Dict[str, object]) -> Dict[str, object]:
@@ -11181,7 +11222,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
     def _log_research_decision(
         *, ticker, recommendation, strategy, raw_confidence, decision, reason_skipped,
         quantity, entry_client_order_id, regime_shadow=None, skip_category=None, signal_snapshot=None,
-        trade_plan=None,
+        trade_plan=None, correlation_id=None, evaluated_at=None,
     ) -> None:
         """Durably records ONE evaluated candidate to the append-only
         research log (autonomy/research_log.py) - called for EVERY
@@ -11215,13 +11256,22 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         No-ops entirely under dry_run - a preview run isn't a real evaluated
         candidate with real consequences, and mixing preview rows into the
         durable research log would corrupt the survivorship-bias analysis
-        that log exists for."""
+        that log exists for.
+
+        correlation_id / evaluated_at (2026-09-29): the id that ties this
+        candidate to its plan, ticket and orders in the event journal
+        (autonomy/event_journal.py), and when its evaluation began - a placed
+        candidate is logged after submission, so the evaluation is dated to
+        the start of its loop iteration, not to this call."""
         if dry_run:
             return
+        correlation_id = correlation_id or event_journal.new_correlation_id()
+        evaluated_at = evaluated_at or _now_utc().isoformat()
         try:
             record_research_decision(
                 user_id,
                 {
+                    "correlation_id": correlation_id,
                     "trading_day": today_key,
                     "account_id": account_id,
                     "ticker": ticker,
@@ -11240,6 +11290,30 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             )
         except Exception:  # noqa: BLE001 - research logging must never affect the real scan
             pass
+        events = [event_journal.build_event(
+            "signal.evaluated", correlation_id=correlation_id, ticker=ticker, account_id=account_id, source="scan",
+            at=evaluated_at,
+            data={
+                "trading_day": today_key, "decision": decision, "skip_category": skip_category, "reason": reason_skipped,
+                "recommendation": recommendation, "strategy": strategy, "confidence": raw_confidence, "quantity": quantity,
+            },
+        )]
+        if isinstance(trade_plan, dict):
+            numbers = trade_plan.get("numbers") or {}
+            events.append(event_journal.build_event(
+                "plan.built", correlation_id=correlation_id, ticker=ticker, account_id=account_id, source="trade_planner",
+                at=evaluated_at,
+                data={
+                    "planner_version": trade_plan.get("planner_version"), "instrument": trade_plan.get("instrument"),
+                    "direction": trade_plan.get("direction"), "decision": trade_plan.get("decision"),
+                    "reasons": trade_plan.get("reasons"),
+                    **{key: numbers.get(key) for key in (
+                        "quantity", "entry_price", "entry_premium", "stop_price", "exit_trigger_premium", "target_price",
+                        "planned_loss", "loss_at_trigger", "premium_at_risk", "reward_to_risk", "allocation_percent",
+                    ) if numbers.get(key) is not None},
+                },
+            ))
+        event_journal.emit_many(user_id, events)
 
     for opp in opportunities:
         if opp in candidates:
@@ -11301,6 +11375,8 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         if candidate_index > 0:
             time.sleep(1.0)  # spread order placements out to avoid tripping Webull's rate limiter
         ticker = str(opp.get("ticker", ""))
+        correlation_id = event_journal.new_correlation_id()
+        evaluated_at = _now_utc().isoformat()
         limit_price = float(opp.get("ideal_entry") or 0)
         stop_price_for_sizing = float(opp.get("stop") or 0)
         target_price_for_check = float(opp.get("target") or 0)
@@ -11350,6 +11426,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 }
             )
             _log_research_decision(
+                correlation_id=correlation_id, evaluated_at=evaluated_at,
                 ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
                 raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=reason,
                 quantity=0, entry_client_order_id=None, skip_category="unprotectable_levels",
@@ -11369,6 +11446,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 {"ticker": ticker, "recommendation": opp.get("recommendation"), "confidence": opp.get("confidence"), "reason_skipped": reason, "was_qualifying": True, "skip_category": "no_margin_account"}
             )
             _log_research_decision(
+                correlation_id=correlation_id, evaluated_at=evaluated_at,
                 ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
                 raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=reason,
                 quantity=0, entry_client_order_id=None, skip_category="no_margin_account",
@@ -11456,6 +11534,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                         # has already returned a real, non-None contract.
                         "instrument_type": "OPTION",
                         "option_contract_found": True,
+                        "correlation_id": correlation_id,
                     }
                     # Contract quote was fetched moments ago by select_option_contract.
                     option_entry["trade_plan"] = _option_trade_plan_for_candidate(
@@ -11487,10 +11566,12 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                             "premium_at_risk": round(float(option_cost_reservation), 2),
                         })
                         _propose_trade_ticket(user_id, option_entry, opp)
+                        correlation_id = str(option_entry.get("correlation_id") or correlation_id)
                         proposed.append(option_entry)
                         local_reservations_by_account[margin_account_id] += option_cost_reservation
                         portfolio_limits.add_exposure(portfolio_snapshot, ticker, float(option_cost_reservation))
                         _log_research_decision(
+                correlation_id=correlation_id, evaluated_at=evaluated_at,
                             ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
                             raw_confidence=int(opp.get("confidence", 0) or 0), decision="proposed", reason_skipped=None,
                             quantity=option_quantity, entry_client_order_id=None, skip_category="awaiting_approval",
@@ -11530,6 +11611,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                         skipped.append(option_entry)
                     record_overnight_order(user_id, option_entry)
                     _log_research_decision(
+                correlation_id=correlation_id, evaluated_at=evaluated_at,
                         ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
                         raw_confidence=int(opp.get("confidence", 0) or 0),
                         decision="placed" if option_entry.get("status") == "placed" else "skipped",
@@ -11606,6 +11688,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 }
             )
             _log_research_decision(
+                correlation_id=correlation_id, evaluated_at=evaluated_at,
                 ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
                 raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=sizing["reason"],
                 quantity=0, entry_client_order_id=None, skip_category="sizing_too_small",
@@ -11654,6 +11737,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             # unknown_submission_state) carries it uniformly - mirrors the
             # same field on option_entry above.
             "instrument_type": "EQUITY",
+            "correlation_id": correlation_id,
         }
 
         # Leading market-regime SHADOW observation (VIX, see regime.py and
@@ -11699,6 +11783,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 if not dry_run:
                     record_overnight_order(user_id, entry)
                 _log_research_decision(
+                correlation_id=correlation_id, evaluated_at=evaluated_at,
                     ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
                     raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=veto_reason,
                     quantity=quantity, entry_client_order_id=entry.get("entry_client_order_id"),
@@ -11746,10 +11831,12 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                     evidence_returns=strategy_evidence_returns, portfolio_context=_scan_portfolio_context(ticker, float(quantity) * float(limit_price)), quote_deferred=True,
                 )
                 _propose_trade_ticket(user_id, entry, opp)
+                correlation_id = str(entry.get("correlation_id") or correlation_id)
                 proposed.append(entry)
                 local_reservations_by_account[candidate_account_id] += _reservation_notional(quantity, limit_price)
                 portfolio_limits.add_exposure(portfolio_snapshot, ticker, float(quantity) * float(limit_price))
                 _log_research_decision(
+                correlation_id=correlation_id, evaluated_at=evaluated_at,
                     ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
                     raw_confidence=int(opp.get("confidence", 0) or 0), decision="proposed", reason_skipped=None,
                     quantity=quantity, entry_client_order_id=None, skip_category="awaiting_approval",
@@ -11826,6 +11913,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 skipped.append(entry)
                 record_overnight_order(user_id, entry)
                 _log_research_decision(
+                correlation_id=correlation_id, evaluated_at=evaluated_at,
                     ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
                     raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=drift_reason,
                     quantity=quantity, entry_client_order_id=entry.get("entry_client_order_id"),
@@ -11917,6 +12005,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             entry["regime_shadow"]["entry_client_order_id"] = entry.get("entry_client_order_id")
         record_overnight_order(user_id, entry)
         _log_research_decision(
+                correlation_id=correlation_id, evaluated_at=evaluated_at,
             ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
             raw_confidence=int(opp.get("confidence", 0) or 0),
             decision="placed" if entry.get("status") == "placed" else "skipped",

@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
+from . import event_journal
+
 BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
 USER_DATA_ROOT = DATA_DIR / "users"
@@ -72,15 +74,22 @@ def record_overnight_order(user_id: str, entry: Dict[str, Any]) -> Dict[str, Any
                 merged = {**entry, "logged_at": existing.get("logged_at") or _now_iso()}
                 orders[index] = merged
                 _atomic_write(_orders_file(user_id), orders)
+                event_journal.journal_record_changes(user_id, [existing], [merged])
                 return merged
     entry = {**entry, "logged_at": _now_iso()}
     orders.insert(0, entry)
     _atomic_write(_orders_file(user_id), orders)
+    event_journal.journal_record_changes(user_id, [], [entry])
     return entry
 
 
 def replace_overnight_orders(user_id: str, orders: List[Dict[str, Any]]) -> None:
     """Overwrites the full log - used to persist in-place updates (e.g. a
     stop-loss that failed at entry time later succeeding on retry) rather
-    than appending a new entry. Writes atomically - see _atomic_write."""
+    than appending a new entry. Writes atomically - see _atomic_write.
+
+    Lifecycle steps that are new relative to what was on disk are journaled
+    after the write (event_journal.py)."""
+    before = list_overnight_orders(user_id)
     _atomic_write(_orders_file(user_id), orders)
+    event_journal.journal_record_changes(user_id, before, orders)

@@ -31,6 +31,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
+from . import event_journal
+
 BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
 USER_DATA_ROOT = DATA_DIR / "users"
@@ -115,6 +117,38 @@ def _write(path: Path, tickets: List[Dict[str, Any]]) -> None:
     os.replace(tmp_path, path)
 
 
+def _statuses(tickets: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {str(t.get("ticket_id")): t.get("status") for t in tickets}
+
+
+def _journal_status_changes(user_id: str, before: Dict[str, Any], tickets: List[Dict[str, Any]]) -> None:
+    """ticket.<status> for every ticket whose status differs from `before`
+    (new tickets included). Called after the write, under the lock."""
+    events = []
+    for ticket in tickets:
+        status = ticket.get("status")
+        if not status or before.get(str(ticket.get("ticket_id"))) == status:
+            continue
+        recheck = ticket.get("recheck") or {}
+        submission = ticket.get("submission") or {}
+        events.append(event_journal.build_event(
+            f"ticket.{str(status).lower()}",
+            correlation_id=ticket.get("correlation_id") or f"tkt-{ticket.get('ticket_id')}",
+            ticker=ticket.get("ticker"), account_id=ticket.get("account_id"), source="trade_tickets",
+            data={
+                "ticket_id": ticket.get("ticket_id"), "version": ticket.get("version"),
+                "instrument_type": ticket.get("instrument_type"), "direction": ticket.get("direction"),
+                "quantity": ticket.get("quantity"), "limit_price": ticket.get("limit_price"),
+                "option_symbol": ticket.get("option_symbol"), "supersedes": ticket.get("supersedes"),
+                "superseded_by": ticket.get("superseded_by"), "decline_reason": ticket.get("decline_reason"),
+                "recheck_reasons": recheck.get("reasons") if status == RECHECK_FAILED else None,
+                "submission_status": submission.get("status"), "record_id": submission.get("record_id"),
+                "entry_client_order_id": submission.get("entry_client_order_id"),
+            },
+        ))
+    event_journal.emit_many(user_id, events)
+
+
 def material_terms_version(ticket: Dict[str, Any]) -> str:
     """Approval binds to these terms. Any change means a new version, and an
     approval carrying the old version is refused."""
@@ -143,8 +177,10 @@ def list_tickets(user_id: str, *, now: Optional[datetime] = None) -> List[Dict[s
     path = _tickets_file(user_id)
     with _locked(path):
         tickets = _read(path)
+        before = _statuses(tickets)
         if _expire_in_place(tickets, now):
             _write(path, tickets)
+            _journal_status_changes(user_id, before, tickets)
     return tickets
 
 
@@ -171,6 +207,7 @@ def create_or_refresh_ticket(user_id: str, proposal: Dict[str, Any], *, now: Opt
     ticker = str(proposal.get("ticker", "")).upper()
     with _locked(path):
         tickets = _read(path)
+        before = _statuses(tickets)
         _expire_in_place(tickets, now)
         existing = next(
             (t for t in tickets if t.get("status") in OPEN_STATUSES and str(t.get("ticker", "")).upper() == ticker),
@@ -178,12 +215,14 @@ def create_or_refresh_ticket(user_id: str, proposal: Dict[str, Any], *, now: Opt
         )
         if existing is not None and existing.get("status") == APPROVED:
             _write(path, tickets)
+            _journal_status_changes(user_id, before, tickets)
             return existing, "in_progress"
         if existing is not None and existing.get("version") == version:
             existing["last_seen_at"] = _iso(now)
             existing["expires_at"] = _iso(now + timedelta(seconds=TICKET_TTL_SECONDS))
             existing["seen_count"] = int(existing.get("seen_count") or 1) + 1
             _write(path, tickets)
+            _journal_status_changes(user_id, before, tickets)
             return existing, "refreshed"
         ticket = {
             **proposal,
@@ -204,6 +243,7 @@ def create_or_refresh_ticket(user_id: str, proposal: Dict[str, Any], *, now: Opt
             outcome = "superseded"
         tickets.insert(0, ticket)
         _write(path, tickets)
+        _journal_status_changes(user_id, before, tickets)
         return ticket, outcome
 
 
@@ -215,6 +255,7 @@ def claim_for_approval(user_id: str, ticket_id: str, version: str, approved_by: 
     path = _tickets_file(user_id)
     with _locked(path):
         tickets = _read(path)
+        before = _statuses(tickets)
         _expire_in_place(tickets, now)
         ticket = next((t for t in tickets if t.get("ticket_id") == ticket_id), None)
         if ticket is None:
@@ -230,6 +271,7 @@ def claim_for_approval(user_id: str, ticket_id: str, version: str, approved_by: 
         ticket["approved_by"] = approved_by
         ticket["approved_version"] = ticket.get("version")
         _write(path, tickets)
+        _journal_status_changes(user_id, before, tickets)
         return dict(ticket)
 
 
@@ -240,8 +282,10 @@ def update_ticket(user_id: str, ticket_id: str, mutate: Callable[[Dict[str, Any]
         ticket = next((t for t in tickets if t.get("ticket_id") == ticket_id), None)
         if ticket is None:
             raise TicketConflict("No such ticket.")
+        before = _statuses(tickets)
         mutate(ticket)
         _write(path, tickets)
+        _journal_status_changes(user_id, before, tickets)
         return dict(ticket)
 
 
@@ -250,6 +294,7 @@ def decline_ticket(user_id: str, ticket_id: str, version: str, reason: str, decl
     path = _tickets_file(user_id)
     with _locked(path):
         tickets = _read(path)
+        before = _statuses(tickets)
         _expire_in_place(tickets, now)
         ticket = next((t for t in tickets if t.get("ticket_id") == ticket_id), None)
         if ticket is None:
@@ -263,6 +308,7 @@ def decline_ticket(user_id: str, ticket_id: str, version: str, reason: str, decl
         ticket["declined_by"] = declined_by
         ticket["decline_reason"] = (reason or "").strip()[:500]
         _write(path, tickets)
+        _journal_status_changes(user_id, before, tickets)
         return dict(ticket)
 
 

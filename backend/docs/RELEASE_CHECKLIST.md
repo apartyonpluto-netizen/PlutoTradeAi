@@ -6,7 +6,7 @@ profitability. Live (real-money) submission stays disabled until the owner
 approves a specific account and explicit limits.
 
 Last audited: **2026-09-29** (main app, `PlutoTradeAI/backend`, commit `028b9fc`,
-1334 automated tests passing).
+1350 automated tests passing after the event journal).
 
 ## Verification levels
 
@@ -56,7 +56,7 @@ Last audited: **2026-09-29** (main app, `PlutoTradeAI/backend`, commit `028b9fc`
 | Orphan discovery from broker history | TESTED + SANDBOX | Prod imports 09-18/19/22 | Imported orphans have no stop (never invented) — need human |
 | Position-absent detection + admin close | TESTED | `test_position_absent_reconciliation.py`; Admin panel `dcba188` | 5 ghost records awaiting owner |
 | Partial fills / protective-leg resize | TESTED | `test_partial_fill_resize_and_crash_recovery.py` | — |
-| One correlation id linking signal → plan → ticket → order → fill → exit | INCOMPLETE | Linked piecemeal (`entry_client_order_id`, `ticket_id`, `record_id`) | **Next build:** event journal (spec §9/§11) |
+| One correlation id linking signal → plan → ticket → order → fill → exit | TESTED | `autonomy/event_journal.py`; `test_event_journal.py` (autonomous + approval chains end to end, mocked broker); `/api/events`, `/api/events/chains`, `/api/events/trace/<id>` | Not yet seen in prod; records older than the journal trace via `rec-<record_id>` stand-ins |
 | Reconciliation against broker *transactions* (fills/fees) | INCOMPLETE | Uses order detail + positions + history | Transactions endpoint not wired |
 
 ## Gate 4 — Risk enforcement
@@ -119,12 +119,12 @@ Last audited: **2026-09-29** (main app, `PlutoTradeAI/backend`, commit `028b9fc`
 | §6 Account-aware plans | TESTED (advisory; `trade_plan_v1`) |
 | §7 Financial requirements | Mostly TESTED; 20% rule and overnight permission need owner settings |
 | §8 Broker execution | Webull SANDBOX (equity); E\*TRADE INCOMPLETE |
-| §9 Lifecycle proof | Partial — needs correlation-id event journal |
+| §9 Lifecycle proof | Event journal TESTED (correlation ids, trace API); broker transactions reconciliation still INCOMPLETE |
 | §10 Honest research | Evidence rules in planner; research engine not started |
 | §11 3D observatory | Partial — needs real event provenance + drill-down |
 | §12 Security/ops | Partial (see Gates 5, 8) |
 | §13 Verification | Ongoing — this document |
-| §14 Dependency order | Next: event journal → evidence layer → patterns → news → observatory |
+| §14 Dependency order | Done: checklist, event journal. Next: evidence layer → patterns → news → observatory |
 
 ## Blockers that need the owner
 

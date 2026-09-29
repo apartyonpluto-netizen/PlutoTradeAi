@@ -8,6 +8,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from . import event_journal
+
 BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
 USER_DATA_ROOT = DATA_DIR / "users"
@@ -96,9 +98,44 @@ def record_closed_trade(user_id: str, trade_id: str, record: Dict[str, Any]) -> 
         records = _read(user_id)
         stamped = {**record, "trade_id": trade_id}
         index = next((i for i, existing in enumerate(records) if existing.get("trade_id") == trade_id), None)
+        previous = records[index] if index is not None else None
         if index is not None:
             records[index] = stamped
         else:
             records.append(stamped)
         _atomic_write(path, records)
+    if previous != stamped:
+        _journal_close(user_id, stamped, revised=previous is not None)
     return stamped
+
+
+def _journal_close(user_id: str, record: Dict[str, Any], *, revised: bool) -> None:
+    """position.closed (or position.close_revised on a re-reconciliation that
+    changed the record). The correlation id comes from the order record
+    whose entry this trade closed."""
+    try:
+        correlation_id = record.get("correlation_id")
+        account_id = record.get("account_id")
+        if not correlation_id:
+            from .overnight_orders import list_overnight_orders
+
+            coid = record.get("entry_client_order_id") or record.get("trade_id")
+            matches = [o for o in list_overnight_orders(user_id) if o.get("entry_client_order_id") == coid]
+            match = next((o for o in matches if o.get("lifecycle_state") != "entry_failed"), matches[0] if matches else None)
+            if match is not None:
+                correlation_id = event_journal.correlation_id_for(match)
+                account_id = account_id or match.get("account_id")
+        event_journal.emit(
+            user_id, "position.close_revised" if revised else "position.closed",
+            correlation_id=correlation_id or f"coid-{record.get('trade_id')}", ticker=record.get("ticker"),
+            account_id=account_id, source="closed_trades", at=record.get("exit_timestamp"),
+            data={
+                "trade_id": record.get("trade_id"), "close_reason": record.get("close_reason"),
+                "exit_type": record.get("exit_type"), "instrument_type": record.get("instrument_type"),
+                "average_entry_price": record.get("average_entry_price"), "average_exit_price": record.get("average_exit_price"),
+                "exited_quantity": record.get("exited_quantity"), "net_realized_pnl": record.get("net_realized_pnl"),
+                "pnl_status": record.get("pnl_status"), "fees": record.get("fees"),
+            },
+        )
+    except Exception:  # noqa: BLE001 - journaling must never affect trade recording
+        pass
