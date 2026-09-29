@@ -305,16 +305,14 @@
         <li><b>OFF</b> &mdash; no automated activity of any kind. Existing positions/pending orders are still monitored and protected.</li>
         <li><b>SCOUT</b> / <b>ANALYST</b> &mdash; reserved for future review-only workflows. Today these behave identically to OFF: nothing is submitted automatically.</li>
         <li><b>PAPER</b> &mdash; manual sandbox trading. You review opportunities and place orders yourself from the dashboard; nothing is submitted automatically in this mode.</li>
-        <li><b>APPROVAL</b> &mdash; reserved for a future per-trade approval queue. Today this also behaves like OFF: no automatic submission, and there is no approval queue built yet.</li>
-        <li><b>AUTONOMOUS</b> &mdash; the only mode that submits sandbox orders automatically and unattended, on the external scheduler's own cadence. See Scan Run History below to confirm it is actually running for this account before relying on it.</li>
+        <li><b>APPROVAL</b> &mdash; the agent scans on schedule like AUTONOMOUS, but every trade it wants to make waits for you on Mission Control as a ticket. Approving re-checks the price, buying power and limits before anything is sent; declining keeps that ticker off the list for the rest of the day.</li>
+        <li><b>AUTONOMOUS</b> &mdash; submits sandbox orders automatically and unattended, on the scheduler's cadence. See Scan Run History below to confirm it is actually running for this account before relying on it.</li>
     </ul>
     <p class="muted tone-caution">
         Heads-up on cadence: the continuous order-safety monitor (protecting and exiting anything already open) is
         deployed and running independent of mode &mdash; check Scan Run History's Monitor Healthy column to confirm
-        it's ticking for this account. New-entry scanning is different: it's driven by a GitHub Actions cron job, not
-        a dedicated Render worker, with an observed real-world cadence of roughly once per hour rather than every 5
-        minutes &mdash; so in AUTONOMOUS mode, a qualifying setup can sit unactioned for a while before a scan
-        actually reaches it.
+        it's ticking for this account. New-entry scanning (AUTONOMOUS and APPROVAL) runs every 5 minutes during
+        market hours on weekdays, from a Render cron job.
     </p>
     <p class="muted">Sandbox only &mdash; live real-money execution stays locked regardless of mode.</p>
 </section>
@@ -408,6 +406,24 @@
             <input type="range" id="confidenceThresholdSlider" min="0" max="99" step="1" value="{{ settings_payload.ai_confidence_threshold if settings_payload else 68 }}">
             <p class="risk-slider-preview">Only setups scoring at or above this clear the autonomous scan.</p>
         </div>
+        <p class="risk-slider-group-title">Options (calls and puts you buy)</p>
+        <div class="risk-slider-row">
+            <div class="risk-slider-label"><span>Exit when the premium falls</span><b id="optionStopLossValue">{{ autonomy_status.option_stop_loss_percent if autonomy_status else 50 }}%</b></div>
+            <input type="range" id="optionStopLossSlider" min="5" max="90" step="1" value="{{ autonomy_status.option_stop_loss_percent if autonomy_status else 50 }}">
+            <p class="risk-slider-preview" id="optionStopLossPreview">&nbsp;</p>
+        </div>
+        <div class="risk-slider-row">
+            <div class="risk-slider-label"><span>Take profit when the premium rises</span><b id="optionTargetGainValue">{{ autonomy_status.option_target_gain_percent if autonomy_status else 50 }}%</b></div>
+            <input type="range" id="optionTargetGainSlider" min="10" max="300" step="5" value="{{ autonomy_status.option_target_gain_percent if autonomy_status else 50 }}">
+        </div>
+        <div class="risk-slider-row">
+            <div class="risk-slider-label"><span>Close before expiration</span><b id="optionCloseDaysValue">{{ autonomy_status.option_close_days_before_expiration if autonomy_status else 3 }} days</b></div>
+            <input type="range" id="optionCloseDaysSlider" min="0" max="14" step="1" value="{{ autonomy_status.option_close_days_before_expiration if autonomy_status else 3 }}">
+        </div>
+        <p class="risk-slider-preview">
+            Judged on the option's own live bid, measured from the premium you actually paid, and watched by the app
+            (nothing rests at the broker). The exit trigger is not a maximum loss: the full premium can still be lost.
+        </p>
     </div>
     <button type="button" id="saveRiskSettingsButton">Save Risk Limits</button>
 </section>

@@ -37,6 +37,7 @@ __all__ = [
 ]
 
 _calibration_lock = threading.Lock()
+OPTION_CONTRACT_MULTIPLIER = 100.0
 
 
 def _run_calibration_sync(tickers: List[str], lookback_months: int, hold_days: int, min_confidence: int) -> None:
@@ -140,25 +141,41 @@ def _pnl_percent_for_closed_trade(trade: Dict[str, Any]) -> Optional[float]:
     if trade.get("pnl_status") != "complete":
         return None
     net_pnl = trade.get("net_realized_pnl")
-    entry_price = trade.get("average_entry_price")
+    is_option = trade.get("instrument_type") == "OPTION"
+    # Option closed trades record the per-share premium as
+    # premium_paid_per_contract (app._check_and_execute_option_exit) and
+    # never set average_entry_price, so until 2026-09-29 every option trade
+    # returned None here and was silently left out of all outcome evidence.
+    entry_price = trade.get("average_entry_price") or (trade.get("premium_paid_per_contract") if is_option else None)
     quantity = trade.get("exited_quantity") or trade.get("filled_quantity")
     if net_pnl is None or not entry_price or not quantity:
         return None
     cost_basis = float(entry_price) * float(quantity)
+    # Premium is per share and quantity is contracts: dollars paid are
+    # premium x contracts x 100.
+    if is_option:
+        cost_basis *= OPTION_CONTRACT_MULTIPLIER
     if cost_basis <= 0:
         return None
     return net_pnl / cost_basis * 100.0
 
 
-def closed_trade_returns_by_strategy() -> Dict[str, List[float]]:
+def closed_trade_returns_by_strategy(instrument_type: Optional[str] = None) -> Dict[str, List[float]]:
     """Net return (%) of every fully reconciled closed trade, grouped by
     strategy, across every user - the only evidence trade plans use for a
-    win probability (see trade_planner.evidence_from_returns)."""
+    win probability (see trade_planner.evidence_from_returns).
+
+    instrument_type ("EQUITY" or "OPTION") keeps the two apart: the same
+    strategy name produces very different returns in shares and in
+    options, so a plan only uses evidence from its own instrument. Trades
+    recorded before instrument_type existed are equity. None = all."""
     per_strategy: Dict[str, List[float]] = {}
     for user in list_all_users():
         for trade in list_closed_trades(user["id"]):
             strategy_name = trade.get("strategy")
             if not strategy_name:
+                continue
+            if instrument_type is not None and (trade.get("instrument_type") or "EQUITY") != instrument_type:
                 continue
             pnl_percent = _pnl_percent_for_closed_trade(trade)
             if pnl_percent is None:

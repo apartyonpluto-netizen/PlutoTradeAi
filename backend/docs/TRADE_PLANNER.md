@@ -13,8 +13,8 @@ quantity the scan would submit.
   record and the research log) and shown in Account Hub → Preview Scan. They
   do not gate submission; the scan's existing checks still decide. Gating is a
   later step, behind the manual-approval flow.
-- Equity only. Options keep their own premium-based rules (20% trigger on the
-  option's own price) and are not planned here.
+- Equity and options (calls and puts bought to open) each have their own
+  plan; see "Option plans" below.
 
 ## Definitions
 
@@ -77,6 +77,44 @@ the loss is not capped at all.
   scan matches the submitted quantity, reaches the research log, stays
   advisory, and a preview makes no extra market-data call.
 
+## Option plans
+
+`build_option_trade_plan` prices a long call or put from the contract's own
+premium. The stock risk-per-share formula never applies: the most a long
+option can lose is the premium paid.
+
+The exit rule is shown exactly as `_check_and_execute_option_exit` runs it.
+Each monitor pass reads the option's live **bid**. It sells when the bid is
+at or below `entry premium × (1 − stop %)`, at or above
+`entry × (1 + target %)`, or once expiration is within the close window. The
+sell is a limit 0.5% under the bid. Nothing rests at the broker, so
+protection depends on the monitor running and a live bid existing.
+
+| Field | Meaning |
+|---|---|
+| `premium_at_risk` | ask × 100 × contracts (+ fees when known): the most that can be lost |
+| `exit_trigger_premium` | ask × (1 − stop %); a $1.00 premium at 20% triggers at $0.80 |
+| `loss_at_trigger` | estimated loss selling 0.5% under the trigger bid - an estimate, not a cap |
+| `gain_at_target`, `reward_to_risk` | gain selling 0.5% under the target bid; ÷ loss at trigger |
+| `breakeven_at_expiration` | strike + premium (call) or strike − premium (put) |
+| `underlying_notional`, `delta_adjusted_notional` | shares controlled × price, and × \|delta\| - exposure, not a probability |
+
+Adverse scenarios: exit at the trigger, exit one bid-ask spread below it,
+and the premium going to zero.
+
+**Reject** also when: no two-sided quote; the bid is already at or below the
+exit trigger (buying at the ask would be sold on the first pass); expiration
+falls inside the close window; one contract does not fit the account.
+**Watch** also when: the bid is within 5% above the trigger; the spread is
+wider than 10% of the mid; gain at target is below the loss at the trigger.
+
+Option evidence comes only from closed **option** trades of the strategy;
+equity plans use only equity trades. The exit percentages are set in
+Account Hub → Risk Limits → Options (default 50% / 50% / 3 days).
+
+Approving an option ticket also refuses when the fresh bid is at or below
+the trigger computed from the ticket's premium.
+
 ## Approval flow (APPROVAL mode)
 
 Set the autonomy mode to **APPROVAL** (Account Hub → Autonomous Mode). The
@@ -107,7 +145,6 @@ Approval* and announced in the alert bell.
 
 ## Not built yet
 
-Options plans (tickets carry the contract and premium at risk, but no
-`trade_plan` numbers), sector/concentration and drawdown limits, error
+Sector/concentration and drawdown limits, error
 classification of closed trades, offline strategy research with versioned
 promotion, and an annotated chart of where the levels came from.

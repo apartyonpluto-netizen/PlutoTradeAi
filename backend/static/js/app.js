@@ -785,6 +785,24 @@ const renderTradePlan = (plan) => {
     grid.appendChild(el("dt", "", label));
     grid.appendChild(el("dd", "", value));
   };
+  if (plan.instrument === "OPTION") {
+    const num = (value, suffix = "") => (value === null || value === undefined ? "--" : `${value}${suffix}`);
+    row("Contract", `${n.option_type || ""} $${num(n.strike)} expiring ${n.expiration_date || "--"} (${num(n.days_to_expiration)} days)`);
+    row("Quantity", n.quantity ? `${n.quantity} contract(s) x ${n.multiplier || 100} shares` : "none");
+    row("Bid / ask", `${money(n.bid)} / ${money(n.ask)} (spread ${pct(n.spread_percent)} of mid)`);
+    row("Underlying", `${money(n.underlying_price)}${n.moneyness ? `, ${n.moneyness}` : ""}`);
+    row("Break-even at expiration", money(n.breakeven_at_expiration));
+    row("Premium at risk (most you can lose)", `${money(n.premium_at_risk)} (${pct(n.allocation_percent)} of account)`);
+    row("Exit trigger", `bid at or below ${money(n.exit_trigger_premium)} (${num(n.stop_loss_percent, "%")} below the premium paid)`);
+    row("Estimated loss at the trigger", `${money(n.loss_at_trigger)} (${pct(n.loss_at_trigger_percent)} of account)`);
+    row("Take profit", `bid at or above ${money(n.target_premium)} (+${num(n.target_gain_percent, "%")}): ${money(n.gain_at_target)}`);
+    row("Time exit", n.time_exit_date ? `on or after ${n.time_exit_date}` : "--");
+    row("Protection", n.protection || "--");
+    if (n.delta_adjusted_notional !== null && n.delta_adjusted_notional !== undefined) {
+      row("Stock exposure (delta-adjusted)", `${money(n.delta_adjusted_notional)} (delta ${num(n.delta)})`);
+    }
+    row("Account used for sizing", `${money(n.plan_equity)} (${n.equity_source || "unknown"})`);
+  } else {
   row("Quantity", n.quantity ? `${n.quantity} share(s)` : "none");
   row("Entry / stop / target", `${money(n.entry_price)} / ${money(n.stop_price)} / ${money(n.target_price)}`);
   row("Current price", n.current_quote === null || n.current_quote === undefined ? "checked just before submission" : money(n.current_quote));
@@ -795,6 +813,7 @@ const renderTradePlan = (plan) => {
   row("Reward-to-risk", n.reward_to_risk === null || n.reward_to_risk === undefined ? "--" : String(n.reward_to_risk));
   row("Leverage after", n.leverage_after === null || n.leverage_after === undefined ? "--" : `${n.leverage_after}x`);
   row("Account used for sizing", `${money(n.plan_equity)} (${n.equity_source || "unknown"})`);
+  }
   box.appendChild(grid);
 
   if ((plan.reasons || []).length > 1) {
@@ -1529,6 +1548,19 @@ const bindAutonomyControls = () => {
     wireSlider(confidenceThresholdSlider, "confidenceThresholdValue", (slider, label) => {
       if (label) label.textContent = slider.value + "%";
     });
+
+    wireSlider(document.getElementById("optionStopLossSlider"), "optionStopLossValue", (slider, label) => {
+      const percent = Number(slider.value);
+      if (label) label.textContent = percent + "%";
+      const preview = document.getElementById("optionStopLossPreview");
+      if (preview) preview.textContent = `A $1.00 premium triggers an exit at $${(1 - percent / 100).toFixed(2)}.`;
+    });
+    wireSlider(document.getElementById("optionTargetGainSlider"), "optionTargetGainValue", (slider, label) => {
+      if (label) label.textContent = slider.value + "%";
+    });
+    wireSlider(document.getElementById("optionCloseDaysSlider"), "optionCloseDaysValue", (slider, label) => {
+      if (label) label.textContent = slider.value + " days";
+    });
   }
 
   if (saveRiskBtn instanceof HTMLButtonElement) {
@@ -1542,6 +1574,17 @@ const bindAutonomyControls = () => {
               daily_loss_limit_percent: dailyLossPercentSlider instanceof HTMLInputElement ? Number(dailyLossPercentSlider.value) : undefined,
               risk_percent_of_balance: riskPercentSlider instanceof HTMLInputElement ? Number(riskPercentSlider.value) : undefined,
               max_positions: maxPositionsSlider instanceof HTMLInputElement ? Number(maxPositionsSlider.value) : undefined,
+              ...(() => {
+                const value = (id) => {
+                  const node = document.getElementById(id);
+                  return node instanceof HTMLInputElement ? Number(node.value) : undefined;
+                };
+                return {
+                  option_stop_loss_percent: value("optionStopLossSlider"),
+                  option_target_gain_percent: value("optionTargetGainSlider"),
+                  option_close_days_before_expiration: value("optionCloseDaysSlider"),
+                };
+              })(),
             }),
           }),
           requestJson("/api/settings", {

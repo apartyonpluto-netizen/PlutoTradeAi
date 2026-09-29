@@ -29,6 +29,7 @@ stops can gap, fills can slip, and a small sample can mislead.
 from __future__ import annotations
 
 import math
+from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -320,4 +321,248 @@ def compact_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
             for key in ("sample_size", "win_count", "win_probability_percent", "win_probability_interval", "mean_net_return_percent", "reliable")
         },
         "expected_value": plan.get("expected_value"),
+    }
+
+
+OPTION_MULTIPLIER = Decimal("100")
+MAX_OPTION_SPREAD_PERCENT = Decimal("10")       # of mid; wider is "watch" - the exit is judged on the bid
+OPTION_EXIT_SLIPPAGE = Decimal("0.005")         # app exits sell 0.5% below the bid (TARGET_EXIT_SLIPPAGE_TOLERANCE)
+TRIGGER_CUSHION_PERCENT = Decimal("5")          # bid within 5% above the trigger at entry is "watch"
+
+
+def build_option_trade_plan(
+    *,
+    ticker: str,
+    strategy: Optional[str],
+    setup_score: Optional[float],
+    contract: Dict[str, Any],
+    underlying_price: Any,
+    quote_age_seconds: Optional[float],
+    plan_equity: Any,
+    equity_source: str,
+    existing_exposure: Any,
+    available_buying_power: Any,
+    sizing: Dict[str, Any],
+    stop_loss_percent: Any,
+    target_gain_percent: Any,
+    close_days_before_expiration: int,
+    today: date,
+    per_contract_cost: Any = 0,
+    evidence: Optional[Dict[str, Any]] = None,
+    quote_deferred: bool = False,
+) -> Dict[str, Any]:
+    """Plan for buying a call or put. Kept separate from the stock plan on
+    purpose: a long option's most you can lose is the premium paid, so the
+    stock risk-per-share formula does not apply.
+
+    Exit rule as the app runs it (app._check_and_execute_option_exit): each
+    monitor pass reads the option's live BID; at or below entry premium x
+    (1 - stop_loss_percent) it sells, at or above entry x (1 +
+    target_gain_percent) it sells, and it sells regardless once expiration
+    is close_days_before_expiration away. The sell is a limit 0.5% under
+    the bid. Nothing rests at the broker - protection depends on the monitor
+    running and a live bid existing - so the loss at the trigger is an
+    estimate, not a cap. The full premium is the most that can be lost.
+
+    `sizing` is app._compute_option_contract_quantity's result."""
+    option_type = str(contract.get("option_type") or "").upper()
+    bid, ask = _d(contract.get("bid")), _d(contract.get("ask"))
+    mid = _d(contract.get("mid")) or ((bid + ask) / 2 if bid is not None and ask is not None else None)
+    strike = _d(contract.get("strike"))
+    delta = _d(contract.get("delta"))
+    underlying = _d(underlying_price)
+    equity = _d(plan_equity) or Decimal(0)
+    exposure_before = _d(existing_exposure) or Decimal(0)
+    buying_power = _d(available_buying_power)
+    fee = _d(per_contract_cost) or Decimal(0)
+    stop_pct = _d(stop_loss_percent)
+    target_pct = _d(target_gain_percent)
+    quantity = int(sizing.get("quantity") or 0)
+
+    expiration: Optional[date] = None
+    try:
+        expiration = date.fromisoformat(str(contract.get("expiration_date")))
+    except (TypeError, ValueError):
+        pass
+    days_to_expiration = (expiration - today).days if expiration else None
+
+    reject: List[str] = []
+    watch: List[str] = []
+    limitations: List[str] = [
+        "Protection is monitored by the app, not held at the broker: exits need the monitor running and a live bid. "
+        "The exit trigger is not a maximum loss - fast moves and wide spreads can sell well below it.",
+        "The most this position can lose is the full premium paid.",
+    ]
+    if fee == 0:
+        limitations.append("Broker and regulatory option fees are not included in these numbers.")
+
+    if option_type not in ("CALL", "PUT"):
+        reject.append("No valid call or put contract.")
+    if ask is None or ask <= 0 or bid is None or bid <= 0:
+        reject.append("The contract has no two-sided quote (bid and ask).")
+    if quote_age_seconds is None and not quote_deferred:
+        reject.append("The option quote's age is unknown.")
+    elif quote_age_seconds is not None and quote_age_seconds > MAX_QUOTE_AGE_SECONDS:
+        reject.append(f"The option quote is stale (limit {MAX_QUOTE_AGE_SECONDS}s).")
+    if stop_pct is None or not (Decimal(0) < stop_pct < Decimal(100)):
+        reject.append("No valid exit trigger percent is configured.")
+    if target_pct is None or target_pct <= 0:
+        watch.append("No profit-taking percent is configured.")
+    if days_to_expiration is None:
+        reject.append("The contract's expiration date is unknown.")
+    elif days_to_expiration <= close_days_before_expiration:
+        reject.append(
+            f"Expires in {days_to_expiration} day(s) - inside the {close_days_before_expiration}-day window where the app "
+            "closes positions, so it would be sold almost immediately."
+        )
+    if equity <= 0:
+        reject.append("Account equity is zero or unknown.")
+
+    trigger = ask * (Decimal(1) - stop_pct / 100) if ask is not None and stop_pct is not None else None
+    if trigger is not None and bid is not None and bid > 0:
+        if bid <= trigger:
+            reject.append(
+                f"The bid (${bid}) is already at or below the exit trigger (${_money(trigger)}): buying at the ask would be "
+                "sold on the first monitoring pass."
+            )
+        elif bid <= trigger * (Decimal(1) + TRIGGER_CUSHION_PERCENT / 100):
+            watch.append(f"The bid is within {TRIGGER_CUSHION_PERCENT}% of the exit trigger - a small move would trigger an exit.")
+
+    spread_percent = None
+    if bid is not None and ask is not None and mid is not None and mid > 0:
+        spread_percent = (ask - bid) / mid * 100
+        if spread_percent > MAX_OPTION_SPREAD_PERCENT and not any("already at or below" in r for r in reject):
+            watch.append(f"The bid-ask spread is {spread_percent.quantize(Decimal('0.1'))}% of the mid - you start well below the price you paid.")
+
+    if not reject and quantity < 1:
+        reason = sizing.get("reason") or "one contract costs more than this account's limits allow"
+        reject.append(f"Trade does not fit this account: {reason}.")
+
+    moneyness = None
+    if underlying is not None and strike is not None and underlying > 0 and option_type in ("CALL", "PUT"):
+        distance = (underlying - strike) / underlying * 100 if option_type == "CALL" else (strike - underlying) / underlying * 100
+        moneyness = "at the money" if abs(distance) < Decimal("0.5") else ("in the money" if distance > 0 else "out of the money")
+        moneyness = f"{moneyness} ({abs(distance).quantize(Decimal('0.1'))}%)"
+
+    numbers: Dict[str, Any] = {
+        "quantity": quantity,
+        "multiplier": int(OPTION_MULTIPLIER),
+        "option_symbol": contract.get("option_symbol"),
+        "option_type": option_type,
+        "strike": float(strike) if strike is not None else None,
+        "expiration_date": contract.get("expiration_date"),
+        "days_to_expiration": days_to_expiration,
+        "underlying_price": float(underlying) if underlying is not None else None,
+        "moneyness": moneyness,
+        "bid": float(bid) if bid is not None else None,
+        "ask": float(ask) if ask is not None else None,
+        "mid": float(mid) if mid is not None else None,
+        "spread_percent": float(spread_percent.quantize(Decimal("0.1"))) if spread_percent is not None else None,
+        "delta": float(delta) if delta is not None else None,
+        "quote_age_seconds": quote_age_seconds,
+        "entry_premium": float(ask) if ask is not None else None,
+        "breakeven_at_expiration": None,
+        "exit_trigger_premium": _money(trigger) if trigger is not None else None,
+        "stop_loss_percent": float(stop_pct) if stop_pct is not None else None,
+        "target_premium": None,
+        "target_gain_percent": float(target_pct) if target_pct is not None else None,
+        "time_exit_date": (expiration - timedelta(days=close_days_before_expiration)).isoformat() if expiration else None,
+        "protection": "app-monitored (no order rests at the broker)",
+        "plan_equity": _money(equity),
+        "equity_source": equity_source,
+        "premium_at_risk": None,
+        "allocation_percent": None,
+        "loss_at_trigger": None,
+        "loss_at_trigger_percent": None,
+        "gain_at_target": None,
+        "reward_to_risk": None,
+        "underlying_notional": None,
+        "delta_adjusted_notional": None,
+        "leverage_after": None,
+        "buying_power_used": None,
+        "buying_power_after": None,
+        "binding_constraints": list(sizing.get("binding_constraints") or []),
+        "constraints": dict(sizing.get("constraints") or {}),
+    }
+    if ask is not None and strike is not None and option_type in ("CALL", "PUT"):
+        numbers["breakeven_at_expiration"] = _money(strike + ask if option_type == "CALL" else strike - ask)
+    if ask is not None and target_pct is not None and target_pct > 0:
+        numbers["target_premium"] = _money(ask * (Decimal(1) + target_pct / 100))
+
+    scenarios: List[Dict[str, Any]] = []
+    if not reject and quantity >= 1 and ask is not None and bid is not None and trigger is not None:
+        contracts = Decimal(quantity)
+        per_contract_fees = fee * 2  # to open and to close
+        cost = ask * OPTION_MULTIPLIER * contracts + fee * contracts
+        trigger_exit = trigger * (Decimal(1) - OPTION_EXIT_SLIPPAGE)
+        loss_at_trigger = (ask - trigger_exit) * OPTION_MULTIPLIER * contracts + per_contract_fees * contracts
+        numbers.update(
+            {
+                "premium_at_risk": _money(cost),
+                "allocation_percent": _pct(cost, equity),
+                "loss_at_trigger": _money(loss_at_trigger),
+                "loss_at_trigger_percent": _pct(loss_at_trigger, equity),
+                "leverage_after": float(((exposure_before + cost) / equity).quantize(Decimal("0.01"))),
+                "buying_power_used": _money(cost),
+                "buying_power_after": _money(buying_power - cost) if buying_power is not None else None,
+            }
+        )
+        if underlying is not None:
+            notional = underlying * OPTION_MULTIPLIER * contracts
+            numbers["underlying_notional"] = _money(notional)
+            if delta is not None:
+                numbers["delta_adjusted_notional"] = _money(abs(delta) * notional)
+        if target_pct is not None and target_pct > 0:
+            target_exit = ask * (Decimal(1) + target_pct / 100) * (Decimal(1) - OPTION_EXIT_SLIPPAGE)
+            gain = (target_exit - ask) * OPTION_MULTIPLIER * contracts - per_contract_fees * contracts
+            numbers["gain_at_target"] = _money(gain)
+            if loss_at_trigger > 0:
+                reward_to_risk = gain / loss_at_trigger
+                numbers["reward_to_risk"] = float(reward_to_risk.quantize(Decimal("0.01")))
+                if reward_to_risk < MIN_REWARD_TO_RISK:
+                    watch.append(f"Gain at the target is less than the loss at the exit trigger (reward-to-risk {numbers['reward_to_risk']}).")
+
+        spread = ask - bid
+        gap_exit = max(trigger - spread, Decimal(0)) * (Decimal(1) - OPTION_EXIT_SLIPPAGE)
+        for label, exit_premium in (
+            ("Exit at the trigger", trigger_exit),
+            ("Exit one bid-ask spread below the trigger", gap_exit),
+            ("Premium goes to zero", Decimal(0)),
+        ):
+            loss = (ask - exit_premium) * OPTION_MULTIPLIER * contracts + (per_contract_fees if exit_premium > 0 else fee) * contracts
+            scenarios.append({"scenario": label, "exit_price": _money(exit_premium), "loss": _money(loss), "loss_percent_of_equity": _pct(loss, equity)})
+
+    probability = evidence or evidence_from_returns([], strategy=strategy or "unknown", source="none")
+    expected_value = None
+    if probability.get("reliable") and numbers["premium_at_risk"] is not None:
+        mean = probability["mean_net_return_percent"]
+        interval = probability["mean_net_return_interval"]
+        cost_value = numbers["premium_at_risk"]
+        expected_value = {
+            "per_trade": round(cost_value * mean / 100, 2),
+            "interval": {"low": round(cost_value * interval["low"] / 100, 2), "high": round(cost_value * interval["high"] / 100, 2)},
+            "note": "Mean net return of this strategy's closed option trades applied to this premium.",
+        }
+        if mean <= 0:
+            watch.append("This strategy's closed option trades have not shown a positive average net return.")
+
+    if quote_deferred and quote_age_seconds is None:
+        limitations.append("Preview: the option quote was not re-fetched; approval re-checks the live premium before any order.")
+
+    decision = "reject" if reject else ("watch" if watch else "trade")
+    return {
+        "planner_version": PLANNER_VERSION,
+        "ticker": ticker,
+        "instrument": "OPTION",
+        "direction": "long",
+        "strategy": strategy,
+        "setup_score": setup_score,
+        "setup_score_note": "Setup quality score from the strategy engine - not a probability of winning.",
+        "decision": decision,
+        "reasons": reject or watch or ["Contract, size and quote checks pass. Approval is still required before any order."],
+        "numbers": numbers,
+        "adverse_scenarios": scenarios,
+        "probability": probability,
+        "expected_value": expected_value,
+        "limitations": limitations,
     }

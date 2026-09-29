@@ -4152,6 +4152,9 @@ def api_autonomy_risk_settings():
             daily_loss_limit_percent=payload.get("daily_loss_limit_percent"),
             risk_percent_of_balance=payload.get("risk_percent_of_balance"),
             max_positions=payload.get("max_positions"),
+            option_stop_loss_percent=payload.get("option_stop_loss_percent"),
+            option_target_gain_percent=payload.get("option_target_gain_percent"),
+            option_close_days_before_expiration=payload.get("option_close_days_before_expiration"),
         )
     except (ValueError, TypeError) as error:
         raise ValidationError(str(error)) from error
@@ -10413,6 +10416,14 @@ def _recheck_ticket_before_submission(user_id: str, creds: Dict[str, str], ticke
             drift_pct = abs(ask - limit_price) / limit_price * 100
             if drift_pct > OPTION_PREMIUM_DRIFT_TOLERANCE_PERCENT:
                 reasons.append(f"the option premium moved {drift_pct:.1f}% since the ticket (${limit_price:.2f} -> ${ask:.2f})")
+            # The exit is judged on the bid; buying at the ask when the bid is
+            # already at the trigger would be sold on the first monitor pass.
+            bid = _parse_option_float((rows[0] if rows else {}).get("bid"))
+            trigger = limit_price * (1 - _option_exit_settings(risk_settings)["stop_loss_percent"] / 100)
+            if bid is None or bid <= 0:
+                reasons.append("no fresh option bid available - the exit rule could not be evaluated")
+            elif bid <= trigger:
+                reasons.append(f"the bid (${bid:.2f}) is at or below the exit trigger (${trigger:.2f}) - it would be sold immediately")
     else:
         try:
             cross_check = market_data_aggregator.get_cross_checked_price(ticker, creds)
@@ -10591,6 +10602,40 @@ def api_trade_ticket_decline(ticket_id: str):
     return _api_success({"ticket": _ticket_for_api(ticket)}, ok=True)
 
 
+def _option_exit_settings(risk_settings: Dict[str, object]) -> Dict[str, object]:
+    """The option exit rule exactly as _check_and_execute_option_exit applies it."""
+    return {
+        "stop_loss_percent": float(risk_settings.get("option_stop_loss_percent") or 50.0),
+        "target_gain_percent": float(risk_settings.get("option_target_gain_percent") or 50.0),
+        "close_days_before_expiration": int(risk_settings.get("option_close_days_before_expiration") or 3),
+    }
+
+
+def _option_trade_plan_for_candidate(
+    *, ticker, opp, contract, underlying_price, sizing, plan_equity, equity_source, existing_exposure,
+    available_buying_power, risk_settings, evidence_returns, quote_age_seconds=0.0,
+) -> Dict[str, object]:
+    """Option counterpart of _trade_plan_for_candidate. Never raises."""
+    strategy = opp.get("strategy")
+    try:
+        exits = _option_exit_settings(risk_settings)
+        evidence = trade_planner.evidence_from_returns(
+            evidence_returns.get(strategy) or [], strategy=strategy or "unknown", source="closed option trades, all accounts",
+        )
+        return trade_planner.build_option_trade_plan(
+            ticker=ticker, strategy=strategy, setup_score=opp.get("confidence"), contract=contract,
+            underlying_price=underlying_price, quote_age_seconds=quote_age_seconds, plan_equity=plan_equity,
+            equity_source=equity_source, existing_exposure=existing_exposure, available_buying_power=available_buying_power,
+            sizing=sizing, stop_loss_percent=exits["stop_loss_percent"], target_gain_percent=exits["target_gain_percent"],
+            close_days_before_expiration=exits["close_days_before_expiration"], today=_now_utc().astimezone(ZoneInfo("America/New_York")).date(),
+            evidence=evidence,
+        )
+    except Exception as error:  # noqa: BLE001
+        logger.warning("Option trade plan failed for %s: %s", ticker, error)
+        return {"planner_version": trade_planner.PLANNER_VERSION, "ticker": ticker, "instrument": "OPTION", "decision": "reject",
+                "reasons": [f"Plan could not be built: {error}"]}
+
+
 def _tickers_with_open_positions(orders: List[Dict[str, object]]) -> set:
     """Tickers with an entry still short of a terminal state - the
     duplicate-position guard's input.
@@ -10760,9 +10805,10 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
     plan_equity_source = "configured paper balance" if virtual_balance is not None else "broker net liquidation value"
     plan_existing_exposure = sum(_float_or_zero(position.get("market_value")) for position in real_open_positions_snapshot)
     try:
-        strategy_evidence_returns = closed_trade_returns_by_strategy()
+        strategy_evidence_returns = closed_trade_returns_by_strategy(instrument_type="EQUITY")
+        option_evidence_returns = closed_trade_returns_by_strategy(instrument_type="OPTION")
     except Exception:  # noqa: BLE001 - evidence is informational; plans then say "not reliably estimated"
-        strategy_evidence_returns = {}
+        strategy_evidence_returns, option_evidence_returns = {}, {}
     if margin_account_id:
         open_position_count += len(webull_api.get_account_positions(creds["app_key"], creds["app_secret"], margin_account_id))
     available_position_slots = _available_position_slots(max_positions, open_position_count, OVERNIGHT_MAX_ORDERS_PER_RUN)
@@ -11330,6 +11376,13 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                         "instrument_type": "OPTION",
                         "option_contract_found": True,
                     }
+                    # Contract quote was fetched moments ago by select_option_contract.
+                    option_entry["trade_plan"] = _option_trade_plan_for_candidate(
+                        ticker=ticker, opp=opp, contract=option_contract, underlying_price=limit_price, sizing=option_sizing,
+                        plan_equity=current_balance, equity_source=plan_equity_source, existing_exposure=plan_existing_exposure,
+                        available_buying_power=option_available_buying_power, risk_settings=risk_settings,
+                        evidence_returns=option_evidence_returns,
+                    )
                     option_limit_price = round(option_contract["ask"], 2)
                     option_cost_reservation = _to_decimal(option_sizing["cost_per_contract"]) * _to_decimal(option_quantity)
                     if dry_run:
@@ -11357,7 +11410,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                             ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
                             raw_confidence=int(opp.get("confidence", 0) or 0), decision="proposed", reason_skipped=None,
                             quantity=option_quantity, entry_client_order_id=None, skip_category="awaiting_approval",
-                            signal_snapshot=_signal_snapshot_from(opp),
+                            signal_snapshot=_signal_snapshot_from(opp), trade_plan=option_entry.get("trade_plan"),
                         )
                         continue
                     try:
@@ -11397,6 +11450,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                         reason_skipped=option_entry.get("error") if option_entry.get("status") != "placed" else None,
                         quantity=option_quantity, entry_client_order_id=option_entry.get("entry_client_order_id"),
                         skip_category=option_entry.get("skip_category"), signal_snapshot=_signal_snapshot_from(opp),
+                        trade_plan=option_entry.get("trade_plan"),
                     )
                     if option_entry.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE:
                         break  # same circuit breaker as the equity path - this account's committed capital is no longer confidently known this run
