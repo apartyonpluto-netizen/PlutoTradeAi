@@ -128,3 +128,16 @@
     .plan-scenarios tr { margin-bottom: 8px; }
     .plan-scenarios td:first-child { color: var(--text-muted); }
 }
+
+/* ---- trade tickets (approval mode) ---- */
+.trade-tickets { display: grid; gap: 12px; }
+.trade-ticket { border: 1px solid var(--border-strong); border-radius: var(--radius-md); padding: 12px 14px; background: var(--bg-elevated-soft); }
+.trade-ticket-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 4px; }
+.ticket-status { font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); }
+.ticket-awaiting_approval { border-color: var(--accent); }
+.ticket-submitted .ticket-status { color: var(--positive); }
+.ticket-recheck_failed .ticket-status, .ticket-declined .ticket-status { color: var(--negative); }
+.trade-ticket .inline-actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+.trade-ticket-history { margin-top: 4px; }
+.trade-ticket-history > summary { cursor: pointer; color: var(--text-muted); font-size: 0.85rem; margin-bottom: 8px; }
+.trade-ticket-history .trade-ticket { margin-bottom: 8px; opacity: 0.85; }

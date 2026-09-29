@@ -763,6 +763,217 @@ const statusLightClass = (platform, status) => {
   return "status-red";
 };
 
+// Trade plan (trade_planner.py) - built with DOM nodes only, never innerHTML.
+const money = (value) => (value === null || value === undefined ? "--" : `$${Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+const pct = (value) => (value === null || value === undefined ? "--" : `${value}%`);
+const el = (tag, className, text) => {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+};
+const renderTradePlan = (plan) => {
+  const box = el("details", "trade-plan");
+  const summary = el("summary");
+  summary.appendChild(el("span", `plan-decision plan-${plan.decision}`, (plan.decision || "").toUpperCase()));
+  summary.appendChild(el("span", "plan-summary-text", ` Trade plan · ${(plan.reasons || [])[0] || ""}`));
+  box.appendChild(summary);
+
+  const n = plan.numbers || {};
+  const grid = el("dl", "plan-grid");
+  const row = (label, value) => {
+    grid.appendChild(el("dt", "", label));
+    grid.appendChild(el("dd", "", value));
+  };
+  row("Quantity", n.quantity ? `${n.quantity} share(s)` : "none");
+  row("Entry / stop / target", `${money(n.entry_price)} / ${money(n.stop_price)} / ${money(n.target_price)}`);
+  row("Current price", n.current_quote === null || n.current_quote === undefined ? "checked just before submission" : money(n.current_quote));
+  row("Position value (exposure)", money(n.exposure));
+  row("Share of account (allocation)", pct(n.allocation_percent));
+  row("Loss if the stop fills", `${money(n.planned_loss)} (${pct(n.risk_percent)} of account)`);
+  row("Gain if the target fills", money(n.reward_if_target));
+  row("Reward-to-risk", n.reward_to_risk === null || n.reward_to_risk === undefined ? "--" : String(n.reward_to_risk));
+  row("Leverage after", n.leverage_after === null || n.leverage_after === undefined ? "--" : `${n.leverage_after}x`);
+  row("Account used for sizing", `${money(n.plan_equity)} (${n.equity_source || "unknown"})`);
+  box.appendChild(grid);
+
+  if ((plan.reasons || []).length > 1) {
+    const reasons = el("ul", "plan-reasons");
+    plan.reasons.forEach((reason) => reasons.appendChild(el("li", "", reason)));
+    box.appendChild(reasons);
+  }
+
+  if ((plan.adverse_scenarios || []).length) {
+    box.appendChild(el("p", "plan-label", "If it goes wrong"));
+    const table = el("table", "plan-scenarios");
+    plan.adverse_scenarios.forEach((scenario) => {
+      const tr = el("tr");
+      tr.appendChild(el("td", "", scenario.scenario));
+      tr.appendChild(el("td", "", money(scenario.exit_price)));
+      tr.appendChild(el("td", "", `${money(scenario.loss)} (${pct(scenario.loss_percent_of_equity)})`));
+      table.appendChild(tr);
+    });
+    box.appendChild(table);
+  }
+
+  const probability = plan.probability || {};
+  box.appendChild(el("p", "plan-label", "Chance of winning"));
+  box.appendChild(el("p", "muted", probability.reliable
+    ? `${probability.win_probability_percent}% (range ${probability.win_probability_interval.low}-${probability.win_probability_interval.high}%) from ${probability.sample_size} closed trades.`
+    : (probability.note || "Probability not reliably estimated.")));
+  if (plan.expected_value) {
+    box.appendChild(el("p", "muted", `Average result per trade: ${money(plan.expected_value.per_trade)} (range ${money(plan.expected_value.interval.low)} to ${money(plan.expected_value.interval.high)}).`));
+  }
+  if (plan.setup_score !== undefined && plan.setup_score !== null) {
+    box.appendChild(el("p", "muted", `Setup score ${plan.setup_score} - ${plan.setup_score_note || ""}`));
+  }
+  if ((plan.limitations || []).length) {
+    const notes = el("ul", "plan-limitations");
+    plan.limitations.forEach((note) => notes.appendChild(el("li", "", note)));
+    box.appendChild(notes);
+  }
+  return box;
+};
+
+const bindTradeTickets = () => {
+  const panel = document.getElementById("tradeTicketsPanel");
+  const list = document.getElementById("tradeTicketsList");
+  const summary = document.getElementById("tradeTicketsSummary");
+  if (!panel || !list || !summary) return;
+
+  let inFlight = false;
+  let sequence = 0;
+  let lastRendered = "";
+
+  const terms = (t) => (t.instrument_type === "OPTION"
+    ? `${t.quantity} x ${t.ticker} ${t.option_type} $${t.strike} exp ${t.expiration_date} @ $${t.limit_price}`
+    : `${t.quantity} share(s) of ${t.ticker} @ $${t.limit_price}`);
+
+  const renderTicket = (t) => {
+    const card = el("article", `trade-ticket ticket-${(t.status || "").toLowerCase()}`);
+    const head = el("div", "trade-ticket-head");
+    head.appendChild(el("strong", "", `${t.ticker} · ${t.direction === "short" ? "SHORT" : (t.instrument_type === "OPTION" ? t.option_type : "LONG")}`));
+    head.appendChild(el("span", "ticket-status", (t.status || "").replace(/_/g, " ")));
+    card.appendChild(head);
+    card.appendChild(el("p", "", terms(t)));
+    const meta = el("p", "muted");
+    const parts = [];
+    if (t.stop) parts.push(`stop $${t.stop}`);
+    if (t.target) parts.push(`target $${t.target}`);
+    if (t.premium_at_risk) parts.push(`premium at risk $${t.premium_at_risk}`);
+    if (t.strategy) parts.push(t.strategy);
+    if (t.confidence !== undefined && t.confidence !== null) parts.push(`setup score ${t.confidence}`);
+    if (t.status === "AWAITING_APPROVAL" && t.expires_at) {
+      const expires = new Date(t.expires_at);
+      parts.push(Number.isNaN(expires.getTime()) ? "expires soon" : `expires ${expires.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`);
+    }
+    meta.textContent = parts.join(" · ");
+    card.appendChild(meta);
+    if (t.trade_thesis) card.appendChild(el("p", "muted", t.trade_thesis));
+    if (t.trade_plan) card.appendChild(renderTradePlan(t.trade_plan));
+    if (t.recheck && t.recheck.reasons && t.recheck.reasons.length) {
+      const why = el("ul", "plan-reasons");
+      t.recheck.reasons.forEach((reason) => why.appendChild(el("li", "", reason)));
+      card.appendChild(el("p", "plan-label", "Not submitted"));
+      card.appendChild(why);
+    }
+    if (t.submission) {
+      card.appendChild(el("p", "muted", `Submitted: ${t.submission.status}${t.submission.error ? " - " + t.submission.error : ""}`));
+    }
+    if (t.status === "AWAITING_APPROVAL") {
+      const actions = el("div", "inline-actions");
+      const approve = el("button", "", "Approve and submit");
+      approve.type = "button";
+      approve.dataset.action = "approve";
+      const decline = el("button", "ghost-button", "Decline");
+      decline.type = "button";
+      decline.dataset.action = "decline";
+      actions.append(approve, decline);
+      card.appendChild(actions);
+    }
+    card.dataset.ticketId = t.ticket_id;
+    card.dataset.version = t.version;
+    card.dataset.ticker = t.ticker;
+    return card;
+  };
+
+  const render = (payload) => {
+    const tickets = payload.tickets || [];
+    const awaiting = tickets.filter((t) => t.status === "AWAITING_APPROVAL");
+    const recent = tickets.filter((t) => t.status !== "AWAITING_APPROVAL").slice(0, 5);
+    panel.hidden = !(payload.approval_mode || tickets.length);
+    summary.textContent = payload.approval_mode
+      ? (awaiting.length ? `${awaiting.length} ticket(s) waiting for your decision. Nothing is submitted until you approve it.` : "Approval mode is on. The next scan that finds a qualifying setup will propose it here.")
+      : "Approval mode is off (Account Hub > Autonomous Mode > APPROVAL). Recent tickets are shown below.";
+    const key = JSON.stringify(tickets.map((t) => [t.ticket_id, t.status, t.version]));
+    if (key === lastRendered) return;
+    lastRendered = key;
+    list.replaceChildren();
+    awaiting.forEach((t) => list.appendChild(renderTicket(t)));
+    if (recent.length) {
+      const details = el("details", "trade-ticket-history");
+      details.appendChild(el("summary", "", `Recent decisions (${recent.length})`));
+      recent.forEach((t) => details.appendChild(renderTicket(t)));
+      list.appendChild(details);
+    }
+    refreshRelativeTimes();
+  };
+
+  const load = async (force = false) => {
+    // Background polling pauses while the tab is hidden; a load right
+    // after the user's own action (force) always runs.
+    if (inFlight || (document.hidden && !force)) return;
+    inFlight = true;
+    const mySequence = ++sequence;
+    try {
+      const payload = await requestJson("/api/trade-tickets");
+      if (mySequence !== sequence) return;  // an older response must not overwrite a newer one
+      render(payload.data || payload);
+    } catch (error) {
+      summary.textContent = `Could not load trade tickets: ${error.message}`;
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  list.addEventListener("click", async (event) => {
+    const button = event.target;
+    if (!(button instanceof HTMLButtonElement) || !button.dataset.action) return;
+    const card = button.closest("[data-ticket-id]");
+    if (!(card instanceof HTMLElement)) return;
+    const { ticketId, version, ticker } = card.dataset;
+    const action = button.dataset.action;
+    if (action === "approve" && !window.confirm(`Approve and submit ${ticker}? The price, buying power and position limits are re-checked first; the order is only sent if everything still holds.`)) return;
+    let reason = "";
+    if (action === "decline") {
+      reason = window.prompt(`Why decline ${ticker}? (optional - ${ticker} will not be proposed again today)`) || "";
+    }
+    card.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+    try {
+      const payload = await requestJson(`/api/trade-tickets/${ticketId}/${action}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(action === "approve" ? { version } : { version, reason }),
+      });
+      if (action === "approve") {
+        const entry = (payload.data && payload.data.entry) || {};
+        showToast(`${ticker}: ${entry.status === "placed" ? "order submitted" : `submission ${entry.status || "recorded"}`}.`, entry.status === "placed" ? "success" : "info");
+      } else {
+        showToast(`${ticker} declined.`, "info");
+      }
+    } catch (error) {
+      showToast(error.message, "error");
+    } finally {
+      lastRendered = "";
+      await load(true);
+    }
+  });
+
+  load(true);
+  setInterval(() => load(), 15000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
+};
+
 const bindAccountHubPage = () => {
   const cards = Array.from(document.querySelectorAll(".account-card"));
   if (!cards.length) return;
@@ -978,78 +1189,6 @@ const bindAccountHubPage = () => {
       }
     });
   });
-
-  // Trade plan (trade_planner.py) - built with DOM nodes only, never innerHTML.
-  const money = (value) => (value === null || value === undefined ? "--" : `$${Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
-  const pct = (value) => (value === null || value === undefined ? "--" : `${value}%`);
-  const el = (tag, className, text) => {
-    const node = document.createElement(tag);
-    if (className) node.className = className;
-    if (text !== undefined) node.textContent = text;
-    return node;
-  };
-  const renderTradePlan = (plan) => {
-    const box = el("details", "trade-plan");
-    const summary = el("summary");
-    summary.appendChild(el("span", `plan-decision plan-${plan.decision}`, (plan.decision || "").toUpperCase()));
-    summary.appendChild(el("span", "plan-summary-text", ` Trade plan · ${(plan.reasons || [])[0] || ""}`));
-    box.appendChild(summary);
-
-    const n = plan.numbers || {};
-    const grid = el("dl", "plan-grid");
-    const row = (label, value) => {
-      grid.appendChild(el("dt", "", label));
-      grid.appendChild(el("dd", "", value));
-    };
-    row("Quantity", n.quantity ? `${n.quantity} share(s)` : "none");
-    row("Entry / stop / target", `${money(n.entry_price)} / ${money(n.stop_price)} / ${money(n.target_price)}`);
-    row("Current price", n.current_quote === null || n.current_quote === undefined ? "checked just before submission" : money(n.current_quote));
-    row("Position value (exposure)", money(n.exposure));
-    row("Share of account (allocation)", pct(n.allocation_percent));
-    row("Loss if the stop fills", `${money(n.planned_loss)} (${pct(n.risk_percent)} of account)`);
-    row("Gain if the target fills", money(n.reward_if_target));
-    row("Reward-to-risk", n.reward_to_risk === null || n.reward_to_risk === undefined ? "--" : String(n.reward_to_risk));
-    row("Leverage after", n.leverage_after === null || n.leverage_after === undefined ? "--" : `${n.leverage_after}x`);
-    row("Account used for sizing", `${money(n.plan_equity)} (${n.equity_source || "unknown"})`);
-    box.appendChild(grid);
-
-    if ((plan.reasons || []).length > 1) {
-      const reasons = el("ul", "plan-reasons");
-      plan.reasons.forEach((reason) => reasons.appendChild(el("li", "", reason)));
-      box.appendChild(reasons);
-    }
-
-    if ((plan.adverse_scenarios || []).length) {
-      box.appendChild(el("p", "plan-label", "If it goes wrong"));
-      const table = el("table", "plan-scenarios");
-      plan.adverse_scenarios.forEach((scenario) => {
-        const tr = el("tr");
-        tr.appendChild(el("td", "", scenario.scenario));
-        tr.appendChild(el("td", "", money(scenario.exit_price)));
-        tr.appendChild(el("td", "", `${money(scenario.loss)} (${pct(scenario.loss_percent_of_equity)})`));
-        table.appendChild(tr);
-      });
-      box.appendChild(table);
-    }
-
-    const probability = plan.probability || {};
-    box.appendChild(el("p", "plan-label", "Chance of winning"));
-    box.appendChild(el("p", "muted", probability.reliable
-      ? `${probability.win_probability_percent}% (range ${probability.win_probability_interval.low}-${probability.win_probability_interval.high}%) from ${probability.sample_size} closed trades.`
-      : (probability.note || "Probability not reliably estimated.")));
-    if (plan.expected_value) {
-      box.appendChild(el("p", "muted", `Average result per trade: ${money(plan.expected_value.per_trade)} (range ${money(plan.expected_value.interval.low)} to ${money(plan.expected_value.interval.high)}).`));
-    }
-    if (plan.setup_score !== undefined && plan.setup_score !== null) {
-      box.appendChild(el("p", "muted", `Setup score ${plan.setup_score} - ${plan.setup_score_note || ""}`));
-    }
-    if ((plan.limitations || []).length) {
-      const notes = el("ul", "plan-limitations");
-      plan.limitations.forEach((note) => notes.appendChild(el("li", "", note)));
-      box.appendChild(notes);
-    }
-    return box;
-  };
 
   const previewScanResult = document.getElementById("previewScanResult");
   const previewScanBtn = document.getElementById("previewScanButton");
@@ -2638,6 +2777,7 @@ onReady(() => {
   bindMissionControlEffects();
   bindLiveDataStatusCard();
   bindTradingEfficiencyPanel();
+  bindTradeTickets();
   bindMarketOverviewChart();
   bindMissionAlertFloater();
   refreshRelativeTimes();

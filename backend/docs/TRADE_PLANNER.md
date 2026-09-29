@@ -77,9 +77,37 @@ the loss is not capped at all.
   scan matches the submitted quantity, reaches the research log, stays
   advisory, and a preview makes no extra market-data call.
 
+## Approval flow (APPROVAL mode)
+
+Set the autonomy mode to **APPROVAL** (Account Hub → Autonomous Mode). The
+scan then runs exactly as in AUTONOMOUS mode, but a candidate that reaches
+submission becomes a **trade ticket** (`backend/autonomy/trade_tickets.py`)
+instead of an order, shown on Mission Control under *Awaiting Your
+Approval* and announced in the alert bell.
+
+- A ticket carries the exact terms (ticker, quantity, limit, stop, target,
+  account; option contract for options), the thesis, and the plan. Its
+  `version` is a hash of those terms. Approving sends the version you saw;
+  if a later scan changed the terms (a new ticket supersedes the old one),
+  the stale approval is refused.
+- A ticket lapses after 20 minutes undecided (the next scan proposes it
+  again if it still qualifies). The same setup on the next scan refreshes the
+  open ticket rather than duplicating it. A declined ticker is not proposed
+  again that trading day.
+- **Approve** claims the ticket atomically (a double click or a second tab
+  gets a conflict), then, under the account's scan lock, re-checks: trading
+  day, kill switch, CORE hours, emergency stop, ambiguous/stuck freezes,
+  duplicate position, max positions, daily loss limit, buying power, and the
+  live price (2% drift for equity via the Alpaca/Webull cross-check; 10% for
+  an option premium). Any failure marks the ticket RECHECK_FAILED with the
+  reasons and nothing is sent. Otherwise the order goes through the scan's
+  own submission path (write-ahead record, deterministic client order id,
+  fill polling, protection), and the ticket records the outcome.
+- Previews never create tickets. Live-money arming is unchanged and separate.
+
 ## Not built yet
 
-Manual approval using the plan (with a re-check before submission), options
-plans, sector/concentration and drawdown limits, error classification of
-closed trades, offline strategy research with versioned promotion, and an
-annotated chart of where the levels came from.
+Options plans (tickets carry the contract and premium at risk, but no
+`trade_plan` numbers), sector/concentration and drawdown limits, error
+classification of closed trades, offline strategy research with versioned
+promotion, and an annotated chart of where the levels came from.

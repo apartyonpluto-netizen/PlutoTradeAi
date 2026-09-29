@@ -145,6 +145,7 @@ if __package__:
     from . import order_lifecycle as ol
     from .anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from .autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
+    from .autonomy import trade_tickets
     from .autonomy.research_log import list_research_decisions, record_research_decision
     from .autonomy.scan_run_log import list_scan_runs, record_scan_run
     from .autonomy.ambiguous_resolution_audit import (
@@ -314,6 +315,7 @@ else:
     import order_lifecycle as ol
     from anthropic_credentials import get_anthropic_api_key, is_anthropic_configured, set_anthropic_api_key
     from autonomy.overnight_orders import list_overnight_orders, record_overnight_order, replace_overnight_orders
+    from autonomy import trade_tickets
     from autonomy.research_log import list_research_decisions, record_research_decision
     from autonomy.scan_run_log import list_scan_runs, record_scan_run
     from autonomy.ambiguous_resolution_audit import (
@@ -10270,6 +10272,325 @@ def _trade_plan_for_candidate(
         return {"planner_version": trade_planner.PLANNER_VERSION, "ticker": ticker, "decision": "reject", "reasons": [f"Plan could not be built: {error}"]}
 
 
+OPTION_PREMIUM_DRIFT_TOLERANCE_PERCENT = 10.0
+
+
+def _propose_trade_ticket(user_id: str, entry: Dict[str, object], opp: Dict[str, object]) -> Dict[str, object]:
+    """Turns a scan candidate that reached submission into a trade ticket
+    (APPROVAL mode). Marks `entry` awaiting_approval and stamps the ticket
+    id/version on it. Nothing is sent to the broker here."""
+    proposal = {
+        "trading_day": entry.get("trading_day"),
+        "ticker": entry.get("ticker"),
+        "instrument_type": entry.get("instrument_type") or "EQUITY",
+        "direction": entry.get("direction") or "long",
+        "side": entry.get("side"),
+        "quantity": entry.get("quantity"),
+        "limit_price": entry.get("limit_price"),
+        "stop": entry.get("stop"),
+        "target": entry.get("target"),
+        "account_id": entry.get("account_id"),
+        "strategy": entry.get("strategy"),
+        "confidence": entry.get("confidence"),
+        "trade_quality": entry.get("trade_quality"),
+        "trade_thesis": entry.get("trade_thesis"),
+        "why_ai_likes_it": entry.get("why_ai_likes_it"),
+        "invalidation_rule": entry.get("invalidation_rule"),
+        "risk_warning": entry.get("risk_warning"),
+        "recommendation": opp.get("recommendation"),
+        "planned_risk_dollars": entry.get("planned_risk_dollars"),
+        "premium_at_risk": entry.get("premium_at_risk"),
+        "option_symbol": entry.get("option_symbol"),
+        "strike": entry.get("strike"),
+        "expiration_date": entry.get("expiration_date"),
+        "option_type": entry.get("option_type"),
+        "trade_plan": trade_planner.compact_plan(entry["trade_plan"]) if isinstance(entry.get("trade_plan"), dict) else None,
+        "llm_verdict": entry.get("llm_verdict"),
+        "llm_reasoning": entry.get("llm_reasoning"),
+    }
+    ticket, outcome = trade_tickets.create_or_refresh_ticket(user_id, proposal)
+    entry["status"] = "awaiting_approval"
+    entry["skip_category"] = "awaiting_approval"
+    entry["ticket_id"] = ticket.get("ticket_id")
+    entry["ticket_version"] = ticket.get("version")
+    entry["ticket_outcome"] = outcome
+    if outcome in ("created", "superseded"):
+        try:
+            if proposal["instrument_type"] == "OPTION":
+                terms = (f"{proposal['quantity']} x {proposal['ticker']} {proposal['option_type']} {proposal['strike']} "
+                         f"exp {proposal['expiration_date']} at ${proposal['limit_price']}")
+            else:
+                terms = f"{proposal['quantity']} share(s) of {proposal['ticker']} at ${proposal['limit_price']}"
+            add_manual_alert(
+                user_id,
+                {
+                    "type": "trade_ticket_awaiting_approval",
+                    "ticker": str(proposal["ticker"]),
+                    "message": f"Trade ticket awaiting your approval: {terms}. Open Mission Control to approve or decline.",
+                },
+            )
+        except Exception:  # noqa: BLE001 - alerting must never affect the scan
+            pass
+    return ticket
+
+
+def _recheck_ticket_before_submission(user_id: str, creds: Dict[str, str], ticket: Dict[str, object]) -> Dict[str, object]:
+    """Everything that could have changed between the scan and the click,
+    re-read from the broker and the market now. Any failed check refuses the
+    submission; the ticket then needs a fresh proposal (the next scan makes
+    one if the setup still qualifies). Returns {"ok", "reasons", "fresh_price", "checked_at"}."""
+    reasons: List[str] = []
+    ticker = str(ticket.get("ticker", "")).upper()
+    instrument_type = str(ticket.get("instrument_type") or "EQUITY")
+    quantity = float(ticket.get("quantity") or 0)
+    limit_price = float(ticket.get("limit_price") or 0)
+    account_id = str(ticket.get("account_id") or "")
+    fresh_price: Optional[float] = None
+
+    if ticket.get("trading_day") != _trading_day_key():
+        reasons.append("this ticket is from a previous trading day")
+    if _new_entries_disabled_by_deployment_kill_switch():
+        reasons.append("new entries are disabled platform-wide (PLUTO_DISABLE_NEW_ENTRIES)")
+    if not _new_entries_allowed(_current_webull_trading_session()):
+        reasons.append("outside CORE trading hours - a broker-side stop cannot be attached until the market opens")
+    risk_settings = get_autonomy_status(user_id)
+    if risk_settings.get("emergency_stop_enabled"):
+        reasons.append("the emergency stop is active")
+    if _has_unresolved_ambiguous_submission_locally(user_id):
+        reasons.append("a prior order submission is unresolved (ambiguous) - entries are frozen until it is resolved")
+    if _has_stuck_transitional_orders_locally(user_id):
+        reasons.append("an existing entry has made no progress for too long - entries are frozen until a human reviews it")
+    if ticker in _tickers_with_open_positions(list_overnight_orders(user_id)):
+        reasons.append(f"{ticker} already has an open, unclosed position")
+    if quantity < 1 or limit_price <= 0 or not account_id:
+        reasons.append("the ticket is missing a valid quantity, price or account")
+    if reasons:
+        return {"ok": False, "reasons": reasons, "fresh_price": None, "checked_at": _now_utc().isoformat()}
+
+    try:
+        sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
+        open_position_count = 0
+        for account in (webull_api.find_individual_cash_account(sandbox_accounts), webull_api.find_individual_margin_account(sandbox_accounts)):
+            if account:
+                open_position_count += len(webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account["account_id"]))
+        max_positions = int(risk_settings.get("max_positions", 0) or 0)
+        if max_positions > 0 and open_position_count >= max_positions:
+            reasons.append(f"max positions reached ({open_position_count}/{max_positions} open)")
+
+        balance = webull_api.get_account_balance(creds["app_key"], creds["app_secret"], account_id)
+        real_net_liquidation_value = float(balance.get("total_net_liquidation_value", 0) or 0)
+        virtual_balance = get_virtual_net_account_value(user_id, real_net_liquidation_value)
+        current_balance = virtual_balance if virtual_balance is not None else real_net_liquidation_value
+        day_pnl = float(balance.get("total_day_profit_loss", 0) or 0)
+        daily_loss_limit_percent = float(risk_settings.get("daily_loss_limit_percent", 0) or 0)
+        if _is_daily_loss_limit_hit(day_pnl, current_balance, daily_loss_limit_percent):
+            reasons.append(f"daily loss limit reached (today's P/L ${day_pnl:,.2f})")
+        if instrument_type == "OPTION":
+            needed = quantity * limit_price * 100
+            buying_power = _extract_option_buying_power(balance)
+        else:
+            needed = quantity * limit_price
+            buying_power = _extract_broker_buying_power(balance)
+        if buying_power is None:
+            reasons.append("could not read the account's buying power")
+        elif buying_power < needed:
+            reasons.append(f"buying power ${buying_power:,.2f} no longer covers this order (${needed:,.2f})")
+    except Exception as error:  # noqa: BLE001 - a broker failure refuses the submission, never guesses
+        reasons.append(f"broker re-check failed: {str(error)[:160]}")
+
+    if instrument_type == "OPTION":
+        try:
+            rows = webull_api.get_option_snapshot(creds["app_key"], creds["app_secret"], [str(ticket.get("option_symbol"))])
+            ask = _parse_option_float((rows[0] if rows else {}).get("ask"))
+        except Exception as error:  # noqa: BLE001
+            ask = None
+            reasons.append(f"could not fetch a fresh option quote: {str(error)[:120]}")
+        if ask is None or ask <= 0:
+            if not any("option quote" in r for r in reasons):
+                reasons.append("no fresh option ask available")
+        else:
+            fresh_price = ask
+            drift_pct = abs(ask - limit_price) / limit_price * 100
+            if drift_pct > OPTION_PREMIUM_DRIFT_TOLERANCE_PERCENT:
+                reasons.append(f"the option premium moved {drift_pct:.1f}% since the ticket (${limit_price:.2f} -> ${ask:.2f})")
+    else:
+        try:
+            cross_check = market_data_aggregator.get_cross_checked_price(ticker, creds)
+        except Exception as error:  # noqa: BLE001
+            cross_check = {"price": None, "disagreement": False, "provider_status": [], "error": str(error)}
+        fresh_price = cross_check.get("price")
+        if cross_check.get("disagreement"):
+            reasons.append("real-time price sources disagree - refusing to submit against an unconfirmed price")
+        elif fresh_price is None:
+            reasons.append("could not confirm a fresh, real-time price")
+        elif _price_has_drifted_too_far(limit_price, fresh_price):
+            drift_pct = abs(fresh_price - limit_price) / limit_price * 100
+            reasons.append(f"the price moved {drift_pct:.1f}% since the ticket (${limit_price:.2f} -> ${fresh_price:.2f})")
+
+    return {"ok": not reasons, "reasons": reasons, "fresh_price": fresh_price, "checked_at": _now_utc().isoformat()}
+
+
+def _execute_approved_ticket(user_id: str, creds: Dict[str, str], ticket: Dict[str, object]) -> Dict[str, object]:
+    """Submits an approved, re-checked ticket through the same functions the
+    autonomous scan uses. Returns the entry record."""
+    trading_day = str(ticket.get("trading_day") or _trading_day_key())
+    ticker = str(ticket.get("ticker", "")).upper()
+    account_id = str(ticket.get("account_id") or "")
+    quantity = int(ticket.get("quantity") or 0)
+    limit_price = float(ticket.get("limit_price") or 0)
+    entry: Dict[str, object] = {
+        key: ticket.get(key)
+        for key in ("ticker", "direction", "side", "quantity", "limit_price", "confidence", "strategy", "trade_quality",
+                    "trade_thesis", "why_ai_likes_it", "invalidation_rule", "risk_warning", "target", "stop",
+                    "planned_risk_dollars", "trade_plan", "instrument_type", "premium_at_risk")
+    }
+    entry.update({
+        "account_id": account_id, "status": "pending", "trading_day": trading_day,
+        "source": "approved_ticket", "ticket_id": ticket.get("ticket_id"), "ticket_version": ticket.get("version"),
+        "approved_at": ticket.get("approved_at"), "approved_by": ticket.get("approved_by"),
+    })
+    if ticket.get("instrument_type") == "OPTION":
+        option_contract = {key: ticket.get(key) for key in ("option_symbol", "strike", "expiration_date", "option_type")}
+        _submit_and_confirm_option_entry(
+            user_id=user_id, creds=creds, account_id=account_id, ticker=ticker, option_contract=option_contract,
+            quantity=quantity, limit_price=limit_price, trading_day=trading_day, entry=entry,
+        )
+    else:
+        _submit_and_protect_entry(
+            user_id=user_id, creds=creds, account_id=account_id, ticker=ticker, requested_quantity=quantity,
+            limit_price=limit_price, stop_price=float(ticket.get("stop") or 0), target_price=float(ticket.get("target") or 0),
+            trading_day=trading_day, entry=entry,
+        )
+    lifecycle_state = entry.get("lifecycle_state")
+    if lifecycle_state == ol.UNKNOWN_SUBMISSION_STATE:
+        entry["status"] = "unknown_submission_state"
+        entry["error"] = entry.get("error", "order submission result could not be confirmed (ambiguous broker response)")
+        entry["skip_category"] = "unknown_submission_state"
+        try:
+            add_manual_alert(user_id, {
+                "type": "unknown_submission_state", "ticker": ticker,
+                "message": f"{ticker}: the approved order's submission returned an ambiguous result - it may or may not have been accepted. It will be reconciled automatically; review the position manually if it persists.",
+            })
+        except Exception:  # noqa: BLE001
+            pass
+    elif lifecycle_state == ol.ENTRY_FAILED:
+        entry["status"] = "failed"
+        entry["error"] = entry.get("error", "entry order failed")
+        entry["skip_category"] = "entry_failed"
+    else:
+        entry["status"] = "placed"
+    record_overnight_order(user_id, entry)
+    try:
+        record_research_decision(user_id, {
+            "trading_day": trading_day, "account_id": account_id, "ticker": ticker,
+            "recommendation": ticket.get("recommendation"), "strategy": ticket.get("strategy"),
+            "raw_confidence": int(ticket.get("confidence") or 0),
+            "decision": "placed" if entry["status"] == "placed" else "skipped",
+            "reason_skipped": entry.get("error") if entry["status"] != "placed" else None,
+            "skip_category": entry.get("skip_category"), "quantity": quantity,
+            "entry_client_order_id": entry.get("entry_client_order_id"),
+            "approved_ticket_id": ticket.get("ticket_id"), "trade_plan": ticket.get("trade_plan"),
+        })
+    except Exception:  # noqa: BLE001
+        pass
+    POSITIONS_CACHE.pop(user_id, None)
+    BALANCE_CACHE.pop(user_id, None)
+    return entry
+
+
+def _ticket_for_api(ticket: Dict[str, object]) -> Dict[str, object]:
+    return {key: value for key, value in ticket.items() if key not in ("llm_reasoning",)} | {"llm_reasoning": ticket.get("llm_reasoning")}
+
+
+@app.route("/api/trade-tickets", methods=["GET"])
+@api_guard
+def api_trade_tickets_list():
+    user_id = _current_user_id()
+    tickets = trade_tickets.list_tickets(user_id)
+    status = get_autonomy_status(user_id)
+    limit = max(1, min(request.args.get("limit", default=30, type=int), 200))
+    return _api_success({
+        "approval_mode": bool(status.get("approval_required_status")),
+        "current_mode": status.get("current_mode"),
+        "tickets": [_ticket_for_api(t) for t in tickets[:limit]],
+        "awaiting_count": sum(1 for t in tickets if t.get("status") == trade_tickets.AWAITING_APPROVAL),
+    })
+
+
+@app.route("/api/trade-tickets/<ticket_id>/approve", methods=["POST"])
+@api_guard
+def api_trade_ticket_approve(ticket_id: str):
+    """Approve one ticket. The approval must carry the ticket version the
+    user saw; the ticket is claimed atomically, re-checked against the
+    broker and the market under the account's scan lock, and only then
+    submitted through the scan's own submission path."""
+    user_id = _current_user_id()
+    payload = request.get_json(silent=True) or {}
+    version = str(payload.get("version") or "")
+    creds = get_webull_credentials(user_id)
+    if not is_webull_configured(user_id):
+        return _api_failure("Connect Webull in Account Hub before approving a trade.", status_code=400, error_code="not_configured", ok=False)
+    try:
+        ticket = trade_tickets.claim_for_approval(user_id, ticket_id, version, approved_by=user_id)
+    except trade_tickets.TicketConflict as error:
+        return _api_failure(str(error), status_code=409, error_code="ticket_conflict", ok=False)
+
+    def _recheck_and_submit():
+        recheck = _recheck_ticket_before_submission(user_id, creds, ticket)
+        if not recheck["ok"]:
+            def _fail(t):
+                t["status"] = trade_tickets.RECHECK_FAILED
+                t["recheck"] = recheck
+            return trade_tickets.update_ticket(user_id, ticket_id, _fail), None
+        entry = _execute_approved_ticket(user_id, creds, ticket)
+
+        def _done(t):
+            t["status"] = trade_tickets.SUBMITTED
+            t["recheck"] = recheck
+            t["submission"] = {
+                "status": entry.get("status"), "entry_client_order_id": entry.get("entry_client_order_id"),
+                "lifecycle_state": entry.get("lifecycle_state"), "error": entry.get("error"), "record_id": entry.get("record_id"),
+                "submitted_at": _now_utc().isoformat(),
+            }
+        return trade_tickets.update_ticket(user_id, ticket_id, _done), entry
+
+    try:
+        updated, entry = _call_holding_user_scan_lock(user_id, _recheck_and_submit)
+    except ScanAlreadyRunningError:
+        # Give the ticket back rather than leaving it stuck in APPROVED.
+        def _release(t):
+            t["status"] = trade_tickets.AWAITING_APPROVAL
+            t.pop("approved_at", None)
+        trade_tickets.update_ticket(user_id, ticket_id, _release)
+        return _api_failure("A scan is running for this account - try again in a few seconds.", status_code=409, error_code="busy", ok=False)
+    except Exception as error:  # noqa: BLE001 - never leave a ticket stuck in APPROVED
+        def _errored(t):
+            t["status"] = trade_tickets.RECHECK_FAILED
+            t["recheck"] = {"ok": False, "reasons": [f"unexpected error: {str(error)[:200]}"], "checked_at": _now_utc().isoformat()}
+        trade_tickets.update_ticket(user_id, ticket_id, _errored)
+        logger.exception("Approved ticket %s failed unexpectedly", ticket_id)
+        return _api_failure(f"Approval failed: {error}", status_code=500, error_code="approval_failed", ok=False)
+
+    if updated.get("status") == trade_tickets.RECHECK_FAILED:
+        reasons = (updated.get("recheck") or {}).get("reasons") or []
+        return _api_failure("Not submitted - " + "; ".join(reasons), status_code=409, error_code="recheck_failed", ok=False, ticket=_ticket_for_api(updated))
+    return _api_success({"ticket": _ticket_for_api(updated), "entry": entry}, ok=True)
+
+
+@app.route("/api/trade-tickets/<ticket_id>/decline", methods=["POST"])
+@api_guard
+def api_trade_ticket_decline(ticket_id: str):
+    user_id = _current_user_id()
+    payload = request.get_json(silent=True) or {}
+    try:
+        ticket = trade_tickets.decline_ticket(
+            user_id, ticket_id, str(payload.get("version") or ""), reason=str(payload.get("reason") or ""), declined_by=user_id,
+        )
+    except trade_tickets.TicketConflict as error:
+        return _api_failure(str(error), status_code=409, error_code="ticket_conflict", ok=False)
+    return _api_success({"ticket": _ticket_for_api(ticket)}, ok=True)
+
+
 def _tickers_with_open_positions(orders: List[Dict[str, object]]) -> set:
     """Tickers with an entry still short of a terminal state - the
     duplicate-position guard's input.
@@ -10562,6 +10883,15 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
     # would silently miss every open option position.
     tickers_with_open_positions = _tickers_with_open_positions(list_overnight_orders(user_id))
 
+    # APPROVAL mode (autonomous_controller): the scan runs exactly as it
+    # does in AUTONOMOUS mode - same data, sizing, LLM step and gates - but
+    # a candidate that reaches submission becomes a trade ticket for the
+    # user to approve (see trade_tickets.py and api_trade_ticket_approve)
+    # instead of an order. A preview never creates tickets. A ticker the
+    # user declined today is not proposed again today.
+    approval_mode_active = bool(risk_settings.get("approval_required_status")) and not dry_run
+    declined_today = trade_tickets.declined_tickers_today(user_id, today_key) if approval_mode_active else set()
+
     qualifying = [
         opp
         for opp in opportunities
@@ -10569,6 +10899,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         and int(opp.get("confidence", 0) or 0) >= OVERNIGHT_MIN_CONFIDENCE
         and str(opp.get("ticker", "")).upper() not in already_placed_today
         and str(opp.get("ticker", "")).upper() not in tickers_with_open_positions
+        and str(opp.get("ticker", "")).upper() not in declined_today
     ]
     qualifying.sort(key=lambda opp: int(opp.get("confidence", 0) or 0), reverse=True)
 
@@ -10613,6 +10944,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
 
     placed: List[Dict[str, object]] = []
     skipped: List[Dict[str, object]] = []
+    proposed: List[Dict[str, object]] = []  # APPROVAL mode: tickets created this run
     # Options-path funnel counters (2026-09-09) - tracked independently of
     # placed/skipped because a found-but-too-small-to-size option contract
     # falls straight through to the equity path with no placed/skipped
@@ -10808,6 +11140,9 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         elif int(opp.get("confidence", 0) or 0) < OVERNIGHT_MIN_CONFIDENCE:
             reason = f"confidence {opp.get('confidence')} below {OVERNIGHT_MIN_CONFIDENCE} threshold"
             skip_category = "confidence_threshold"
+        elif ticker_upper in declined_today:
+            reason = f"{opp.get('ticker')} was declined by you today - not proposed again until tomorrow"
+            skip_category = "declined_today"
         elif ticker_upper in tickers_with_open_positions:
             # Checked before already_placed_today below - a position opened
             # today is ALSO still transitional, so this is the more specific
@@ -11007,6 +11342,23 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                         option_entry["quantity"] = option_quantity
                         placed.append(option_entry)
                         local_reservations_by_account[margin_account_id] += option_cost_reservation
+                        continue
+                    if approval_mode_active:
+                        option_entry.update({
+                            "option_symbol": option_contract["option_symbol"], "strike": option_contract["strike"],
+                            "expiration_date": option_contract["expiration_date"], "option_type": option_contract["option_type"],
+                            "limit_price": option_limit_price, "quantity": option_quantity, "direction": direction,
+                            "premium_at_risk": round(float(option_cost_reservation), 2),
+                        })
+                        _propose_trade_ticket(user_id, option_entry, opp)
+                        proposed.append(option_entry)
+                        local_reservations_by_account[margin_account_id] += option_cost_reservation
+                        _log_research_decision(
+                            ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
+                            raw_confidence=int(opp.get("confidence", 0) or 0), decision="proposed", reason_skipped=None,
+                            quantity=option_quantity, entry_client_order_id=None, skip_category="awaiting_approval",
+                            signal_snapshot=_signal_snapshot_from(opp),
+                        )
                         continue
                     try:
                         _submit_and_confirm_option_entry(
@@ -11241,6 +11593,27 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 local_reservations_by_account[candidate_account_id] += _reservation_notional(quantity, limit_price)
                 continue
 
+            if approval_mode_active:
+                # The plan is built like a preview's (no market-data call);
+                # the approval recheck fetches the live price.
+                entry["trade_plan"] = _trade_plan_for_candidate(
+                    ticker=ticker, opp=opp, direction=direction, entry_price=limit_price, stop_price=stop_price,
+                    target_price=target_price, quote_price=None, sizing=sizing, plan_equity=current_balance,
+                    equity_source=plan_equity_source, existing_exposure=plan_existing_exposure,
+                    available_buying_power=available_buying_power, short_permitted=margin_account_id is not None,
+                    evidence_returns=strategy_evidence_returns, quote_deferred=True,
+                )
+                _propose_trade_ticket(user_id, entry, opp)
+                proposed.append(entry)
+                local_reservations_by_account[candidate_account_id] += _reservation_notional(quantity, limit_price)
+                _log_research_decision(
+                    ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
+                    raw_confidence=int(opp.get("confidence", 0) or 0), decision="proposed", reason_skipped=None,
+                    quantity=quantity, entry_client_order_id=None, skip_category="awaiting_approval",
+                    signal_snapshot=_signal_snapshot_from(opp), trade_plan=entry.get("trade_plan"),
+                )
+                continue
+
             # A fresh, genuinely real-time price check immediately before
             # submission - not the same up-to-15-minutes-stale data
             # limit_price was computed from (see
@@ -11423,8 +11796,10 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         "ok": True,
         "placed_count": len(placed),
         "skipped_count": len(skipped),
+        "proposed_count": len(proposed),
         "placed": placed,
         "skipped": skipped,
+        "proposed": proposed,
         # For autonomy/scan_run_log.py's durable per-tick record - how
         # many opportunities this tick looked at in total, how many
         # cleared the confidence/recommendation/dedup filter, and whether
@@ -11600,6 +11975,9 @@ def _summarize_scan_result_for_run_log(scan_result: Dict[str, object]) -> Dict[s
     reason_parts = [f"{candidates_found if candidates_found is not None else '?'} opportunities scanned, "
                      f"{candidates_qualifying if candidates_qualifying is not None else '?'} qualifying, "
                      f"{outcomes['placed']} placed, {outcomes['failed']} failed, {outcomes['unknown_submission_state']} ambiguous"]
+    proposed_count = int(scan_result.get("proposed_count") or 0)
+    if proposed_count:
+        reason_parts.append(f"{proposed_count} ticket(s) awaiting your approval")
     if not scan_result.get("entries_allowed", True) and scan_result.get("new_entries_blocked_reason"):
         reason_parts.append(f"new entries blocked this tick: {scan_result['new_entries_blocked_reason']}")
 
@@ -11726,7 +12104,7 @@ def api_autonomy_cron_trigger():
             "monitor_heartbeat": heartbeat_snapshot,
         }
 
-        if current_mode != "AUTONOMOUS":
+        if current_mode not in ("AUTONOMOUS", "APPROVAL"):
             # Existing-position monitoring stays independent of mode - see
             # the docstring above. Only a lightweight reconciliation pass
             # here, never the opportunity-scanning/new-entry work, which
@@ -11734,7 +12112,7 @@ def api_autonomy_cron_trigger():
             if not is_webull_configured(user_id):
                 record_scan_run(user_id, {
                     **base_record, "status": "skipped",
-                    "reason": f"autonomy mode is {current_mode}, not AUTONOMOUS, and Webull is not configured for this account - nothing to reconcile",
+                    "reason": f"autonomy mode is {current_mode}, not AUTONOMOUS or APPROVAL, and Webull is not configured for this account - nothing to reconcile",
                     "candidates_found": None, "candidates_qualifying": None,
                     "orders_attempted": None, "orders_outcomes": None, "error": None,
                     "completion_time": _now_utc().isoformat(),
@@ -11748,7 +12126,7 @@ def api_autonomy_cron_trigger():
                     record_scan_run(user_id, {
                         **base_record, "status": "skipped",
                         "reason": (
-                            f"autonomy mode is {current_mode}, not AUTONOMOUS - no new-entry scan this tick; "
+                            f"autonomy mode is {current_mode}, not AUTONOMOUS or APPROVAL - no new-entry scan this tick; "
                             f"existing positions/orders were still reconciled "
                             f"({monitor_result.get('entries_checked', 0)} transitional entries checked, "
                             f"{monitor_result.get('still_transitional_count', 0)} still open afterward)"
