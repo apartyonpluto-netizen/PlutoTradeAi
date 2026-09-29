@@ -201,6 +201,7 @@ def _approve(client, ticket, fresh_price=100.0, session="CORE", positions=None, 
          patch.object(pluto_app.webull_api, "find_individual_cash_account", return_value={"account_id": ACCOUNT_ID}), \
          patch.object(pluto_app.webull_api, "find_individual_margin_account", return_value=None), \
          patch.object(pluto_app.webull_api, "get_account_positions", return_value=positions or []), \
+         patch.object(pluto_app.webull_api, "get_open_orders", return_value=[]), \
          patch.object(pluto_app.webull_api, "get_account_balance",
                       return_value={"total_net_liquidation_value": 100000.0, "total_day_profit_loss": 0.0,
                                     "account_currency_assets": [{"buying_power": "1000000"}]}), \

@@ -115,6 +115,39 @@ Account Hub → Risk Limits → Options (default 50% / 50% / 3 days).
 Approving an option ticket also refuses when the fresh bid is at or below
 the trigger computed from the ticket's premium.
 
+## Portfolio limits
+
+`backend/portfolio_limits.py`, set in Account Hub → Risk Limits → Portfolio.
+Every limit is a percent of the same equity sizing uses, and every one is
+**off (0) until you set it**.
+
+| Setting | Effect |
+|---|---|
+| Largest single position (`max_position_exposure_percent`) | Caps one new position's value |
+| Total invested (`max_total_exposure_percent`) | Caps everything held plus working entry orders plus this trade |
+| Most in one sector (`max_sector_exposure_percent`) | Same, within the candidate's sector |
+| Pause new entries after a drop of (`max_drawdown_percent`) | Blocks new entries while equity is that far below its peak |
+
+- Exposure is market value from the broker's positions in both accounts,
+  **including holdings the agent did not open** (counted, never traded),
+  plus the unfilled part of working BUY orders, plus anything placed or
+  proposed earlier in the same scan.
+- Total and sector limits are sizing constraints: the trade is sized down to
+  the room left (`binding_constraints` names the limit) and skipped only when
+  not one share or contract fits.
+- Approval re-checks all four against fresh positions. An approved ticket is
+  never resized; if the whole ticket no longer fits, it is refused.
+- The drawdown peak (`equity_peak.json`) is the highest equity seen; a change
+  of equity source restarts it; previews read it without writing.
+- Simplifications: options count at premium, not delta-adjusted exposure;
+  sectors are the app's own approximate map of its scan universe plus sector
+  ETFs (a ticker outside it has no sector, and is skipped while the sector
+  limit is on); index ETFs are their own bucket; a withdrawal can trip the
+  drawdown pause.
+
+Each plan shows "Portfolio after this trade": total and sector exposure as
+a percent of the account.
+
 ## Approval flow (APPROVAL mode)
 
 Set the autonomy mode to **APPROVAL** (Account Hub → Autonomous Mode). The
@@ -145,6 +178,6 @@ Approval* and announced in the alert bell.
 
 ## Not built yet
 
-Sector/concentration and drawdown limits, error
+Overnight-holding permission, error
 classification of closed trades, offline strategy research with versioned
 promotion, and an annotated chart of where the levels came from.

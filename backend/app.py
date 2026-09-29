@@ -157,7 +157,7 @@ if __package__:
         RESOLUTION_PHASE_STARTED,
     )
     from .backtest_engine import run_backtest
-    from . import trade_planner
+    from . import portfolio_limits, trade_planner
     from .calibration import (
         closed_trade_returns_by_strategy,
         get_calibration,
@@ -327,6 +327,7 @@ else:
         RESOLUTION_PHASE_STARTED,
     )
     from backtest_engine import run_backtest
+    import portfolio_limits
     import trade_planner
     from calibration import (
         closed_trade_returns_by_strategy,
@@ -4155,6 +4156,10 @@ def api_autonomy_risk_settings():
             option_stop_loss_percent=payload.get("option_stop_loss_percent"),
             option_target_gain_percent=payload.get("option_target_gain_percent"),
             option_close_days_before_expiration=payload.get("option_close_days_before_expiration"),
+            max_position_exposure_percent=payload.get("max_position_exposure_percent"),
+            max_total_exposure_percent=payload.get("max_total_exposure_percent"),
+            max_sector_exposure_percent=payload.get("max_sector_exposure_percent"),
+            max_drawdown_percent=payload.get("max_drawdown_percent"),
         )
     except (ValueError, TypeError) as error:
         raise ValidationError(str(error)) from error
@@ -4717,6 +4722,7 @@ def _compute_position_quantity(
     position_exposure_cap: float = 0.0,
     portfolio_risk_remaining: Optional[float] = None,
     direction: str = "long",
+    extra_caps: Optional[Dict[str, Tuple[float, str]]] = None,
 ) -> Dict[str, object]:
     """Sizes a position by risk-at-stop, not by raw share price - fixes a
     real bug found in production this session where "risk per trade" was
@@ -4849,6 +4855,11 @@ def _compute_position_quantity(
         "position_cap": "position exposure cap reached",
         "portfolio_risk": "remaining portfolio risk too small for one share at this stop",
     }
+    # Portfolio limits (portfolio_limits.room_for): dollars of room left,
+    # each with the reason to report if it binds.
+    for name, (room, reason) in (extra_caps or {}).items():
+        constraints[name] = _floor_shares(_to_decimal(max(0.0, room)), entry_price_dec)
+        reasons_by_key[name] = reason
 
     # Risk being disabled/unknown, or either buying-power figure being
     # unknown, fails closed outright rather than sizing off whatever
@@ -4893,6 +4904,7 @@ def _compute_option_contract_quantity(
     broker_option_buying_power: Optional[float],
     position_exposure_cap: float = 0.0,
     contract_multiplier: float = 100.0,
+    extra_caps: Optional[Dict[str, Tuple[float, str]]] = None,
 ) -> Dict[str, object]:
     """Sizes a long option position by premium cost, not risk-at-stop -
     unlike _compute_position_quantity (equity), a long call/put's maximum
@@ -4951,6 +4963,10 @@ def _compute_option_contract_quantity(
         "broker_buying_power": "insufficient real broker option buying power",
         "position_cap": "position exposure cap reached",
     }
+    # Portfolio limits: dollars of room left, measured in premium paid.
+    for name, (room, reason) in (extra_caps or {}).items():
+        constraints[name] = _floor_shares(_to_decimal(max(0.0, room)), cost_per_contract)
+        reasons_by_key[name] = reason
 
     if risk_disabled:
         return {
@@ -10239,6 +10255,13 @@ def _resolve_ambiguous_submission(
     return {"entry": entry, "evidence": evidence, "audit_record": completed_record, "resolution_id": resolution_id}
 
 
+def _remember_rows(bucket: List[Dict[str, object]], rows: object) -> object:
+    """Returns rows unchanged after copying them into bucket (a list)."""
+    if isinstance(rows, list):
+        bucket.extend(row for row in rows if isinstance(row, dict))
+    return rows
+
+
 def _float_or_zero(value: object) -> float:
     try:
         number = float(value)  # type: ignore[arg-type]
@@ -10250,7 +10273,7 @@ def _float_or_zero(value: object) -> float:
 def _trade_plan_for_candidate(
     *, ticker, opp, direction, entry_price, stop_price, target_price, quote_price, sizing,
     plan_equity, equity_source, existing_exposure, available_buying_power, short_permitted, evidence_returns,
-    quote_deferred=False,
+    quote_deferred=False, portfolio_context=None,
 ) -> Dict[str, object]:
     """One trade plan for a scan candidate, from the scan's own inputs and
     sizing result (see trade_planner.py). quote_price is a price fetched
@@ -10262,7 +10285,7 @@ def _trade_plan_for_candidate(
         evidence = trade_planner.evidence_from_returns(
             evidence_returns.get(strategy) or [], strategy=strategy or "unknown", source="closed trades, all accounts",
         )
-        return trade_planner.build_trade_plan(
+        plan = trade_planner.build_trade_plan(
             ticker=ticker, strategy=strategy, direction=direction, setup_score=opp.get("confidence"),
             entry_price=entry_price, stop_price=stop_price, target_price=target_price,
             quote_price=quote_price, quote_age_seconds=0.0 if quote_price is not None else None,
@@ -10270,6 +10293,9 @@ def _trade_plan_for_candidate(
             available_buying_power=available_buying_power, sizing=sizing, short_permitted=short_permitted,
             evidence=evidence, quote_deferred=quote_deferred,
         )
+        if portfolio_context:
+            plan["portfolio"] = portfolio_context
+        return plan
     except Exception as error:  # noqa: BLE001
         logger.warning("Trade plan failed for %s: %s", ticker, error)
         return {"planner_version": trade_planner.PLANNER_VERSION, "ticker": ticker, "decision": "reject", "reasons": [f"Plan could not be built: {error}"]}
@@ -10372,10 +10398,13 @@ def _recheck_ticket_before_submission(user_id: str, creds: Dict[str, str], ticke
 
     try:
         sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
-        open_position_count = 0
+        all_positions: List[Dict[str, object]] = []
+        all_working_orders: List[Dict[str, object]] = []
         for account in (webull_api.find_individual_cash_account(sandbox_accounts), webull_api.find_individual_margin_account(sandbox_accounts)):
             if account:
-                open_position_count += len(webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account["account_id"]))
+                all_positions.extend(webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account["account_id"]))
+                all_working_orders.extend(webull_api.get_open_orders(creds["app_key"], creds["app_secret"], account["account_id"]))
+        open_position_count = len(all_positions)
         max_positions = int(risk_settings.get("max_positions", 0) or 0)
         if max_positions > 0 and open_position_count >= max_positions:
             reasons.append(f"max positions reached ({open_position_count}/{max_positions} open)")
@@ -10384,6 +10413,23 @@ def _recheck_ticket_before_submission(user_id: str, creds: Dict[str, str], ticke
         real_net_liquidation_value = float(balance.get("total_net_liquidation_value", 0) or 0)
         virtual_balance = get_virtual_net_account_value(user_id, real_net_liquidation_value)
         current_balance = virtual_balance if virtual_balance is not None else real_net_liquidation_value
+
+        # Portfolio limits against fresh positions: the whole ticket must fit
+        # (an approval never resizes the order the user approved).
+        limits = portfolio_limits.limits_from_settings(risk_settings)
+        ticket_value = quantity * limit_price * (100 if instrument_type == "OPTION" else 1)
+        if limits["max_position_percent"] and current_balance > 0 and ticket_value > current_balance * limits["max_position_percent"] / 100:
+            reasons.append(f"this position would be {ticket_value / current_balance * 100:.1f}% of the account, over your {limits['max_position_percent']:g}% position limit")
+        exposure = portfolio_limits.exposure_snapshot(all_positions, all_working_orders)
+        for name, (room, reason) in portfolio_limits.room_for(ticker, current_balance, exposure, limits).items():
+            if ticket_value > room:
+                reasons.append(reason)
+        if limits["max_drawdown_percent"]:
+            source = "configured paper balance" if virtual_balance is not None else "broker net liquidation value"
+            peak = portfolio_limits.record_equity_and_get_peak(user_id, current_balance, source)
+            drawdown_reason = portfolio_limits.drawdown_block_reason(current_balance, float(peak.get("peak") or 0), limits["max_drawdown_percent"])
+            if drawdown_reason:
+                reasons.append(drawdown_reason)
         day_pnl = float(balance.get("total_day_profit_loss", 0) or 0)
         daily_loss_limit_percent = float(risk_settings.get("daily_loss_limit_percent", 0) or 0)
         if _is_daily_loss_limit_hit(day_pnl, current_balance, daily_loss_limit_percent):
@@ -10613,7 +10659,7 @@ def _option_exit_settings(risk_settings: Dict[str, object]) -> Dict[str, object]
 
 def _option_trade_plan_for_candidate(
     *, ticker, opp, contract, underlying_price, sizing, plan_equity, equity_source, existing_exposure,
-    available_buying_power, risk_settings, evidence_returns, quote_age_seconds=0.0,
+    available_buying_power, risk_settings, evidence_returns, quote_age_seconds=0.0, portfolio_context=None,
 ) -> Dict[str, object]:
     """Option counterpart of _trade_plan_for_candidate. Never raises."""
     strategy = opp.get("strategy")
@@ -10622,7 +10668,7 @@ def _option_trade_plan_for_candidate(
         evidence = trade_planner.evidence_from_returns(
             evidence_returns.get(strategy) or [], strategy=strategy or "unknown", source="closed option trades, all accounts",
         )
-        return trade_planner.build_option_trade_plan(
+        plan = trade_planner.build_option_trade_plan(
             ticker=ticker, strategy=strategy, setup_score=opp.get("confidence"), contract=contract,
             underlying_price=underlying_price, quote_age_seconds=quote_age_seconds, plan_equity=plan_equity,
             equity_source=equity_source, existing_exposure=existing_exposure, available_buying_power=available_buying_power,
@@ -10630,6 +10676,9 @@ def _option_trade_plan_for_candidate(
             close_days_before_expiration=exits["close_days_before_expiration"], today=_now_utc().astimezone(ZoneInfo("America/New_York")).date(),
             evidence=evidence,
         )
+        if portfolio_context:
+            plan["portfolio"] = portfolio_context
+        return plan
     except Exception as error:  # noqa: BLE001
         logger.warning("Option trade plan failed for %s: %s", ticker, error)
         return {"planner_version": trade_planner.PLANNER_VERSION, "ticker": ticker, "instrument": "OPTION", "decision": "reject",
@@ -10809,9 +10858,14 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         option_evidence_returns = closed_trade_returns_by_strategy(instrument_type="OPTION")
     except Exception:  # noqa: BLE001 - evidence is informational; plans then say "not reliably estimated"
         strategy_evidence_returns, option_evidence_returns = {}, {}
+    margin_open_positions_snapshot: List[Dict[str, object]] = []
     if margin_account_id:
-        open_position_count += len(webull_api.get_account_positions(creds["app_key"], creds["app_secret"], margin_account_id))
+        margin_open_positions_snapshot = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], margin_account_id)
+        open_position_count += len(margin_open_positions_snapshot)
     available_position_slots = _available_position_slots(max_positions, open_position_count, OVERNIGHT_MAX_ORDERS_PER_RUN)
+    # Working orders seen by the capital snapshots below, kept for the
+    # portfolio-exposure snapshot (no extra broker call).
+    scan_working_orders: List[Dict[str, object]] = []
 
     # ONE reconciled broker snapshot for the whole scan, not one per
     # candidate. Re-reading the broker before every candidate does not solve
@@ -10824,7 +10878,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         str(order.get("ticker", "")).upper() for order in list_overnight_orders(user_id) if order.get("ticker")
     }
     snapshot_available_buying_power = _build_capital_snapshot(
-        fetch_open_orders=lambda: webull_api.get_open_orders(creds["app_key"], creds["app_secret"], account_id),
+        fetch_open_orders=lambda: _remember_rows(scan_working_orders, webull_api.get_open_orders(creds["app_key"], creds["app_secret"], account_id)),
         real_open_positions=real_open_positions_snapshot,
         tracked_tickers=tracked_tickers_for_user,
         total_equity=current_balance,
@@ -10854,8 +10908,8 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             margin_option_buying_power = _extract_option_buying_power(margin_balance)
             margin_real_net_liquidation_value = float(margin_balance.get("total_net_liquidation_value", 0) or 0)
             margin_snapshot_available_buying_power = _build_capital_snapshot(
-                fetch_open_orders=lambda: webull_api.get_open_orders(creds["app_key"], creds["app_secret"], margin_account_id),
-                real_open_positions=webull_api.get_account_positions(creds["app_key"], creds["app_secret"], margin_account_id),
+                fetch_open_orders=lambda: _remember_rows(scan_working_orders, webull_api.get_open_orders(creds["app_key"], creds["app_secret"], margin_account_id)),
+                real_open_positions=margin_open_positions_snapshot,
                 tracked_tickers=tracked_tickers_for_user,
                 total_equity=margin_real_net_liquidation_value,
             )
@@ -10884,10 +10938,34 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
 
     risk_percent_of_balance = float(risk_settings.get("risk_percent_of_balance", 0) or 0)
     risk_budget = _compute_risk_budget(current_balance, risk_percent_of_balance)
-    # No settings-UI control exists for this yet (see _compute_position_exposure_cap) -
-    # reads as 0/disabled for every account until one does.
+    # Set in Account Hub > Risk Limits > Portfolio (0 = off).
     max_position_exposure_percent = float(risk_settings.get("max_position_exposure_percent", 0) or 0)
     position_exposure_cap = _compute_position_exposure_cap(current_balance, max_position_exposure_percent)
+
+    # Portfolio limits (portfolio_limits.py) - all off until the user sets
+    # them. Exposure counts every broker position, including holdings the
+    # agent never opened, plus working entry orders; trades placed or
+    # proposed later in this scan are added as they happen.
+    portfolio_limit_settings = portfolio_limits.limits_from_settings(risk_settings)
+    portfolio_snapshot = portfolio_limits.exposure_snapshot(
+        list(real_open_positions_snapshot) + list(margin_open_positions_snapshot), scan_working_orders,
+    )
+    try:
+        equity_peak = portfolio_limits.record_equity_and_get_peak(user_id, current_balance, plan_equity_source, persist=not dry_run)
+        drawdown_block = portfolio_limits.drawdown_block_reason(
+            current_balance, float(equity_peak.get("peak") or 0), portfolio_limit_settings["max_drawdown_percent"],
+        )
+    except Exception as error:  # noqa: BLE001 - an unreadable peak must not silently disable an enabled limit
+        drawdown_block = (
+            f"the drawdown limit is on but the equity peak could not be read ({error}) - new entries paused"
+            if portfolio_limit_settings["max_drawdown_percent"] else None
+        )
+
+    def _scan_portfolio_room(ticker: str) -> Dict[str, Tuple[float, str]]:
+        return portfolio_limits.room_for(ticker, current_balance, portfolio_snapshot, portfolio_limit_settings)
+
+    def _scan_portfolio_context(ticker: str, trade_value: float) -> Dict[str, object]:
+        return portfolio_limits.portfolio_context(ticker, trade_value, current_balance, portfolio_snapshot, portfolio_limit_settings)
 
     # include_options=False - the heaviest, most rate-limit-risky part of
     # _build_page_context (a real options-chain fetch per intelligence
@@ -10983,6 +11061,8 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             "cannot be proven, so no new autonomous entries will be placed for this account until a human "
             "reviews it (existing positions are still monitored and protected normally)"
         )
+    elif drawdown_block:
+        new_entries_blocked_reason = drawdown_block
     else:
         new_entries_blocked_reason = ""
     entries_allowed = not new_entries_blocked_reason
@@ -11348,6 +11428,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                     available_buying_power=option_available_buying_power,
                     broker_option_buying_power=option_available_broker_buying_power,
                     position_exposure_cap=position_exposure_cap,
+                    extra_caps=_scan_portfolio_room(ticker),
                 )
                 option_quantity = int(option_sizing["quantity"])
                 if option_quantity >= 1:
@@ -11382,6 +11463,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                         plan_equity=current_balance, equity_source=plan_equity_source, existing_exposure=plan_existing_exposure,
                         available_buying_power=option_available_buying_power, risk_settings=risk_settings,
                         evidence_returns=option_evidence_returns,
+                        portfolio_context=_scan_portfolio_context(ticker, float(option_quantity) * float(option_contract["ask"]) * 100),
                     )
                     option_limit_price = round(option_contract["ask"], 2)
                     option_cost_reservation = _to_decimal(option_sizing["cost_per_contract"]) * _to_decimal(option_quantity)
@@ -11395,6 +11477,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                         option_entry["quantity"] = option_quantity
                         placed.append(option_entry)
                         local_reservations_by_account[margin_account_id] += option_cost_reservation
+                        portfolio_limits.add_exposure(portfolio_snapshot, ticker, float(option_cost_reservation))
                         continue
                     if approval_mode_active:
                         option_entry.update({
@@ -11406,6 +11489,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                         _propose_trade_ticket(user_id, option_entry, opp)
                         proposed.append(option_entry)
                         local_reservations_by_account[margin_account_id] += option_cost_reservation
+                        portfolio_limits.add_exposure(portfolio_snapshot, ticker, float(option_cost_reservation))
                         _log_research_decision(
                             ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
                             raw_confidence=int(opp.get("confidence", 0) or 0), decision="proposed", reason_skipped=None,
@@ -11427,6 +11511,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                             )
                             option_entry["skip_category"] = "unknown_submission_state"
                             local_reservations_by_account[margin_account_id] += option_cost_reservation
+                            portfolio_limits.add_exposure(portfolio_snapshot, ticker, float(option_cost_reservation))
                             skipped.append(option_entry)
                         else:
                             option_entry["status"] = "failed" if option_lifecycle_state == ol.ENTRY_FAILED else "placed"
@@ -11437,6 +11522,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                             else:
                                 placed.append(option_entry)
                                 local_reservations_by_account[margin_account_id] += option_cost_reservation
+                                portfolio_limits.add_exposure(portfolio_snapshot, ticker, float(option_cost_reservation))
                     except Exception as error:  # noqa: BLE001 - one bad ticker shouldn't kill the whole batch, same discipline as the equity path below
                         option_entry["status"] = "failed"
                         option_entry["error"] = str(error)
@@ -11494,6 +11580,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             broker_buying_power=available_broker_buying_power,
             position_exposure_cap=position_exposure_cap,
             direction=direction,
+            extra_caps=_scan_portfolio_room(ticker),
         )
         quantity = int(sizing["quantity"])
         if quantity < 1:
@@ -11631,7 +11718,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                     target_price=target_price, quote_price=None, sizing=sizing, plan_equity=current_balance,
                     equity_source=plan_equity_source, existing_exposure=plan_existing_exposure,
                     available_buying_power=available_buying_power, short_permitted=margin_account_id is not None,
-                    evidence_returns=strategy_evidence_returns, quote_deferred=True,
+                    evidence_returns=strategy_evidence_returns, portfolio_context=_scan_portfolio_context(ticker, float(quantity) * float(limit_price)), quote_deferred=True,
                 )
                 # The entire point: show exactly what the agent's OWN
                 # research found and would have done, WITHOUT ever calling
@@ -11645,6 +11732,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 entry["target_price"] = target_price
                 placed.append(entry)
                 local_reservations_by_account[candidate_account_id] += _reservation_notional(quantity, limit_price)
+                portfolio_limits.add_exposure(portfolio_snapshot, ticker, float(quantity) * float(limit_price))
                 continue
 
             if approval_mode_active:
@@ -11655,11 +11743,12 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                     target_price=target_price, quote_price=None, sizing=sizing, plan_equity=current_balance,
                     equity_source=plan_equity_source, existing_exposure=plan_existing_exposure,
                     available_buying_power=available_buying_power, short_permitted=margin_account_id is not None,
-                    evidence_returns=strategy_evidence_returns, quote_deferred=True,
+                    evidence_returns=strategy_evidence_returns, portfolio_context=_scan_portfolio_context(ticker, float(quantity) * float(limit_price)), quote_deferred=True,
                 )
                 _propose_trade_ticket(user_id, entry, opp)
                 proposed.append(entry)
                 local_reservations_by_account[candidate_account_id] += _reservation_notional(quantity, limit_price)
+                portfolio_limits.add_exposure(portfolio_snapshot, ticker, float(quantity) * float(limit_price))
                 _log_research_decision(
                     ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
                     raw_confidence=int(opp.get("confidence", 0) or 0), decision="proposed", reason_skipped=None,
@@ -11702,7 +11791,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 target_price=target_price, quote_price=None if cross_check["disagreement"] else fresh_price, sizing=sizing,
                 plan_equity=current_balance, equity_source=plan_equity_source, existing_exposure=plan_existing_exposure,
                 available_buying_power=available_buying_power, short_permitted=margin_account_id is not None,
-                evidence_returns=strategy_evidence_returns,
+                evidence_returns=strategy_evidence_returns, portfolio_context=_scan_portfolio_context(ticker, float(quantity) * float(limit_price)),
             )
             drift_reason = ""
             drift_skip_category = "price_drift"
@@ -11779,6 +11868,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 # those dollars were still free. See _reconcile_unknown_submission
                 # for how this gets resolved on a later scan.
                 local_reservations_by_account[candidate_account_id] += _reservation_notional(quantity, limit_price)
+                portfolio_limits.add_exposure(portfolio_snapshot, ticker, float(quantity) * float(limit_price))
                 skipped.append(entry)
                 try:
                     add_manual_alert(
@@ -11812,6 +11902,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                     # read hasn't caught up to candidate 1 yet (see
                     # test_reservation_survives_broker_eventual_consistency).
                     local_reservations_by_account[candidate_account_id] += _reservation_notional(quantity, limit_price)
+                    portfolio_limits.add_exposure(portfolio_snapshot, ticker, float(quantity) * float(limit_price))
         except Exception as error:  # noqa: BLE001 - one bad ticker shouldn't kill the whole batch
             entry["status"] = "failed"
             entry["error"] = str(error)

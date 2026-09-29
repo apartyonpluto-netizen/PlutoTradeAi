@@ -312,6 +312,8 @@ def compact_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     probability = plan.get("probability") or {}
     return {
         "planner_version": plan.get("planner_version"),
+        "instrument": plan.get("instrument"),
+        "direction": plan.get("direction"),
         "decision": plan.get("decision"),
         "reasons": plan.get("reasons"),
         "numbers": {key: value for key, value in numbers.items() if key != "constraints"},
@@ -321,6 +323,7 @@ def compact_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
             for key in ("sample_size", "win_count", "win_probability_percent", "win_probability_interval", "mean_net_return_percent", "reliable")
         },
         "expected_value": plan.get("expected_value"),
+        "portfolio": plan.get("portfolio"),
     }
 
 

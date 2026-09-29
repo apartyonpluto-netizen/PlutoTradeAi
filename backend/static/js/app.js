@@ -814,6 +814,13 @@ const renderTradePlan = (plan) => {
   row("Leverage after", n.leverage_after === null || n.leverage_after === undefined ? "--" : `${n.leverage_after}x`);
   row("Account used for sizing", `${money(n.plan_equity)} (${n.equity_source || "unknown"})`);
   }
+  const portfolio = plan.portfolio;
+  if (portfolio) {
+    const parts = [`total ${pct(portfolio.total_exposure_after_percent)} of account`];
+    if (portfolio.sector) parts.push(`${portfolio.sector} ${pct(portfolio.sector_exposure_after_percent)}`);
+    grid.appendChild(el("dt", "", "Portfolio after this trade"));
+    grid.appendChild(el("dd", "", parts.join(" · ")));
+  }
   box.appendChild(grid);
 
   if ((plan.reasons || []).length > 1) {
@@ -1549,6 +1556,12 @@ const bindAutonomyControls = () => {
       if (label) label.textContent = slider.value + "%";
     });
 
+    document.querySelectorAll("input[data-portfolio-field]").forEach((slider) => {
+      wireSlider(slider, slider.id.replace(/Slider$/, "Value"), (input, label) => {
+        if (label) label.textContent = Number(input.value) ? `${input.value}%` : "Off";
+      });
+    });
+
     wireSlider(document.getElementById("optionStopLossSlider"), "optionStopLossValue", (slider, label) => {
       const percent = Number(slider.value);
       if (label) label.textContent = percent + "%";
@@ -1579,7 +1592,12 @@ const bindAutonomyControls = () => {
                   const node = document.getElementById(id);
                   return node instanceof HTMLInputElement ? Number(node.value) : undefined;
                 };
+                const portfolio = {};
+                document.querySelectorAll("input[data-portfolio-field]").forEach((slider) => {
+                  portfolio[slider.dataset.portfolioField] = Number(slider.value);
+                });
                 return {
+                  ...portfolio,
                   option_stop_loss_percent: value("optionStopLossSlider"),
                   option_target_gain_percent: value("optionTargetGainSlider"),
                   option_close_days_before_expiration: value("optionCloseDaysSlider"),

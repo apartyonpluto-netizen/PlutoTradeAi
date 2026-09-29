@@ -406,6 +406,21 @@
             <input type="range" id="confidenceThresholdSlider" min="0" max="99" step="1" value="{{ settings_payload.ai_confidence_threshold if settings_payload else 68 }}">
             <p class="risk-slider-preview">Only setups scoring at or above this clear the autonomous scan.</p>
         </div>
+        <p class="risk-slider-group-title">Portfolio (0 = off)</p>
+        {% set portfolio_limit_rows = [
+            ("maxPositionExposure", "max_position_exposure_percent", "Largest single position", "Share of the account one new position may take."),
+            ("maxTotalExposure", "max_total_exposure_percent", "Total invested", "Everything held, including positions you opened yourself, plus working orders."),
+            ("maxSectorExposure", "max_sector_exposure_percent", "Most in one sector", "Tickers without a sector are skipped while this is on."),
+            ("maxDrawdown", "max_drawdown_percent", "Pause new entries after a drop of", "Measured from the account's highest value; open positions stay protected."),
+        ] %}
+        {% for element_id, field, label, note in portfolio_limit_rows %}
+        {% set current = (autonomy_status[field] if autonomy_status and autonomy_status[field] is not none else 0) %}
+        <div class="risk-slider-row">
+            <div class="risk-slider-label"><span>{{ label }}</span><b id="{{ element_id }}Value">{{ 'Off' if not current else (current|round(1)|string ~ '%') }}</b></div>
+            <input type="range" id="{{ element_id }}Slider" data-portfolio-field="{{ field }}" min="0" max="100" step="1" value="{{ current }}">
+            <p class="risk-slider-preview">{{ note }}</p>
+        </div>
+        {% endfor %}
         <p class="risk-slider-group-title">Options (calls and puts you buy)</p>
         <div class="risk-slider-row">
             <div class="risk-slider-label"><span>Exit when the premium falls</span><b id="optionStopLossValue">{{ autonomy_status.option_stop_loss_percent if autonomy_status else 50 }}%</b></div>

@@ -94,6 +94,12 @@ def _default_settings() -> Dict[str, object]:
         "option_target_gain_percent": 50.0,
         "option_stop_loss_percent": 50.0,
         "option_close_days_before_expiration": 3,
+        # Portfolio limits - percent of equity, 0 = off. Never defaulted on:
+        # these are the user's risk tolerance, not the app's to choose.
+        "max_position_exposure_percent": 0.0,
+        "max_total_exposure_percent": 0.0,
+        "max_sector_exposure_percent": 0.0,
+        "max_drawdown_percent": 0.0,
         "emergency_stop_enabled": False,
         "last_mode_change": now,
         "mode_change_reason": "Initialization",
@@ -251,7 +257,20 @@ def update_risk_settings(
     option_target_gain_percent: float | None = None,
     option_stop_loss_percent: float | None = None,
     option_close_days_before_expiration: int | None = None,
+    max_position_exposure_percent: float | None = None,
+    max_total_exposure_percent: float | None = None,
+    max_sector_exposure_percent: float | None = None,
+    max_drawdown_percent: float | None = None,
 ) -> Dict[str, object]:
+    # Portfolio limits (portfolio_limits.py): percents of equity, 0 = off.
+    for label, value in (
+        ("Max position size", max_position_exposure_percent),
+        ("Max total exposure", max_total_exposure_percent),
+        ("Max sector exposure", max_sector_exposure_percent),
+        ("Drawdown pause", max_drawdown_percent),
+    ):
+        if value is not None and not (0 <= float(value) <= 100):
+            raise ValueError(f"{label} must be between 0 (off) and 100 percent.")
     if daily_loss_limit_percent is not None and not (0 <= daily_loss_limit_percent <= 100):
         raise ValueError("Daily loss limit percent must be between 0 and 100.")
     if risk_percent_of_balance is not None and not (0 <= risk_percent_of_balance <= 100):
@@ -278,6 +297,14 @@ def update_risk_settings(
             settings["option_stop_loss_percent"] = float(option_stop_loss_percent)
         if option_close_days_before_expiration is not None:
             settings["option_close_days_before_expiration"] = int(option_close_days_before_expiration)
+        for key, value in (
+            ("max_position_exposure_percent", max_position_exposure_percent),
+            ("max_total_exposure_percent", max_total_exposure_percent),
+            ("max_sector_exposure_percent", max_sector_exposure_percent),
+            ("max_drawdown_percent", max_drawdown_percent),
+        ):
+            if value is not None:
+                settings[key] = float(value)
 
     return _derived(_locked_read_modify_write(user_id, _mutate))
 
