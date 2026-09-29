@@ -7,10 +7,12 @@ import os
 import resource
 import secrets as secrets_module
 import sys
+import threading
 import time
 import tracemalloc
 import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, wait as futures_wait
+from contextlib import contextmanager
 from functools import wraps
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -4495,7 +4497,7 @@ def _reconcile_exit_orders(user_id: str, creds: Dict[str, str], account_id: str)
     try:
         open_tickers = {
             str(position.get("symbol", "")).upper()
-            for position in webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
+            for position in _positions_for_pass(creds, account_id)
         }
     except Exception:  # noqa: BLE001 - best-effort reconciliation, don't block the scan over a flaky positions call
         return
@@ -5549,7 +5551,7 @@ def _run_fast_order_monitor(user_id: str) -> Dict[str, object]:
         entries_checked_before = sum(1 for order in list_overnight_orders(user_id) if ol.is_transitional(order))
 
         stages["setup"] = time.perf_counter() - started
-        with user_scan_lock(user_id):
+        with user_scan_lock(user_id), _monitor_pass_snapshot_cache():
             _timed(stages, "orphan_discovery", _discover_orphaned_broker_entries, user_id, creds, account_id)
             _timed(stages, "exit_orders", _reconcile_exit_orders, user_id, creds, account_id)
             has_unresolved_ambiguous_submission = _timed(stages, "unknown_submissions", _reconcile_unknown_submissions, user_id, creds, account_id)
@@ -6597,7 +6599,7 @@ def _check_and_rearm_dead_stop(
         return False  # a genuine fill (real exit, handled elsewhere) or still genuinely resting - nothing to rearm
 
     try:
-        positions = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
+        positions = _positions_for_pass(creds, account_id)
     except Exception:  # noqa: BLE001 - transient lookup failure, try again next tick
         return False
     position = next((p for p in positions if str(p.get("symbol", "")).upper() == ticker.upper()), None)
@@ -8777,13 +8779,47 @@ def _alert_if_entry_newly_stuck(user_id: str, order: Dict[str, object]) -> None:
 POSITION_ABSENT_CONFIRM_SECONDS = 180
 
 
+# One positions read per account per monitor pass. Found live 2026-09-29
+# (FAST_MONITOR_TIMING): every PROTECTION_FAILED record made its own
+# get_account_positions call - 8 identical reads per ~10s tick on top of the
+# pass's other calls - and Webull answered a third of the ticks with 429s,
+# each costing 1.5-3s of back-off sleep (ticks of 10-23s instead of ~1.3s).
+# Active only inside _monitor_pass_snapshot_cache(); everywhere else the
+# functions below read the broker fresh, exactly as before.
+_monitor_pass_cache = threading.local()
+
+
+@contextmanager
+def _monitor_pass_snapshot_cache():
+    _monitor_pass_cache.positions = {}
+    try:
+        yield
+    finally:
+        _monitor_pass_cache.positions = None
+
+
+def _positions_for_pass(creds: Dict[str, str], account_id: str) -> List[Dict[str, object]]:
+    """get_account_positions, read once per account while a monitor pass
+    cache is active. Nothing in a pass changes a position within the same
+    second - it only reads order state and places or cancels resting
+    orders - and the next pass reads fresh anyway."""
+    cache = getattr(_monitor_pass_cache, "positions", None)
+    key = (creds.get("app_key", ""), account_id)
+    if cache is not None and key in cache:
+        return cache[key]
+    positions = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
+    if cache is not None:
+        cache[key] = positions
+    return positions
+
+
 def _position_quantity_at_broker(creds: Dict[str, str], account_id: str, ticker: str) -> Optional[float]:
     """Live share count the broker reports for `ticker` on `account_id`,
     or None when the lookup itself failed (network/broker error) - None
     means "could not verify", never "zero". Long-only sign convention (a
     held position reads positive), same as the callers that use it."""
     try:
-        positions = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
+        positions = _positions_for_pass(creds, account_id)
     except Exception:  # noqa: BLE001 - inconclusive, never treated as evidence either way
         return None
     return next(
