@@ -10169,6 +10169,30 @@ def _resolve_ambiguous_submission(
     return {"entry": entry, "evidence": evidence, "audit_record": completed_record, "resolution_id": resolution_id}
 
 
+def _tickers_with_open_positions(orders: List[Dict[str, object]]) -> set:
+    """Tickers with an entry still short of a terminal state - the
+    duplicate-position guard's input.
+
+    A record with no lifecycle_state never went through submission: a
+    skipped candidate (price drift, LLM veto, sizing), or a Trade Journal
+    manual-close SELL. ol.is_transitional defaults those to "still open"
+    (the conservative choice for the monitor), which here meant one skip
+    locked that ticker out of new entries permanently. Such a record only
+    counts if it is a legacy placed entry from before the lifecycle field
+    existed."""
+    tickers = set()
+    for order in orders:
+        ticker = str(order.get("ticker", "")).upper()
+        if not ticker:
+            continue
+        if "lifecycle_state" in order:
+            if ol.is_transitional(order):
+                tickers.add(ticker)
+        elif order.get("status") == "placed" and (order.get("side") == "BUY" or order.get("direction") == "short"):
+            tickers.add(ticker)
+    return tickers
+
+
 def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Dict[str, object]:
     """Scans current setups the same way the dashboard does, and for the
     highest-confidence bullish ones places real (sandbox) DAY limit orders on
@@ -10428,11 +10452,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
     # real response shape for an OPTION row is documented elsewhere in this
     # function as unconfirmed, so matching on the broker snapshot directly
     # would silently miss every open option position.
-    tickers_with_open_positions = {
-        str(order.get("ticker", "")).upper()
-        for order in list_overnight_orders(user_id)
-        if order.get("ticker") and ol.is_transitional(order)
-    }
+    tickers_with_open_positions = _tickers_with_open_positions(list_overnight_orders(user_id))
 
     qualifying = [
         opp
