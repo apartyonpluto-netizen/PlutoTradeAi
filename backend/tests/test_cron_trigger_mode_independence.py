@@ -148,7 +148,8 @@ def test_scan_already_running_for_an_autonomous_user_is_recorded_as_skipped(user
     from scan_lock import ScanAlreadyRunningError
     with patch.object(pluto_app, "list_all_user_ids", return_value=[user_id]), \
          patch.object(pluto_app, "get_autonomy_status", return_value={"current_mode": "AUTONOMOUS"}), \
-         patch.object(pluto_app, "_run_autonomous_trade_scan", side_effect=ScanAlreadyRunningError("busy")):
+         patch.object(pluto_app, "_run_autonomous_trade_scan", side_effect=ScanAlreadyRunningError("busy")), \
+         patch.object(pluto_app, "time"):  # no-op the lock-wait sleeps
         _post_cron_trigger()
 
     runs = list_scan_runs(user_id)

@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 import app as pluto_app
+from autonomy.scan_run_log import list_scan_runs
 from scan_lock import ScanAlreadyRunningError, user_scan_lock
 
 
@@ -40,7 +41,7 @@ def test_cron_trigger_endpoint_treats_lock_conflict_as_a_benign_skip(user_id):
         pluto_app, "get_autonomy_status", return_value={"current_mode": "AUTONOMOUS"}
     ), patch.object(
         pluto_app, "_run_autonomous_trade_scan", side_effect=ScanAlreadyRunningError("already running")
-    ):
+    ), patch.object(pluto_app, "time"):  # no-op the lock-wait sleeps
         with pluto_app.app.test_client() as client:
             response = client.post(
                 "/api/autonomy/cron-trigger",
@@ -51,3 +52,39 @@ def test_cron_trigger_endpoint_treats_lock_conflict_as_a_benign_skip(user_id):
     assert response.status_code == 200
     assert payload["data"]["results"][0]["ok"] is True
     assert payload["data"]["results"][0]["skipped"] == "scan_already_running"
+
+
+def _cron(client):
+    return client.post("/api/autonomy/cron-trigger", headers={"X-Cron-Secret": os.environ.get("CRON_SECRET", "")})
+
+
+def test_cron_trigger_waits_briefly_for_a_monitor_tick_holding_the_lock(user_id):
+    """Seen live 2026-09-29: two of four consecutive 5-minute scans were
+    skipped because a continuous-monitor tick held the lock at that instant.
+    The scan now retries for a few seconds instead of losing the tick."""
+    outcomes = [ScanAlreadyRunningError("tick in flight"), ScanAlreadyRunningError("tick in flight"),
+                {"placed": [], "skipped": [], "placed_count": 0, "skipped_count": 0, "candidates_found": 0,
+                 "candidates_qualifying": 0, "entries_allowed": True, "new_entries_blocked_reason": ""}]
+    with patch.object(pluto_app, "list_all_user_ids", return_value=[user_id]), \
+         patch.object(pluto_app, "get_autonomy_status", return_value={"current_mode": "AUTONOMOUS"}), \
+         patch.object(pluto_app, "_run_autonomous_trade_scan", side_effect=outcomes) as scan, \
+         patch.object(pluto_app, "time") as fake_time:
+        with pluto_app.app.test_client() as client:
+            response = _cron(client)
+    assert response.status_code == 200
+    assert scan.call_count == 3
+    assert fake_time.sleep.call_count == 2
+    assert response.get_json()["data"]["results"][0].get("skipped") != "scan_already_running"
+    assert list_scan_runs(user_id)[0]["status"] == "processed"
+
+
+def test_cron_trigger_still_skips_once_the_wait_is_exhausted(user_id):
+    with patch.object(pluto_app, "list_all_user_ids", return_value=[user_id]), \
+         patch.object(pluto_app, "get_autonomy_status", return_value={"current_mode": "AUTONOMOUS"}), \
+         patch.object(pluto_app, "_run_autonomous_trade_scan", side_effect=ScanAlreadyRunningError("long scan")) as scan, \
+         patch.object(pluto_app, "time"):
+        with pluto_app.app.test_client() as client:
+            response = _cron(client)
+    assert scan.call_count == pluto_app.CRON_SCAN_LOCK_RETRIES + 1
+    assert response.get_json()["data"]["results"][0]["skipped"] == "scan_already_running"
+    assert list_scan_runs(user_id)[0]["status"] == "skipped"

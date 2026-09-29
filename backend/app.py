@@ -5408,6 +5408,31 @@ def _run_autonomous_trade_scan(user_id: str, dry_run: bool = False) -> Dict[str,
         return _run_autonomous_trade_scan_locked(user_id, dry_run=dry_run)
 
 
+# The 5-minute scan is the only thing that places new entries, so losing a
+# whole tick to a lock collision costs real opportunities. Seen live
+# 2026-09-29: two of four consecutive scans were "skipped - a concurrent
+# scan was already running" because a ~10s continuous-monitor tick happened
+# to hold the account lock when the cron fired. A tick holds the lock for a
+# second or two, so a short wait almost always succeeds; the monitor's own
+# skip-on-collision stays as it is (it runs again 10s later regardless).
+CRON_SCAN_LOCK_RETRIES = 30
+CRON_SCAN_LOCK_RETRY_SECONDS = 0.5  # 30 x 0.5s = up to 15s per user
+
+
+def _run_autonomous_trade_scan_waiting_for_lock(user_id: str) -> Dict[str, object]:
+    """_run_autonomous_trade_scan, retried briefly while another pass holds
+    this account's lock. Re-raises ScanAlreadyRunningError once the retries
+    are exhausted, so the caller records the skip exactly as before."""
+    for attempt in range(CRON_SCAN_LOCK_RETRIES + 1):
+        try:
+            return _run_autonomous_trade_scan(user_id)
+        except ScanAlreadyRunningError:
+            if attempt >= CRON_SCAN_LOCK_RETRIES:
+                raise
+            time.sleep(CRON_SCAN_LOCK_RETRY_SECONDS)
+    raise ScanAlreadyRunningError(f"A scan is already running for user {user_id} - skipping this trigger.")  # unreachable
+
+
 def _user_needs_fast_monitor_pass(user_id: str) -> bool:
     """Cheap, LOCAL-ONLY (no broker calls) check deciding whether the fast
     monitor should spend a broker round-trip on this user AT ALL. "Safety
@@ -11756,7 +11781,7 @@ def api_autonomy_cron_trigger():
         with app.test_request_context():
             session["user_id"] = user_id
             try:
-                scan_result = _run_autonomous_trade_scan(user_id)
+                scan_result = _run_autonomous_trade_scan_waiting_for_lock(user_id)
                 results.append({"user_id": user_id, "ok": True, **scan_result})
                 summary = _summarize_scan_result_for_run_log(scan_result)
                 record_scan_run(user_id, {
