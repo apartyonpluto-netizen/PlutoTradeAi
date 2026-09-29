@@ -979,6 +979,78 @@ const bindAccountHubPage = () => {
     });
   });
 
+  // Trade plan (trade_planner.py) - built with DOM nodes only, never innerHTML.
+  const money = (value) => (value === null || value === undefined ? "--" : `$${Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+  const pct = (value) => (value === null || value === undefined ? "--" : `${value}%`);
+  const el = (tag, className, text) => {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  };
+  const renderTradePlan = (plan) => {
+    const box = el("details", "trade-plan");
+    const summary = el("summary");
+    summary.appendChild(el("span", `plan-decision plan-${plan.decision}`, (plan.decision || "").toUpperCase()));
+    summary.appendChild(el("span", "plan-summary-text", ` Trade plan · ${(plan.reasons || [])[0] || ""}`));
+    box.appendChild(summary);
+
+    const n = plan.numbers || {};
+    const grid = el("dl", "plan-grid");
+    const row = (label, value) => {
+      grid.appendChild(el("dt", "", label));
+      grid.appendChild(el("dd", "", value));
+    };
+    row("Quantity", n.quantity ? `${n.quantity} share(s)` : "none");
+    row("Entry / stop / target", `${money(n.entry_price)} / ${money(n.stop_price)} / ${money(n.target_price)}`);
+    row("Current price", n.current_quote === null || n.current_quote === undefined ? "checked just before submission" : money(n.current_quote));
+    row("Position value (exposure)", money(n.exposure));
+    row("Share of account (allocation)", pct(n.allocation_percent));
+    row("Loss if the stop fills", `${money(n.planned_loss)} (${pct(n.risk_percent)} of account)`);
+    row("Gain if the target fills", money(n.reward_if_target));
+    row("Reward-to-risk", n.reward_to_risk === null || n.reward_to_risk === undefined ? "--" : String(n.reward_to_risk));
+    row("Leverage after", n.leverage_after === null || n.leverage_after === undefined ? "--" : `${n.leverage_after}x`);
+    row("Account used for sizing", `${money(n.plan_equity)} (${n.equity_source || "unknown"})`);
+    box.appendChild(grid);
+
+    if ((plan.reasons || []).length > 1) {
+      const reasons = el("ul", "plan-reasons");
+      plan.reasons.forEach((reason) => reasons.appendChild(el("li", "", reason)));
+      box.appendChild(reasons);
+    }
+
+    if ((plan.adverse_scenarios || []).length) {
+      box.appendChild(el("p", "plan-label", "If it goes wrong"));
+      const table = el("table", "plan-scenarios");
+      plan.adverse_scenarios.forEach((scenario) => {
+        const tr = el("tr");
+        tr.appendChild(el("td", "", scenario.scenario));
+        tr.appendChild(el("td", "", money(scenario.exit_price)));
+        tr.appendChild(el("td", "", `${money(scenario.loss)} (${pct(scenario.loss_percent_of_equity)})`));
+        table.appendChild(tr);
+      });
+      box.appendChild(table);
+    }
+
+    const probability = plan.probability || {};
+    box.appendChild(el("p", "plan-label", "Chance of winning"));
+    box.appendChild(el("p", "muted", probability.reliable
+      ? `${probability.win_probability_percent}% (range ${probability.win_probability_interval.low}-${probability.win_probability_interval.high}%) from ${probability.sample_size} closed trades.`
+      : (probability.note || "Probability not reliably estimated.")));
+    if (plan.expected_value) {
+      box.appendChild(el("p", "muted", `Average result per trade: ${money(plan.expected_value.per_trade)} (range ${money(plan.expected_value.interval.low)} to ${money(plan.expected_value.interval.high)}).`));
+    }
+    if (plan.setup_score !== undefined && plan.setup_score !== null) {
+      box.appendChild(el("p", "muted", `Setup score ${plan.setup_score} - ${plan.setup_score_note || ""}`));
+    }
+    if ((plan.limitations || []).length) {
+      const notes = el("ul", "plan-limitations");
+      plan.limitations.forEach((note) => notes.appendChild(el("li", "", note)));
+      box.appendChild(notes);
+    }
+    return box;
+  };
+
   const previewScanResult = document.getElementById("previewScanResult");
   const previewScanBtn = document.getElementById("previewScanButton");
   if (previewScanBtn instanceof HTMLButtonElement && previewScanResult instanceof HTMLElement) {
@@ -1000,6 +1072,7 @@ const bindAccountHubPage = () => {
         detail.textContent = entry.reason_skipped || entry.error || "No reason given.";
       }
       item.appendChild(detail);
+      if (entry.trade_plan) item.appendChild(renderTradePlan(entry.trade_plan));
       return item;
     };
 

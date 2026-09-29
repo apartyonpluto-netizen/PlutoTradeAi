@@ -33,6 +33,7 @@ __all__ = [
     "start_calibration",
     "recalibrate_from_real_outcomes",
     "maybe_trigger_real_outcomes_recalibration",
+    "closed_trade_returns_by_strategy",
 ]
 
 _calibration_lock = threading.Lock()
@@ -149,6 +150,23 @@ def _pnl_percent_for_closed_trade(trade: Dict[str, Any]) -> Optional[float]:
     return net_pnl / cost_basis * 100.0
 
 
+def closed_trade_returns_by_strategy() -> Dict[str, List[float]]:
+    """Net return (%) of every fully reconciled closed trade, grouped by
+    strategy, across every user - the only evidence trade plans use for a
+    win probability (see trade_planner.evidence_from_returns)."""
+    per_strategy: Dict[str, List[float]] = {}
+    for user in list_all_users():
+        for trade in list_closed_trades(user["id"]):
+            strategy_name = trade.get("strategy")
+            if not strategy_name:
+                continue
+            pnl_percent = _pnl_percent_for_closed_trade(trade)
+            if pnl_percent is None:
+                continue
+            per_strategy.setdefault(strategy_name, []).append(pnl_percent)
+    return per_strategy
+
+
 def recalibrate_from_real_outcomes() -> Dict[str, Any]:
     """Computes a per-strategy real-outcomes multiplier input from THIS
     DEPLOYMENT'S OWN closed trades, across every user - matching this
@@ -166,16 +184,7 @@ def recalibrate_from_real_outcomes() -> Dict[str, Any]:
     concurrent or later backtest run doesn't erase this, and vice versa -
     see _run_calibration_sync's own comment for the same discipline
     applied there."""
-    per_strategy: Dict[str, List[float]] = {}
-    for user in list_all_users():
-        for trade in list_closed_trades(user["id"]):
-            strategy_name = trade.get("strategy")
-            if not strategy_name:
-                continue
-            pnl_percent = _pnl_percent_for_closed_trade(trade)
-            if pnl_percent is None:
-                continue
-            per_strategy.setdefault(strategy_name, []).append(pnl_percent)
+    per_strategy = closed_trade_returns_by_strategy()
 
     real_strategy_stats: Dict[str, Dict[str, Any]] = {}
     for strategy_name, returns in per_strategy.items():

@@ -154,7 +154,9 @@ if __package__:
         RESOLUTION_PHASE_STARTED,
     )
     from .backtest_engine import run_backtest
+    from . import trade_planner
     from .calibration import (
+        closed_trade_returns_by_strategy,
         get_calibration,
         maybe_trigger_real_outcomes_recalibration,
         recalibrate_from_real_outcomes,
@@ -321,7 +323,9 @@ else:
         RESOLUTION_PHASE_STARTED,
     )
     from backtest_engine import run_backtest
+    import trade_planner
     from calibration import (
+        closed_trade_returns_by_strategy,
         get_calibration,
         maybe_trigger_real_outcomes_recalibration,
         recalibrate_from_real_outcomes,
@@ -10169,6 +10173,42 @@ def _resolve_ambiguous_submission(
     return {"entry": entry, "evidence": evidence, "audit_record": completed_record, "resolution_id": resolution_id}
 
 
+def _float_or_zero(value: object) -> float:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+    return number if math.isfinite(number) else 0.0
+
+
+def _trade_plan_for_candidate(
+    *, ticker, opp, direction, entry_price, stop_price, target_price, quote_price, sizing,
+    plan_equity, equity_source, existing_exposure, available_buying_power, short_permitted, evidence_returns,
+    quote_deferred=False,
+) -> Dict[str, object]:
+    """One trade plan for a scan candidate, from the scan's own inputs and
+    sizing result (see trade_planner.py). quote_price is a price fetched
+    moments ago (the pre-submission cross-check), so its age is ~0; None
+    means no confirmed current price. Never raises - a planning failure
+    becomes a plan that says so, never a scan failure."""
+    strategy = opp.get("strategy")
+    try:
+        evidence = trade_planner.evidence_from_returns(
+            evidence_returns.get(strategy) or [], strategy=strategy or "unknown", source="closed trades, all accounts",
+        )
+        return trade_planner.build_trade_plan(
+            ticker=ticker, strategy=strategy, direction=direction, setup_score=opp.get("confidence"),
+            entry_price=entry_price, stop_price=stop_price, target_price=target_price,
+            quote_price=quote_price, quote_age_seconds=0.0 if quote_price is not None else None,
+            plan_equity=plan_equity, equity_source=equity_source, existing_exposure=existing_exposure,
+            available_buying_power=available_buying_power, sizing=sizing, short_permitted=short_permitted,
+            evidence=evidence, quote_deferred=quote_deferred,
+        )
+    except Exception as error:  # noqa: BLE001
+        logger.warning("Trade plan failed for %s: %s", ticker, error)
+        return {"planner_version": trade_planner.PLANNER_VERSION, "ticker": ticker, "decision": "reject", "reasons": [f"Plan could not be built: {error}"]}
+
+
 def _tickers_with_open_positions(orders: List[Dict[str, object]]) -> set:
     """Tickers with an entry still short of a terminal state - the
     duplicate-position guard's input.
@@ -10334,6 +10374,13 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
     # a failed positions read here must fail the whole scan closed, not
     # silently undercount the portfolio's true open-position exposure.
     open_position_count = len(real_open_positions_snapshot)
+    # Trade-plan context (trade_planner.py), from the same snapshot sizing uses.
+    plan_equity_source = "configured paper balance" if virtual_balance is not None else "broker net liquidation value"
+    plan_existing_exposure = sum(_float_or_zero(position.get("market_value")) for position in real_open_positions_snapshot)
+    try:
+        strategy_evidence_returns = closed_trade_returns_by_strategy()
+    except Exception:  # noqa: BLE001 - evidence is informational; plans then say "not reliably estimated"
+        strategy_evidence_returns = {}
     if margin_account_id:
         open_position_count += len(webull_api.get_account_positions(creds["app_key"], creds["app_secret"], margin_account_id))
     available_position_slots = _available_position_slots(max_positions, open_position_count, OVERNIGHT_MAX_ORDERS_PER_RUN)
@@ -10615,6 +10662,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
     def _log_research_decision(
         *, ticker, recommendation, strategy, raw_confidence, decision, reason_skipped,
         quantity, entry_client_order_id, regime_shadow=None, skip_category=None, signal_snapshot=None,
+        trade_plan=None,
     ) -> None:
         """Durably records ONE evaluated candidate to the append-only
         research log (autonomy/research_log.py) - called for EVERY
@@ -10668,6 +10716,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                     "entry_client_order_id": entry_client_order_id,
                     "regime_shadow": regime_shadow if regime_shadow is not None else _shadow_snapshot_for(ticker, strategy, raw_confidence),
                     "signal_snapshot": signal_snapshot,
+                    "trade_plan": trade_planner.compact_plan(trade_plan) if trade_plan else None,
                 },
             )
         except Exception:  # noqa: BLE001 - research logging must never affect the real scan
@@ -11110,6 +11159,13 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             stop_price = float(entry.get("stop") or 0)
             target_price = float(entry.get("target") or 0)
             if dry_run:
+                entry["trade_plan"] = _trade_plan_for_candidate(
+                    ticker=ticker, opp=opp, direction=direction, entry_price=limit_price, stop_price=stop_price,
+                    target_price=target_price, quote_price=None, sizing=sizing, plan_equity=current_balance,
+                    equity_source=plan_equity_source, existing_exposure=plan_existing_exposure,
+                    available_buying_power=available_buying_power, short_permitted=margin_account_id is not None,
+                    evidence_returns=strategy_evidence_returns, quote_deferred=True,
+                )
                 # The entire point: show exactly what the agent's OWN
                 # research found and would have done, WITHOUT ever calling
                 # _submit_and_protect_entry - no broker call, no order, no
@@ -11150,6 +11206,16 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             # both sources gets its own distinct skip_category below.
             cross_check = market_data_aggregator.get_cross_checked_price(ticker, creds)
             fresh_price = cross_check["price"]
+            # Advisory in this version: recorded with the candidate and shown
+            # in previews, but it does not gate submission - the scan's own
+            # checks still decide. See trade_planner.py.
+            entry["trade_plan"] = _trade_plan_for_candidate(
+                ticker=ticker, opp=opp, direction=direction, entry_price=limit_price, stop_price=stop_price,
+                target_price=target_price, quote_price=None if cross_check["disagreement"] else fresh_price, sizing=sizing,
+                plan_equity=current_balance, equity_source=plan_equity_source, existing_exposure=plan_existing_exposure,
+                available_buying_power=available_buying_power, short_permitted=margin_account_id is not None,
+                evidence_returns=strategy_evidence_returns,
+            )
             drift_reason = ""
             drift_skip_category = "price_drift"
             if cross_check["disagreement"]:
@@ -11187,7 +11253,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                     raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=drift_reason,
                     quantity=quantity, entry_client_order_id=entry.get("entry_client_order_id"),
                     regime_shadow=entry.get("regime_shadow"), skip_category=drift_skip_category,
-                    signal_snapshot=_signal_snapshot_from(opp),
+                    signal_snapshot=_signal_snapshot_from(opp), trade_plan=entry.get("trade_plan"),
                 )
                 continue
 
@@ -11278,7 +11344,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             reason_skipped=entry.get("error") if entry.get("status") != "placed" else None,
             quantity=quantity, entry_client_order_id=entry.get("entry_client_order_id"),
             regime_shadow=entry.get("regime_shadow"), skip_category=entry.get("skip_category"),
-            signal_snapshot=_signal_snapshot_from(opp),
+            signal_snapshot=_signal_snapshot_from(opp), trade_plan=entry.get("trade_plan"),
         )
         if entry.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE:
             # Circuit breaker: an ambiguous submission means this account's
