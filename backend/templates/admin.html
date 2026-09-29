@@ -75,6 +75,36 @@
     </table>
 </section>
 
+<section class="panel panel-table" id="positionAbsentPanel">
+    <div class="panel-head">
+        <h3>Positions No Longer Held</h3>
+        <span>{{ position_absent_entries|length }} to review</span>
+    </div>
+    <p class="muted">
+        Tracked entries whose shares the broker no longer shows. Each one blocks new autonomous entries in its ticker
+        until it is closed here. Closing re-checks the broker fresh and refuses if the shares are held again or the
+        stop leg shows FILLED (that exit is handled automatically). It records the trade as closed with P&amp;L
+        <em>unknown</em> - nothing is invented - and needs a reason plus the ticker typed exactly.
+    </p>
+    <table id="positionAbsentTable">
+        <thead><tr><th>User</th><th>Ticker</th><th>Qty</th><th>Entered</th><th>Absent Since</th><th>Actions</th></tr></thead>
+        <tbody>
+        {% for entry in position_absent_entries %}
+        <tr data-user-id="{{ entry.user_id }}" data-entry-client-order-id="{{ entry.entry_client_order_id }}" data-ticker="{{ entry.ticker }}">
+            <td>{{ entry.username or entry.user_id }}</td>
+            <td>{{ entry.ticker }}</td>
+            <td>{{ entry.filled_quantity or entry.quantity }}</td>
+            <td class="alert-time" data-timestamp="{{ entry.logged_at or '' }}">--</td>
+            <td class="alert-time" data-timestamp="{{ entry.position_absent_first_seen_at or (entry.position_absent_evidence or {}).get('checked_at') or '' }}">--</td>
+            <td class="action-row"><button class="close-position-absent" type="button">Close record</button></td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="muted">Nothing to review - every tracked position is still held at the broker.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
 <section class="panel panel-table">
     <div class="panel-head">
         <h3>All Users</h3>
@@ -307,6 +337,43 @@
                 if (!ambiguousTable.querySelector("tbody tr[data-user-id]")) {
                     window.location.reload();
                 }
+            } catch (error) {
+                showToast(error.message, "error");
+                target.disabled = false;
+            }
+        });
+    }
+
+    const positionAbsentTable = document.getElementById("positionAbsentTable");
+    if (positionAbsentTable) {
+        positionAbsentTable.addEventListener("click", async (event) => {
+            const target = event.target;
+            if (!(target instanceof HTMLElement) || !target.classList.contains("close-position-absent")) return;
+            const row = target.closest("tr[data-user-id]");
+            if (!(row instanceof HTMLElement)) return;
+            const ticker = row.dataset.ticker || "";
+            if (!window.confirm(`Close the ${ticker} record? The broker is re-checked first; this is refused if the shares are held.`)) return;
+            const reason = window.prompt(`Reason for closing the ${ticker} record (required, kept on the trade record):`);
+            if (!reason || !reason.trim()) {
+                showToast("A reason is required - nothing was changed.", "error");
+                return;
+            }
+            const confirmation = window.prompt(`Type the ticker exactly (${ticker}) to confirm:`);
+            if (!confirmation || confirmation.trim().toUpperCase() !== ticker.trim().toUpperCase()) {
+                showToast("Confirmation did not match the ticker - nothing was changed.", "error");
+                return;
+            }
+            target.disabled = true;
+            try {
+                await callAdminApi("/api/admin/reconcile-position-absent", {
+                    user_id: row.dataset.userId,
+                    entry_client_order_id: row.dataset.entryClientOrderId,
+                    reason,
+                    confirmation,
+                });
+                row.remove();
+                showToast(`${ticker} record closed.`, "success");
+                if (!positionAbsentTable.querySelector("tbody tr[data-user-id]")) window.location.reload();
             } catch (error) {
                 showToast(error.message, "error");
                 target.disabled = false;

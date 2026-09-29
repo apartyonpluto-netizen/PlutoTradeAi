@@ -218,6 +218,35 @@ def _get_data_client(app_key: str, app_secret: str):
         return data_client
 
 
+# Per-thread tally of Webull read calls, so a caller (the ~10s continuous-monitor
+# tick) can report how much of its wall time was spent waiting on Webull and how
+# much of that was 429 back-off sleeping, without threading a timer through every
+# function. Inactive (no cost beyond a getattr) unless start_call_stats() was called
+# on this thread.
+_call_stats = threading.local()
+
+
+def start_call_stats() -> None:
+    _call_stats.data = {"calls": 0, "seconds": 0.0, "rate_limited": 0, "backoff_seconds": 0.0}
+
+
+def take_call_stats() -> Optional[Dict[str, Any]]:
+    data = getattr(_call_stats, "data", None)
+    _call_stats.data = None
+    return data
+
+
+def _record_call(seconds: float, rate_limited: bool = False, backoff_seconds: float = 0.0) -> None:
+    data = getattr(_call_stats, "data", None)
+    if data is None:
+        return
+    data["calls"] += 1
+    data["seconds"] += seconds
+    data["backoff_seconds"] += backoff_seconds
+    if rate_limited:
+        data["rate_limited"] += 1
+
+
 def _call_with_429_retry(action_label: str, call):
     """Retries a read-only Webull API call up to 3 times on a 429
     (rate-limited) response, matching the backoff _place_order_with_retry
@@ -234,15 +263,22 @@ def _call_with_429_retry(action_label: str, call):
     callers see on final failure."""
     last_error: Optional[BaseException] = None
     for attempt in range(3):
+        started = time.perf_counter()
         try:
-            return call()
+            result = call()
+            _record_call(time.perf_counter() - started)
+            return result
         except ServerException as error:
             last_error = error
             if error.get_http_status() == 429 and attempt < 2:
-                time.sleep(1.5 * (attempt + 1))
+                backoff = 1.5 * (attempt + 1)
+                _record_call(time.perf_counter() - started, rate_limited=True, backoff_seconds=backoff)
+                time.sleep(backoff)
                 continue
+            _record_call(time.perf_counter() - started)
             raise ValueError(f"Webull API error ({action_label}): HTTP {error.get_http_status()}") from error
         except ClientException as error:
+            _record_call(time.perf_counter() - started)
             raise ValueError(f"Webull API error ({action_label}): {error}") from error
     raise ValueError(f"Webull API error ({action_label}): exhausted retries with no response received")
 
@@ -688,12 +724,17 @@ def _fetch_order_detail(trade_client, account_id: str, client_order_id: str) -> 
     this is deliberately scoped to this lookup-only call site, not the
     shared placement-and-lookup allowlist."""
     for attempt in range(3):
+        started = time.perf_counter()
         try:
             response = trade_client.order_v2.get_order_detail(account_id, client_order_id)
+            _record_call(time.perf_counter() - started)
         except ServerException as error:
             if error.get_http_status() == 429 and attempt < 2:
-                time.sleep(1.5 * (attempt + 1))
+                backoff = 1.5 * (attempt + 1)
+                _record_call(time.perf_counter() - started, rate_limited=True, backoff_seconds=backoff)
+                time.sleep(backoff)
                 continue
+            _record_call(time.perf_counter() - started)
             if (
                 error.get_error_code() == _ORDER_DETAIL_NOT_PRESENT_ERROR_CODE
                 and _ORDER_DETAIL_NOT_PRESENT_MESSAGE_FRAGMENT in (error.get_error_msg() or "")
@@ -888,7 +929,14 @@ def get_order_history(app_key: str, app_secret: str, account_id: str, days_back:
     handling for the truncation case; it surfaces as exactly the same
     "errors" entry any other broker-side failure would."""
     trade_client = _get_trade_client(app_key, app_secret)
-    end_date = _today_utc_isoformat()
+    # Tomorrow, not today: with end_date = today's UTC date, orders placed
+    # today did not show up until the UTC date rolled over. Seen live
+    # 2026-09-29 - INTC, MSTR and MRVL were each placed during market hours
+    # but only surfaced to orphan discovery 12-31s after 00:00 UTC that
+    # night, ~10 hours late. A future end_date is accepted (HTTP 200,
+    # verified read-only against the sandbox the same day) and can only
+    # widen the window, never lose an order.
+    end_date = _tomorrow_utc_isoformat()
     start_date = _days_before_utc_isoformat(days_back)
     all_orders: List[Dict[str, Any]] = []
     seen_order_ids: set = set()
@@ -933,10 +981,10 @@ def get_order_history(app_key: str, app_secret: str, account_id: str, days_back:
     return all_orders
 
 
-def _today_utc_isoformat() -> str:
-    from datetime import datetime, timezone
+def _tomorrow_utc_isoformat() -> str:
+    from datetime import datetime, timedelta, timezone
 
-    return datetime.now(timezone.utc).date().isoformat()
+    return (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
 
 
 def _days_before_utc_isoformat(days: int) -> str:

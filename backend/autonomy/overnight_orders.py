@@ -54,7 +54,25 @@ def _atomic_write(path: Path, orders: List[Dict[str, Any]]) -> None:
 
 
 def record_overnight_order(user_id: str, entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Inserts a new record, or - when `entry` carries a record_id already on
+    disk - replaces that record in place, keeping its original logged_at.
+
+    The in-place replace is what makes write-ahead persistence work: an
+    entry is recorded once BEFORE its order is sent to the broker (see
+    app._persist_entry_before_submission) and again, same dict and same
+    record_id, once the outcome is known. Keying on record_id rather than
+    entry_client_order_id is deliberate - a same-day retry of a failed
+    entry reuses the same deterministic client_order_id, and it must get
+    its own record rather than overwrite the earlier attempt's history."""
     orders = list_overnight_orders(user_id)
+    record_id = str(entry.get("record_id") or "")
+    if record_id:
+        for index, existing in enumerate(orders):
+            if str(existing.get("record_id") or "") == record_id:
+                merged = {**entry, "logged_at": existing.get("logged_at") or _now_iso()}
+                orders[index] = merged
+                _atomic_write(_orders_file(user_id), orders)
+                return merged
     entry = {**entry, "logged_at": _now_iso()}
     orders.insert(0, entry)
     _atomic_write(_orders_file(user_id), orders)

@@ -574,3 +574,36 @@ def test_resolve_records_sell_side_for_a_flagged_short_entry(user_id):
     closed = list_closed_trades(target_id)
     assert len(closed) == 1
     assert closed[0]["side"] == "SELL"
+
+
+# --- Admin page panel + lock (2026-09-29) --------------------------------------
+
+
+def test_admin_page_lists_position_absent_entries_with_a_close_action(user_id):
+    admin_id = _make_admin(user_id[:8] + "-panel")
+    target_id = _register_target_user(user_id[:8] + "-panel")
+    record_overnight_order(target_id, _stuck_entry(position_absent_unexplained=True))
+    with patch.object(pluto_app, "get_market_data", return_value=([], [], "")), \
+         pluto_app.app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["user_id"] = admin_id
+        response = client.get("/admin")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert 'id="positionAbsentTable"' in html
+    assert 'data-ticker="SLB"' in html
+    assert "close-position-absent" in html
+
+
+def test_resolution_waits_for_the_scan_lock_and_gives_up_cleanly(user_id):
+    """A close landing between a monitor pass's read and write would be
+    silently reverted, so resolution runs under the user's scan lock."""
+    import pytest
+    from scan_lock import ScanAlreadyRunningError, user_scan_lock
+
+    ran = []
+    with user_scan_lock(user_id):
+        with pytest.raises(ScanAlreadyRunningError):
+            pluto_app._call_holding_user_scan_lock(user_id, lambda: ran.append(1), wait_seconds=0.6)
+    assert ran == []
+    assert pluto_app._call_holding_user_scan_lock(user_id, lambda: "done", wait_seconds=0.6) == "done"

@@ -412,8 +412,17 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 # platform-dependent (KB on Linux, where this actually runs in production;
 # bytes on macOS) - the /1024 below is correct for the Linux deployment,
 # not necessarily for local dev.
+def _memory_profiling_requested(environ=os.environ) -> bool:
+    """OFF unless PLUTO_MEMORY_PROFILING is set to 1/true/on/yes. It used to default ON; changed
+    2026-09-27 after measuring tracemalloc.start(10) slowing allocation-heavy code (JSON parsing,
+    which is most of what a monitor tick does) by ~30x in a micro-benchmark, alongside production
+    ticks taking 3-37s against ~0.1-0.3s per Webull call - enough to trip the worker's 30s timeout
+    and show the monitor as unhealthy. Turn it back on only while actively hunting a leak."""
+    return environ.get("PLUTO_MEMORY_PROFILING", "0").strip().lower() in ("1", "true", "on", "yes")
+
+
 _MEMORY_PROFILING_ENABLED = (
-    os.environ.get("PLUTO_MEMORY_PROFILING", "1").strip().lower() not in ("0", "false", "off")
+    _memory_profiling_requested()
     # tracemalloc instruments every allocation process-wide - real, measurable
     # overhead across the whole test suite for zero diagnostic value (tests
     # never loop the continuous-monitor-tick endpoint enough times to log
@@ -772,14 +781,22 @@ def admin_page():
     context["global_settings"] = get_global_settings()
     context["calibration"] = get_calibration()
     pending_ambiguous: List[Dict[str, object]] = []
+    position_absent: List[Dict[str, object]] = []
     for user in context["all_users"]:
         target_user_id = user.get("id", "")
         if not target_user_id:
             continue
         for order in list_overnight_orders(target_user_id):
+            row = {**order, "user_id": target_user_id, "username": user.get("username", "")}
             if order.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE:
-                pending_ambiguous.append({**order, "user_id": target_user_id, "username": user.get("username", "")})
+                pending_ambiguous.append(row)
+            if order.get("position_absent_unexplained") and order.get("lifecycle_state") in (ol.PROTECTION_FAILED, ol.PROTECTION_CONFIRMED_ACTIVE):
+                position_absent.append(row)
     context["pending_ambiguous_submissions"] = pending_ambiguous
+    # The UI for _resolve_position_absent_reconciliation, which had only an
+    # API route. Records here block their ticker from new entries
+    # (tickers_with_open_positions) until a human closes them.
+    context["position_absent_entries"] = position_absent
     return render_template("admin.html", **context)
 
 
@@ -5420,6 +5437,35 @@ def _user_needs_fast_monitor_pass(user_id: str) -> bool:
     return False
 
 
+def _timed(stages: Dict[str, float], name: str, fn, *args):
+    """Runs fn(*args) and records its wall time under `name` in `stages` (diagnostics only)."""
+    started = time.perf_counter()
+    try:
+        return fn(*args)
+    finally:
+        stages[name] = time.perf_counter() - started
+
+
+FAST_MONITOR_SLOW_TICK_SECONDS = 10.0
+
+
+def _log_fast_monitor_timing(user_id: str, started: float, stages: Dict[str, float], webull_stats) -> None:
+    """One line per tick: where the time went. WARNING when a tick is slow enough that the
+    worker's ~30s request timeout is at risk. Never raises - diagnostics must not affect the tick."""
+    try:
+        total = time.perf_counter() - started
+        parts = " ".join(f"{name}={seconds:.2f}s" for name, seconds in stages.items())
+        stats = webull_stats or {"calls": 0, "seconds": 0.0, "rate_limited": 0, "backoff_seconds": 0.0}
+        message = (
+            "FAST_MONITOR_TIMING user=%s total=%.2fs %s webull_calls=%d webull_seconds=%.2fs "
+            "webull_429s=%d backoff_sleep=%.1fs"
+        )
+        args = (user_id[:8], total, parts, stats["calls"], stats["seconds"], stats["rate_limited"], stats["backoff_seconds"])
+        (logger.warning if total >= FAST_MONITOR_SLOW_TICK_SECONDS else logger.info)(message, *args)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _run_fast_order_monitor(user_id: str) -> Dict[str, object]:
     """The FAST per-order monitor tick - task list: "Build fast per-order
     monitor decoupled from the 5-minute scan". Meant to be called on a
@@ -5474,56 +5520,93 @@ def _run_fast_order_monitor(user_id: str) -> Dict[str, object]:
     sandbox account can be found - same reasoning as
     _run_autonomous_trade_scan_locked's own setup: a caller (the
     fast-monitor-trigger endpoint) decides how to surface that per user."""
-    creds = get_webull_credentials(user_id)
-    if not is_webull_configured(user_id):
-        raise ValidationError("Webull is not configured for this user.")
-    accounts = get_accounts(user_id)
-    webull_account = next((a for a in accounts if a.get("platform") == "webull"), None)
-    if not webull_account or webull_account.get("status") != "Connected":
-        raise ValidationError("Webull is not connected for this user.")
-    sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
-    cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
-    if not cash_account:
-        raise ValidationError("No Webull sandbox account found for this user's credentials.")
-    account_id = cash_account["account_id"]
-    # See _run_autonomous_trade_scan_locked's own comment on the identical
-    # margin lookup - None is the normal case for a user with no margin
-    # account provisioned, not an error.
-    margin_account = webull_api.find_individual_margin_account(sandbox_accounts)
-    margin_account_id = margin_account["account_id"] if margin_account else None
+    started = time.perf_counter()
+    stages: Dict[str, float] = {}
+    webull_api.start_call_stats()
+    try:
+        creds = get_webull_credentials(user_id)
+        if not is_webull_configured(user_id):
+            raise ValidationError("Webull is not configured for this user.")
+        accounts = get_accounts(user_id)
+        webull_account = next((a for a in accounts if a.get("platform") == "webull"), None)
+        if not webull_account or webull_account.get("status") != "Connected":
+            raise ValidationError("Webull is not connected for this user.")
+        sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
+        cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
+        if not cash_account:
+            raise ValidationError("No Webull sandbox account found for this user's credentials.")
+        account_id = cash_account["account_id"]
+        # See _run_autonomous_trade_scan_locked's own comment on the identical
+        # margin lookup - None is the normal case for a user with no margin
+        # account provisioned, not an error.
+        margin_account = webull_api.find_individual_margin_account(sandbox_accounts)
+        margin_account_id = margin_account["account_id"] if margin_account else None
 
-    entries_checked_before = sum(1 for order in list_overnight_orders(user_id) if ol.is_transitional(order))
+        entries_checked_before = sum(1 for order in list_overnight_orders(user_id) if ol.is_transitional(order))
 
-    with user_scan_lock(user_id):
-        _discover_orphaned_broker_entries(user_id, creds, account_id)
-        _reconcile_exit_orders(user_id, creds, account_id)
-        has_unresolved_ambiguous_submission = _reconcile_unknown_submissions(user_id, creds, account_id)
-        has_incomplete_manual_resolution = _recover_incomplete_manual_resolutions(user_id, creds, account_id)
-        still_transitional = _monitor_transitional_orders(user_id, creds, account_id)
-        # THE primary safety loop for a margin/short entry - see
-        # _monitor_transitional_orders' own account-filtering docstring.
-        # Deliberately narrower than the cash path above (orphan
-        # discovery, ambiguous-submission recovery, and the outside-hours
-        # stop retry are not yet extended to the margin account) - a
-        # known, documented gap, not an oversight; see
-        # _run_autonomous_trade_scan_locked's matching comment.
-        if margin_account_id:
-            still_transitional = _monitor_transitional_orders(user_id, creds, margin_account_id) or still_transitional
+        stages["setup"] = time.perf_counter() - started
+        with user_scan_lock(user_id):
+            _timed(stages, "orphan_discovery", _discover_orphaned_broker_entries, user_id, creds, account_id)
+            _timed(stages, "exit_orders", _reconcile_exit_orders, user_id, creds, account_id)
+            has_unresolved_ambiguous_submission = _timed(stages, "unknown_submissions", _reconcile_unknown_submissions, user_id, creds, account_id)
+            has_incomplete_manual_resolution = _timed(stages, "manual_resolutions", _recover_incomplete_manual_resolutions, user_id, creds, account_id)
+            still_transitional = _timed(stages, "transitional_orders", _monitor_transitional_orders, user_id, creds, account_id)
+            # THE primary safety loop for a margin/short entry - see
+            # _monitor_transitional_orders' own account-filtering docstring.
+            # Deliberately narrower than the cash path above (orphan
+            # discovery, ambiguous-submission recovery, and the outside-hours
+            # stop retry are not yet extended to the margin account) - a
+            # known, documented gap, not an oversight; see
+            # _run_autonomous_trade_scan_locked's matching comment.
+            if margin_account_id:
+                still_transitional = _timed(stages, "transitional_margin", _monitor_transitional_orders, user_id, creds, margin_account_id, False) or still_transitional
 
-    entries_checked_after = sum(1 for order in list_overnight_orders(user_id) if ol.is_transitional(order))
+        entries_checked_after = sum(1 for order in list_overnight_orders(user_id) if ol.is_transitional(order))
 
-    return {
-        "has_unresolved_ambiguous_submission": has_unresolved_ambiguous_submission,
-        "has_incomplete_manual_resolution": has_incomplete_manual_resolution,
-        "still_transitional": still_transitional,
-        # entries_checked is the count BEFORE this pass (how many this
-        # invocation actually attempted to do something with) -
-        # entries_checked_after is included too since a resolved-and-closed
-        # entry disappears from the transitional count without having been
-        # "not checked".
-        "entries_checked": entries_checked_before,
-        "still_transitional_count": entries_checked_after,
-    }
+        return {
+            "has_unresolved_ambiguous_submission": has_unresolved_ambiguous_submission,
+            "has_incomplete_manual_resolution": has_incomplete_manual_resolution,
+            "still_transitional": still_transitional,
+            # entries_checked is the count BEFORE this pass (how many this
+            # invocation actually attempted to do something with) -
+            # entries_checked_after is included too since a resolved-and-closed
+            # entry disappears from the transitional count without having been
+            # "not checked".
+            "entries_checked": entries_checked_before,
+            "still_transitional_count": entries_checked_after,
+        }
+    finally:
+        _log_fast_monitor_timing(user_id, started, stages, webull_api.take_call_stats())
+
+
+def _persist_entry_before_submission(user_id: str, account_id: str, entry: Dict[str, object]) -> bool:
+    """Write-ahead: durably records an entry (planned stop/target included)
+    BEFORE its order goes to the broker. Returns False - after marking the
+    entry ENTRY_FAILED - if the record can't be written, so the caller never
+    sends an order it has no local trace of.
+
+    Found live 2026-09-29: every entry used to be recorded only AFTER
+    submission plus the fill/protection polling that follows it (tens of
+    seconds). A worker that died in that window (deploy restart, OOM,
+    instance restart) left a real filled position with no local record.
+    Orphan discovery later re-imported each one with stop=0/target=0 -
+    never invented, so never protectable - and they sat in
+    PROTECTION_FAILED holding every position slot, blocking all new
+    entries (INTC, MSTR, MRVL: 132 qualifying candidates in two days, zero
+    placed). With the record on disk first, a crash leaves an ordinary
+    ENTRY_SUBMITTED record the monitor resumes with the real planned levels;
+    the deterministic client_order_ids make that resumption idempotent."""
+    entry.setdefault("record_id", uuid.uuid4().hex)
+    entry.setdefault("account_id", account_id)
+    try:
+        record_overnight_order(user_id, entry)
+    except Exception as error:  # noqa: BLE001 - any failure to persist must block submission
+        ol.transition(
+            entry, ol.ENTRY_FAILED,
+            error=f"could not durably record this entry before submission - refusing to submit: {error}",
+        )
+        return False
+    return True
 
 
 def _submit_and_protect_entry(
@@ -5576,6 +5659,8 @@ def _submit_and_protect_entry(
     how this eventually gets resolved."""
     entry_client_order_id = ol.deterministic_client_order_id(user_id, ticker, trading_day, "entry", attempt=1)
     ol.initialize(entry, ol.ENTRY_SUBMITTED, entry_client_order_id=entry_client_order_id)
+    if not _persist_entry_before_submission(user_id, account_id, entry):
+        return entry
 
     # direction="short" (PUT) opens with a SELL (short-to-open) instead of
     # a BUY - see find_individual_margin_account/the 2026-09-02 short-
@@ -7226,6 +7311,8 @@ def _submit_and_confirm_option_entry(
         limit_price=limit_price,
         quantity=quantity,
     )
+    if not _persist_entry_before_submission(user_id, account_id, entry):
+        return entry
     try:
         webull_api.place_option_order(
             app_key=creds["app_key"],
@@ -7947,6 +8034,12 @@ def _discover_orphaned_broker_entries(user_id: str, creds: Dict[str, str], accou
         # entry is ever resolved and filled; never relied on for anything
         # date-sensitive or correctness-critical.
         orphan["trading_day"] = today_key
+        # The account whose order history this orphan was found in. Without
+        # it, the margin-account monitor pass also picked the record up (see
+        # _monitor_transitional_orders' include_unstamped) and, finding no
+        # such position in the margin account, flagged a held cash position
+        # as absent.
+        orphan["account_id"] = account_id
         orphan["orphan_recovered"] = True
         orphan["status"] = "unknown_submission_state"
         orphan["logged_at"] = _now_utc().isoformat()
@@ -9145,6 +9238,20 @@ def _resolve_position_absent_reconciliation(
     return {"entry": entry}
 
 
+def _call_holding_user_scan_lock(user_id: str, fn, wait_seconds: float = 20.0):
+    """Runs fn() holding user_scan_lock, retrying for up to wait_seconds
+    while a scan or monitor pass holds it (the lock itself never blocks)."""
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            with user_scan_lock(user_id):
+                return fn()
+        except ScanAlreadyRunningError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.5)
+
+
 @app.route("/api/admin/reconcile-position-absent", methods=["POST"])
 def api_admin_reconcile_position_absent():
     """The admin-facing route for _resolve_position_absent_reconciliation -
@@ -9153,20 +9260,29 @@ def api_admin_reconcile_position_absent():
     if guard:
         return guard
     payload = request.get_json(silent=True) or {}
+    target_user_id = str(payload.get("user_id", ""))
     try:
-        result = _resolve_position_absent_reconciliation(
-            target_user_id=str(payload.get("user_id", "")),
-            admin_user_id=_current_user_id(),
-            entry_client_order_id=str(payload.get("entry_client_order_id", "")),
-            reason=str(payload.get("reason", "")),
-            confirmation=str(payload.get("confirmation", "")),
+        # Under the user's scan lock: the continuous monitor reads the order
+        # list, makes broker calls, then writes it back, so a close landing
+        # between its read and write would be silently reverted.
+        result = _call_holding_user_scan_lock(
+            target_user_id,
+            lambda: _resolve_position_absent_reconciliation(
+                target_user_id=target_user_id,
+                admin_user_id=_current_user_id(),
+                entry_client_order_id=str(payload.get("entry_client_order_id", "")),
+                reason=str(payload.get("reason", "")),
+                confirmation=str(payload.get("confirmation", "")),
+            ),
         )
+    except ScanAlreadyRunningError:
+        return _api_failure("A scan or monitor pass is running for this account - try again in a few seconds.", status_code=409, error_code="busy", ok=False)
     except ValidationError as error:
         return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
     return _api_success({"entry": result["entry"]}, ok=True, entry=result["entry"])
 
 
-def _monitor_transitional_orders(user_id: str, creds: Dict[str, str], account_id: str) -> bool:
+def _monitor_transitional_orders(user_id: str, creds: Dict[str, str], account_id: str, include_unstamped: bool = True) -> bool:
     """The fast, frequently-run per-order monitor - task list: "Build fast
     per-order monitor decoupled from the 5-minute scan". Processes every
     entry in one of TWO groups:
@@ -9226,9 +9342,13 @@ def _monitor_transitional_orders(user_id: str, creds: Dict[str, str], account_id
     THIS call is processing is skipped entirely - looking it up against
     the wrong account's credentials would be querying for an order that
     genuinely does not exist there. An order with no account_id at all
-    (a legacy/test record from before this field was always stamped) is
-    processed regardless - matching the original, single-account
-    behavior exactly for anything that predates this distinction.
+    (a legacy/test record from before this field was always stamped, or an
+    orphan imported before 2026-09-29) is processed only when
+    include_unstamped is True - the cash-account pass. The margin pass
+    passes False: every unstamped record predates margin trading, and
+    checking one against the margin account found "no such position" and
+    flagged a held cash position as absent (seen live 2026-09-29 on INTC,
+    MSTR and MRVL).
 
     instrument_type-aware since 2026-09-03 (real options trading): an
     "OPTION" entry (order.get("instrument_type") == "OPTION" - absent/
@@ -9246,9 +9366,17 @@ def _monitor_transitional_orders(user_id: str, creds: Dict[str, str], account_id
     silent: a stale entry's exit attempt would simply be rejected by the
     broker (nothing to sell) and surface as a normal monitor error via
     _record_monitor_attempt, not lost."""
+    # `orders` holds the SAME dict objects as `all_orders`, so the in-place
+    # updates below land in `all_orders` too - and `all_orders` is what gets
+    # written back. Until 2026-09-29 this wrote back the account-FILTERED
+    # list, so each account's pass deleted every record belonging to the
+    # other account: every cash-account entry vanished on the next margin
+    # pass (seconds after placement), which is what reset this file on
+    # 2026-09-04 and later orphaned MRVL, MSTR and INTC.
+    all_orders = list_overnight_orders(user_id)
     orders = [
-        order for order in list_overnight_orders(user_id)
-        if not order.get("account_id") or order.get("account_id") == account_id
+        order for order in all_orders
+        if order.get("account_id") == account_id or (include_unstamped and not order.get("account_id"))
     ]
     resumable = [order for order in orders if order.get("lifecycle_state") in ol.MONITOR_RESUMABLE_STATES]
     exit_checkable = [order for order in orders if order.get("lifecycle_state") == ol.PROTECTION_CONFIRMED_ACTIVE]
@@ -9364,7 +9492,7 @@ def _monitor_transitional_orders(user_id: str, creds: Dict[str, str], account_id
         _alert_if_entry_newly_stuck(user_id, order)
 
     if changed:
-        replace_overnight_orders(user_id, orders)
+        replace_overnight_orders(user_id, all_orders)
 
     return any(
         order.get("lifecycle_state") in ol.MONITOR_RESUMABLE_STATES
@@ -10138,7 +10266,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         # feature over an unverified broader one - see the OCO/OTOCO
         # precedent), not an oversight.
         if margin_account_id:
-            _monitor_transitional_orders(user_id, creds, margin_account_id)
+            _monitor_transitional_orders(user_id, creds, margin_account_id, include_unstamped=False)
     else:
         has_unresolved_ambiguous_submission = False
         has_incomplete_manual_resolution = False
