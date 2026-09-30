@@ -21,7 +21,7 @@ armed (two env vars, see `backend/integrations/webull.py::is_live_trading_armed`
 | Approval tickets + pre-submission recheck | `test_trade_tickets.py` |
 | Event trail signal → exit | `test_event_journal.py` |
 
-Full suite: 1397 tests passing (2026-09-29, local venv).
+Full suite: 1403 tests passing (2026-09-29, local venv).
 
 ## Level 2 — Replay tests
 

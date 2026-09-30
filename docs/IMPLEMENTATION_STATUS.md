@@ -12,7 +12,7 @@ Levels: **mocked** (tests only) · **sandbox** (Webull paper, real requests) ·
 
 | # | Area | State | Level reached |
 |---|---|---|---|
-| 1 | Account/environment isolation, durable storage | New records stamped broker+environment; decisions use only the current environment's records; each record reconciled against its own account (two cross-account defects fixed). Storage: JSON + flock + atomic writes; **no automated backup** | mocked |
+| 1 | Account/environment isolation, durable storage | New records stamped broker+environment; decisions use only the current environment's records; each record reconciled against its own account (two cross-account defects fixed). Storage: JSON + flock + atomic writes; daily on-disk snapshots (7 kept) with verify/download and a manual restore runbook - **no off-site copy** unless the owner downloads one | mocked |
 | 2 | Broker auth + read-only account retrieval | Webull sandbox accounts/balances/positions/orders/history read | sandbox |
 | 2 | E*TRADE read-only | **Not built** - needs owner's developer keys + OAuth | — |
 | 3 | Order state machine + execution adapter | Webull equities: lifecycle states, deterministic ids, 417 idempotency | sandbox (equity) / mocked (options) |
@@ -29,8 +29,8 @@ Levels: **mocked** (tests only) · **sandbox** (Webull paper, real requests) ·
 1. Production sandbox holds 3 unprotected orphan positions and 5 stale records (owner action in Admin).
 2. Reconciliation report not yet observed in production (just deployed).
 3. Fees are not taken from broker transaction records (options fees recorded as `None`).
-4. No replay tests from recorded broker payloads.
-5. No automated backup/restore of `/var/data`.
+4. Replay coverage is limited to positions + open orders (no order-detail, history or balance payloads yet).
+5. Backups are on the same disk as the data; off-site copies depend on the owner downloading them (no external storage authorized).
 6. CSRF tokens absent (SameSite=Lax only).
 7. E*TRADE adapter absent.
 8. Observatory not driven by the event journal yet.
@@ -40,4 +40,5 @@ Levels: **mocked** (tests only) · **sandbox** (Webull paper, real requests) ·
 - 2026-09-29: release checklist; event journal (correlation ids); objective
   setup engine + Setup Discovery page + walk-forward validation; completed-bar
   detection; environment isolation + cross-account reconciliation fixes;
-  read-only broker reconciliation report + dashboard panel + replay fixture.
+  read-only broker reconciliation report + dashboard panel + replay fixture;
+  daily data snapshots + restore runbook.

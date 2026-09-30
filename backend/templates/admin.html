@@ -10,6 +10,15 @@
     <div class="brief-list" id="readinessChecks"></div>
 </section>
 
+<section class="panel" id="backupsPanel">
+    <div class="panel-head">
+        <h3>Backups</h3>
+        <button class="ghost-button" type="button" id="backupsCreate">Back up now</button>
+    </div>
+    <p class="muted">Daily compressed snapshots of the data disk (last 7 kept, taken after the close). They live on the same disk, so download one regularly and keep it somewhere else. Restoring is a manual step - see docs/RUNBOOK_BACKUP_RESTORE.md.</p>
+    <div class="brief-list" id="backupsList"><p class="muted">Loading...</p></div>
+</section>
+
 <section class="panel" id="setupValidationPanel">
     <div class="panel-head">
         <h3>Setup Evidence</h3>
@@ -219,6 +228,49 @@
 
 {% block page_scripts %}
 <script>
+(() => {
+    const list = document.getElementById("backupsList");
+    const button = document.getElementById("backupsCreate");
+    if (!list || !button) return;
+    const size = (b) => b >= 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(b / 1024)) + " KB";
+    const render = (data) => {
+        const rows = data.backups || [];
+        list.replaceChildren();
+        if (data.created && data.created.created === false) {
+            const p = document.createElement("p"); p.className = "muted"; p.textContent = "Not created: " + data.created.reason; list.append(p);
+        }
+        if (!rows.length) { const p = document.createElement("p"); p.className = "muted"; p.textContent = "No backups yet."; list.append(p); return; }
+        for (const b of rows) {
+            const row = document.createElement("div");
+            const label = document.createElement("span");
+            label.textContent = `${(b.created_at || "").slice(0, 16).replace("T", " ")} UTC - ${b.files} files, ${size(b.bytes)}`;
+            const actions = document.createElement("span");
+            const verify = document.createElement("button"); verify.type = "button"; verify.className = "ghost-button"; verify.textContent = "Verify";
+            verify.addEventListener("click", async () => {
+                verify.textContent = "Checking...";
+                const r = await (await fetch(`/api/admin/backups/${encodeURIComponent(b.name)}/verify`)).json();
+                verify.textContent = r.data && r.data.ok ? `OK (${r.data.members} files)` : "Problem - see console";
+                if (!(r.data && r.data.ok)) console.warn(r);
+            });
+            const link = document.createElement("a"); link.href = `/api/admin/backups/${encodeURIComponent(b.name)}/download`; link.textContent = "Download";
+            actions.append(verify, " ", link);
+            row.append(label, actions);
+            list.append(row);
+        }
+    };
+    const load = async (method = "GET") => {
+        button.disabled = true;
+        try {
+            const r = await fetch("/api/admin/backups", {method, credentials: "same-origin"});
+            const payload = await r.json();
+            if (!r.ok || !payload.success) throw new Error((payload.error && payload.error.message) || "Request failed.");
+            render(payload.data);
+        } catch (error) { list.textContent = "Could not load backups: " + error.message; }
+        finally { button.disabled = false; }
+    };
+    button.addEventListener("click", () => load("POST"));
+    load();
+})();
 (() => {
     const status = document.getElementById("setupValidationStatus");
     const button = document.getElementById("setupValidationRun");

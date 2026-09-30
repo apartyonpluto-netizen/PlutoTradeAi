@@ -18,6 +18,9 @@ probes only, never orders.
 
 ## Changed this session (newest first)
 
+- `backend/backups.py` (new), admin Backups panel, `/api/admin/backups*`,
+  daily snapshot from the cron after 20:00 UTC, `docs/RUNBOOK_BACKUP_RESTORE.md`,
+  `tests/test_backups.py`.
 - `backend/broker_reconciliation.py` (new), `app.py` (`/api/broker/reconciliation`,
   15-minute run from the fast-monitor cron), dashboard "Broker sync" panel,
   `tests/test_broker_reconciliation.py` + `tests/fixtures/webull_sandbox_cash_2026-09-29.json`
@@ -40,7 +43,7 @@ probes only, never orders.
 
 ## Checks actually run
 
-- Full suite: 1397 passed (local, mocked).
+- Full suite: 1403 passed (local, mocked).
 - Read-only sandbox probe 2026-09-29: cash INTC 2 / MSTR 5 / MRVL 4, no working orders.
 - Setup engine fuzz on 30 random-walk series: 0 detector errors; no detector
   passed the validation gate (expected on noise).
@@ -60,7 +63,7 @@ page lives in the session scratchpad only.
    Add balances to the report. Capture order-detail/history payloads for replay.
 2. Take fees from broker transactions (Webull order detail/transactions) into
    closed trades; mark estimates as estimates.
-3. Automated backup of `/var/data` + restore runbook.
+3. (done: on-disk snapshots) - owner should download one weekly for off-site keeping.
 4. CSRF tokens on state-changing routes.
 5. Drive the /agent-map observatory from `event_journal` (observed flows) vs
    the static architecture (structural), per the spec.

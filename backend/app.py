@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from flask import Flask, jsonify, redirect, render_template, request, send_from_directory, session, url_for
+from flask import Flask, jsonify, redirect, render_template, request, send_file, send_from_directory, session, url_for
 
 if __package__:
     from .auth import (
@@ -182,7 +182,7 @@ if __package__:
     from .paper_trader import list_trades as list_paper_trades
     from .paper_trader import open_trade as open_paper_trade
     from .pattern_brain import analyze_patterns
-    from . import broker_env, broker_reconciliation
+    from . import backups, broker_env, broker_reconciliation
     from .setups import service as setups_service
     from .settings_store import available_themes, get_settings, update_settings
     from .watchlist import (
@@ -356,6 +356,7 @@ else:
     from paper_trader import open_trade as open_paper_trade
     from pattern_brain import analyze_patterns
     import broker_env
+    import backups
     import broker_reconciliation
     from setups import service as setups_service
     from settings_store import available_themes, get_settings, update_settings
@@ -879,6 +880,36 @@ def api_admin_setup_validation():
         return _api_success({"run": setups_service.start_validation(list(CORE_SCAN_UNIVERSE), reason=f"manual ({_current_user_id()})"),
                              "status": setups_service.validation_status()})
     return _api_success({"status": setups_service.validation_status()})
+
+
+@app.route("/api/admin/backups", methods=["GET", "POST"])
+def api_admin_backups():
+    """GET: snapshots on disk. POST: take one now. Restores are manual (see
+    docs/RUNBOOK_BACKUP_RESTORE.md) - nothing here overwrites records."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    created = backups.create(f"manual ({_current_user_id()})") if request.method == "POST" else None
+    return _api_success({"created": created, "backups": backups.list_backups(), "keep": backups.KEEP})
+
+
+@app.route("/api/admin/backups/<name>/verify", methods=["GET"])
+def api_admin_backup_verify(name: str):
+    guard = _require_admin()
+    if guard:
+        return guard
+    return _api_success(backups.verify(name))
+
+
+@app.route("/api/admin/backups/<name>/download", methods=["GET"])
+def api_admin_backup_download(name: str):
+    guard = _require_admin()
+    if guard:
+        return guard
+    path = backups.path_for(name)
+    if path is None:
+        return _api_failure("No such backup.", status_code=404, error_code="not_found", ok=False)
+    return send_file(path, as_attachment=True, download_name=path.name, mimetype="application/gzip")
 
 
 @app.route("/api/admin/approve-user", methods=["POST"])
@@ -12544,12 +12575,19 @@ def api_autonomy_cron_trigger():
     # Setup-detector evidence is refreshed weekly, after the close, on this
     # same timer (read-only market data; runs in the background).
     setup_validation = None
+    data_backup = None
+    try:
+        if _now_utc().hour >= 20 and backups.due():
+            data_backup = backups.create("daily (cron)")
+    except Exception as error:  # noqa: BLE001 - a backup failure must never affect trading
+        logger.warning("data backup failed: %s", error)
     try:
         if _now_utc().hour >= 20 and setups_service.validation_is_stale():
             setup_validation = setups_service.start_validation(list(CORE_SCAN_UNIVERSE), reason="weekly refresh (cron)")
     except Exception as error:  # noqa: BLE001 - research refresh must never affect trading
         logger.warning("setup validation refresh not started: %s", error)
-    return _api_success({"ran_for_users": len(results), "results": results, "setup_validation": setup_validation},
+    return _api_success({"ran_for_users": len(results), "results": results, "setup_validation": setup_validation,
+                         "data_backup": data_backup},
                         ok=True, ran_for_users=len(results))
 
 
