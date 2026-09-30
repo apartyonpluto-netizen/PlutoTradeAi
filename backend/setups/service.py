@@ -124,4 +124,100 @@ def coverage() -> Dict[str, Any]:
         statuses = {tf: evidence.lookup(spec.id, spec.version, tf)["status"] for tf in spec.timeframes}
         rows.append({**spec.to_dict(), "family_label": model.FAMILIES[spec.family], "validation": statuses})
     rows.sort(key=lambda r: (r["family"], r["name"]))
-    return {"detectors": rows, "not_supported": model.pending_definitions(), "families": model.FAMILIES}
+    return {"detectors": rows, "not_supported": model.pending_definitions(), "families": model.FAMILIES,
+            "evidence": evidence.latest_snapshot_summary()}
+
+
+# --- historical validation runs ---------------------------------------------------
+
+VALIDATION_MAX_AGE_SECONDS = 7 * 24 * 3600
+
+
+def _validation_paths():
+    from . import evidence
+
+    root = evidence.DATA_DIR / "research"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / "setup_validation_status.json", root / "setup_validation.lock"
+
+
+def validation_status() -> Dict[str, Any]:
+    import json
+
+    from . import evidence
+
+    status_file, _ = _validation_paths()
+    try:
+        status = json.loads(status_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        status = {"state": "never_run"}
+    status["evidence"] = evidence.latest_snapshot_summary()
+    return status
+
+
+def _write_status(**fields: Any) -> None:
+    import json
+    import os
+
+    status_file, _ = _validation_paths()
+    tmp = status_file.with_name(status_file.name + ".tmp")
+    tmp.write_text(json.dumps(fields), encoding="utf-8")
+    os.replace(tmp, status_file)
+
+
+def _fetch_history(symbols: List[str], timeframe: str) -> Dict[str, Bars]:
+    frames = _alpaca().get_bars(symbols, period="2y", interval=timeframe)
+    return {symbol: Bars.from_frame(symbol, timeframe, frame) for symbol, frame in frames.items() if frame is not None and len(frame) > 250}
+
+
+def start_validation(symbols: List[str], *, reason: str) -> Dict[str, Any]:
+    """Runs the walk-forward validation in a background thread. Only one run
+    at a time across all workers (non-blocking flock). Read-only market data."""
+    import fcntl
+    from datetime import datetime, timezone
+
+    from . import validation
+
+    _, lock_path = _validation_paths()
+    handle = open(lock_path, "a+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return {"started": False, "reason": "a validation run is already in progress"}
+    started_at = datetime.now(timezone.utc).isoformat()
+    _write_status(state="running", started_at=started_at, reason=reason, progress="fetching bars", symbols=len(symbols))
+
+    def work() -> None:
+        try:
+            snapshot = validation.run(
+                symbols, fetch=_fetch_history,
+                progress=lambda text: _write_status(state="running", started_at=started_at, reason=reason, progress=text, symbols=len(symbols)),
+            )
+            _write_status(state="done", started_at=started_at, finished_at=datetime.now(timezone.utc).isoformat(), reason=reason,
+                          trades=snapshot["trades"], universe_size=snapshot["universe_size"])
+        except Exception as error:  # noqa: BLE001 - recorded for the admin page
+            logger.exception("setup validation run failed")
+            _write_status(state="failed", started_at=started_at, finished_at=datetime.now(timezone.utc).isoformat(),
+                          reason=reason, error=_short_error(error))
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
+
+    threading.Thread(target=work, name="setup-validation", daemon=True).start()
+    return {"started": True, "started_at": started_at}
+
+
+def validation_is_stale() -> bool:
+    from datetime import datetime, timezone
+
+    from . import evidence
+
+    summary = evidence.latest_snapshot_summary()
+    if not summary or not summary.get("generated_at"):
+        return True
+    try:
+        generated = datetime.fromisoformat(str(summary["generated_at"]))
+    except ValueError:
+        return True
+    return (datetime.now(timezone.utc) - generated).total_seconds() > VALIDATION_MAX_AGE_SECONDS

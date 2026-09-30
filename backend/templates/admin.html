@@ -10,6 +10,15 @@
     <div class="brief-list" id="readinessChecks"></div>
 </section>
 
+<section class="panel" id="setupValidationPanel">
+    <div class="panel-head">
+        <h3>Setup Evidence</h3>
+        <button class="ghost-button" type="button" id="setupValidationRun">Run now</button>
+    </div>
+    <p class="muted">Walk-forward test of every setup detector on two years of daily bars for the scan universe (read-only market data, next-bar-open entries, costs included). Refreshes weekly after the close. A setup can only become tradable after its out-of-sample AND forward results support it.</p>
+    <p id="setupValidationStatus">Loading...</p>
+</section>
+
 <section class="panel panel-table">
     <div class="panel-head">
         <h3>Pending Signups</h3>
@@ -210,6 +219,37 @@
 
 {% block page_scripts %}
 <script>
+(() => {
+    const status = document.getElementById("setupValidationStatus");
+    const button = document.getElementById("setupValidationRun");
+    if (!status || !button) return;
+    let timer = null;
+    const describe = (st) => {
+        const ev = st.evidence;
+        const last = ev ? `Last evidence: ${ev.generated_at ? ev.generated_at.slice(0, 16).replace("T", " ") : "?"} UTC, ${ev.trades} simulated trades across ${ev.universe_size} symbols (${ev.data_source}).` : "No evidence generated yet.";
+        const run = st.state === "running" ? `Running: ${st.progress || ""}. `
+            : st.state === "failed" ? `Last run failed: ${st.error || "unknown error"}. `
+            : st.state === "done" ? `Last run finished ${String(st.finished_at || "").slice(0, 16).replace("T", " ")} UTC. ` : "";
+        return run + last;
+    };
+    async function load(method = "GET") {
+        try {
+            const response = await fetch("/api/admin/setups/validation", {method, credentials: "same-origin"});
+            const payload = await response.json();
+            if (!response.ok || !payload.success) throw new Error((payload.error && payload.error.message) || "Request failed.");
+            const st = payload.data.status;
+            const note = payload.data.run && !payload.data.run.started ? `Not started: ${payload.data.run.reason}. ` : "";
+            status.textContent = note + describe(st);
+            button.disabled = st.state === "running";
+            clearTimeout(timer);
+            if (st.state === "running") timer = setTimeout(() => load(), 4000);
+        } catch (error) {
+            status.textContent = "Could not load: " + error.message;
+        }
+    }
+    button.addEventListener("click", () => load("POST"));
+    load();
+})();
 (() => {
     const summary = document.getElementById("readinessSummary");
     const list = document.getElementById("readinessChecks");

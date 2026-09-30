@@ -166,7 +166,7 @@ def test_a_chart_with_no_defined_setup_is_rejected():
 
 
 def _validated(detector_id, version, timeframe):
-    return {"key": "x", "status": model.VALIDATED, "in_sample": {"n": 0}, "out_of_sample": {"n": 40, "mean_r": 0.3, "mean_r_lower_90": 0.1, "win_rate": 0.5},
+    return {"key": "x", "status": model.VALIDATED, "in_sample": {"n": 0}, "out_of_sample": {"n": 40, "mean_r": 0.3, "mean_r_lower_95": 0.1, "win_rate": 0.5},
             "forward": {"n": 25, "mean_r": 0.2}, "by_regime": {}, "snapshot": None}
 
 

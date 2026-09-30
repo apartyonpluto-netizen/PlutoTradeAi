@@ -222,7 +222,7 @@ def evaluate_symbol(scans: List[Dict[str, Any]], *, liquidity: Optional[Dict[str
             if o["decision"] == QUALIFY:
                 o["decision"], o["decision_reason"] = WATCH, "timeframes disagree on direction"
     order = {QUALIFY: 0, WATCH: 1, REJECT: 2}
-    opportunities.sort(key=lambda o: (order[o["decision"]], -((o["historical"]["out_of_sample"].get("mean_r_lower_90") or -99) if o["decision"] == QUALIFY else 0),
+    opportunities.sort(key=lambda o: (order[o["decision"]], -((o["historical"]["out_of_sample"].get("mean_r_lower_95") or -99) if o["decision"] == QUALIFY else 0),
                                       -model.STATE_RANK[o["state"]], -(o["entry"].get("reward_to_risk") or 0)))
     inactive = [d for d in detections if d["state"] not in model.LIVE_STATES]
     symbol = scans[0]["symbol"] if scans else None

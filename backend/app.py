@@ -865,6 +865,19 @@ def api_admin_readiness():
     return _api_success(report)
 
 
+@app.route("/api/admin/setups/validation", methods=["GET", "POST"])
+def api_admin_setup_validation():
+    """GET: status of the historical setup validation. POST: start a run over
+    the scan universe (background, read-only market data)."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    if request.method == "POST":
+        return _api_success({"run": setups_service.start_validation(list(CORE_SCAN_UNIVERSE), reason=f"manual ({_current_user_id()})"),
+                             "status": setups_service.validation_status()})
+    return _api_success({"status": setups_service.validation_status()})
+
+
 @app.route("/api/admin/approve-user", methods=["POST"])
 def api_admin_approve_user():
     guard = _require_admin()
@@ -12459,7 +12472,16 @@ def api_autonomy_cron_trigger():
         failures_by_account={r["user_id"]: r["error"] for r in results if not r.get("ok")},
     )
 
-    return _api_success({"ran_for_users": len(results), "results": results}, ok=True, ran_for_users=len(results))
+    # Setup-detector evidence is refreshed weekly, after the close, on this
+    # same timer (read-only market data; runs in the background).
+    setup_validation = None
+    try:
+        if _now_utc().hour >= 20 and setups_service.validation_is_stale():
+            setup_validation = setups_service.start_validation(list(CORE_SCAN_UNIVERSE), reason="weekly refresh (cron)")
+    except Exception as error:  # noqa: BLE001 - research refresh must never affect trading
+        logger.warning("setup validation refresh not started: %s", error)
+    return _api_success({"ran_for_users": len(results), "results": results, "setup_validation": setup_validation},
+                        ok=True, ran_for_users=len(results))
 
 
 @app.route("/api/autonomy/fast-monitor-trigger", methods=["POST"])
