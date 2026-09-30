@@ -22,6 +22,16 @@
     {% endif %}
 </section>
 
+<section class="panel" id="brokerSyncPanel">
+    <div class="panel-head">
+        <h3>Broker sync</h3>
+        <button class="ghost-button" type="button" id="brokerSyncRun">Check now</button>
+    </div>
+    <p class="muted broker-sync-note">Read-only comparison of the broker's positions and working orders with the app's records for the current environment. The broker is the source of truth; differences are shown, never auto-corrected here.</p>
+    <p id="brokerSyncSummary">Loading...</p>
+    <ul class="broker-sync-items" id="brokerSyncItems"></ul>
+</section>
+
 <section class="panel" id="tradeTicketsPanel" hidden>
     <div class="panel-head"><h3>Awaiting Your Approval</h3><span>Trade tickets</span></div>
     <p class="muted" id="tradeTicketsSummary">Loading...</p>

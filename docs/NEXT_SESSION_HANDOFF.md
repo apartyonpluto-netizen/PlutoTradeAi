@@ -18,6 +18,10 @@ probes only, never orders.
 
 ## Changed this session (newest first)
 
+- `backend/broker_reconciliation.py` (new), `app.py` (`/api/broker/reconciliation`,
+  15-minute run from the fast-monitor cron), dashboard "Broker sync" panel,
+  `tests/test_broker_reconciliation.py` + `tests/fixtures/webull_sandbox_cash_2026-09-29.json`
+  (sanitized real sandbox payload).
 - `backend/broker_env.py` (new), `autonomy/overnight_orders.py`,
   `autonomy/closed_trades.py`, `autonomy/performance_report.py`,
   `autonomy/trade_tickets.py`, `app.py`: environment stamping and isolation;
@@ -36,7 +40,8 @@ probes only, never orders.
 
 ## Checks actually run
 
-- Full suite: 1390 passed (local, mocked).
+- Full suite: 1397 passed (local, mocked).
+- Read-only sandbox probe 2026-09-29: cash INTC 2 / MSTR 5 / MRVL 4, no working orders.
 - Setup engine fuzz on 30 random-walk series: 0 detector errors; no detector
   passed the validation gate (expected on noise).
 - Setup Discovery page: local preview with synthetic bars, desktop + 375px.
@@ -50,11 +55,9 @@ page lives in the session scratchpad only.
 
 ## Next concrete actions (in order)
 
-1. Build the read-only broker reconciliation report: for the current
-   environment, broker positions / open orders / balances vs internal records
-   → matched, broker-only (orphan or manual holding), record-only (stale),
-   quantity mismatch; persist `last_reconciled_at`; show it on Admin and the
-   dashboard. Replay tests from sanitized sandbox payloads.
+1. Confirm the Broker sync panel in production shows the expected
+   differences (INTC/MSTR/MRVL, and the 5 stale records as record-only).
+   Add balances to the report. Capture order-detail/history payloads for replay.
 2. Take fees from broker transactions (Webull order detail/transactions) into
    closed trades; mark estimates as estimates.
 3. Automated backup of `/var/data` + restore runbook.

@@ -861,6 +861,57 @@ const renderTradePlan = (plan) => {
   return box;
 };
 
+const BROKER_SYNC_LABELS = {
+  matched: "Matches broker",
+  quantity_mismatch: "Quantity differs",
+  record_only: "App shows open, broker shows none",
+  broker_only: "Held at broker, not tracked by the app",
+  protection_missing_at_broker: "No protective stop at the broker",
+};
+
+const bindBrokerSync = () => {
+  const summary = document.getElementById("brokerSyncSummary");
+  const list = document.getElementById("brokerSyncItems");
+  const button = document.getElementById("brokerSyncRun");
+  if (!summary || !list || !button) return;
+  const when = (iso) => (iso ? new Date(iso).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "never");
+  const render = (data) => {
+    const latest = data.latest;
+    const env = String(data.environment || "sandbox").toUpperCase();
+    if (!latest) {
+      summary.textContent = `${env}: not compared with the broker yet.`;
+      list.innerHTML = "";
+      return;
+    }
+    const age = latest.checked_at ? (Date.now() - new Date(latest.checked_at).getTime()) / 1000 : null;
+    const stale = age !== null && age > (data.interval_seconds || 900) * 2;
+    if (latest.status === "disconnected") {
+      summary.textContent = `${env}: broker unreachable at ${when(latest.checked_at)} - ${(latest.errors || []).join("; ")}. Last successful comparison: ${when(data.last_success_at)}.`;
+    } else {
+      const diffs = latest.differences || 0;
+      summary.textContent = `${env}: ${diffs ? `${diffs} difference(s)` : "matches the broker"} as of ${when(latest.checked_at)}${stale ? " (stale - older than two check intervals)" : ""}.`;
+    }
+    const items = (latest.items || []).filter((i) => i.category !== "matched");
+    list.innerHTML = items.map((i) => `<li class="broker-sync-${escapeHtml(i.category)}"><b>${escapeHtml(i.symbol)}</b> <small>${escapeHtml(i.account_id ? `acct ...${String(i.account_id).slice(-4)}` : "")}</small> - ${escapeHtml(BROKER_SYNC_LABELS[i.category] || i.category)}: broker ${escapeHtml(i.broker_quantity)}, app ${escapeHtml(i.record_quantity)}${i.category === "broker_only" ? " <small>(left untouched)</small>" : ""}</li>`).join("");
+  };
+  const load = async (method = "GET") => {
+    button.disabled = true;
+    if (method === "POST") summary.textContent = "Reading the broker...";
+    try {
+      const response = await fetch("/api/broker/reconciliation", { method, credentials: "same-origin" });
+      const payload = await response.json();
+      if (!response.ok || !payload.success) throw new Error((payload.error && payload.error.message) || "Request failed");
+      render(payload.data);
+    } catch (error) {
+      summary.textContent = `Could not load broker sync: ${error.message}`;
+    } finally {
+      button.disabled = false;
+    }
+  };
+  button.addEventListener("click", () => load("POST"));
+  load();
+};
+
 const bindTradeTickets = () => {
   const panel = document.getElementById("tradeTicketsPanel");
   const list = document.getElementById("tradeTicketsList");
@@ -3002,6 +3053,7 @@ onReady(() => {
   bindLiveDataStatusCard();
   bindTradingEfficiencyPanel();
   bindTradeTickets();
+  bindBrokerSync();
   bindMarketOverviewChart();
   bindMissionAlertFloater();
   refreshRelativeTimes();

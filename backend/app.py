@@ -182,7 +182,7 @@ if __package__:
     from .paper_trader import list_trades as list_paper_trades
     from .paper_trader import open_trade as open_paper_trade
     from .pattern_brain import analyze_patterns
-    from . import broker_env
+    from . import broker_env, broker_reconciliation
     from .setups import service as setups_service
     from .settings_store import available_themes, get_settings, update_settings
     from .watchlist import (
@@ -356,6 +356,7 @@ else:
     from paper_trader import open_trade as open_paper_trade
     from pattern_brain import analyze_patterns
     import broker_env
+    import broker_reconciliation
     from setups import service as setups_service
     from settings_store import available_themes, get_settings, update_settings
     from watchlist import (
@@ -10713,6 +10714,58 @@ def api_setups_scan():
                          "qualifying": [r["trade_candidate"]["symbol"] for r in results if r.get("trade_candidate")]})
 
 
+BROKER_RECONCILIATION_INTERVAL_SECONDS = 15 * 60
+
+
+def _run_broker_reconciliation(user_id: str) -> Dict[str, object]:
+    """Read-only: broker positions and working orders vs this user's records
+    for the current environment (broker_reconciliation.py)."""
+    creds = get_webull_credentials(user_id)
+    try:
+        listed = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
+        accounts = []
+        for account in (webull_api.find_individual_cash_account(listed), webull_api.find_individual_margin_account(listed)):
+            if account and account.get("account_id") and account["account_id"] not in accounts:
+                accounts.append(account["account_id"])
+    except Exception as error:  # noqa: BLE001 - recorded as disconnected
+        return broker_reconciliation.run(user_id, accounts=[], records=[], read_positions=lambda a: [], read_open_orders=lambda a: [],
+                                         account_error=f"{type(error).__name__}: {str(error)[:160]}")
+    return broker_reconciliation.run(
+        user_id, accounts=accounts, records=list_overnight_orders(user_id),
+        read_positions=lambda account_id: webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id),
+        read_open_orders=lambda account_id: webull_api.get_open_orders(creds["app_key"], creds["app_secret"], account_id),
+    )
+
+
+def _maybe_run_broker_reconciliation(user_id: str) -> None:
+    if not is_webull_configured(user_id):
+        return
+    latest = (broker_reconciliation.load(user_id).get("latest") or {}).get("checked_at")
+    if latest:
+        try:
+            if (_now_utc() - datetime.fromisoformat(str(latest))).total_seconds() < BROKER_RECONCILIATION_INTERVAL_SECONDS:
+                return
+        except ValueError:
+            pass
+    _run_broker_reconciliation(user_id)
+
+
+@app.route("/api/broker/reconciliation", methods=["GET", "POST"])
+@api_guard
+def api_broker_reconciliation():
+    """GET: the last broker-vs-app comparison. POST: run one now (read-only
+    broker calls; nothing is placed, cancelled or changed)."""
+    user_id = _current_user_id()
+    if request.method == "POST":
+        if not is_webull_configured(user_id):
+            return _api_failure("Connect Webull in Account Hub first.", status_code=400, error_code="not_configured", ok=False)
+        stored = _run_broker_reconciliation(user_id)
+    else:
+        stored = broker_reconciliation.load(user_id)
+    return _api_success({**stored, "environment": broker_env.current()["environment"],
+                         "interval_seconds": BROKER_RECONCILIATION_INTERVAL_SECONDS})
+
+
 @app.route("/api/events", methods=["GET"])
 @api_guard
 def api_events_recent():
@@ -12600,6 +12653,10 @@ def api_autonomy_fast_monitor_trigger():
             except Exception as error:  # noqa: BLE001 - one user's failure shouldn't block others
                 results.append({"user_id": user_id, "ok": False, "error": str(error)})
                 failures_by_account[user_id] = str(error)
+            try:
+                _maybe_run_broker_reconciliation(user_id)
+            except Exception as error:  # noqa: BLE001 - a read-only report must never affect monitoring
+                logger.warning("broker reconciliation failed for a user: %s", error)
 
     record_fast_monitor_run_completed(
         run_id,

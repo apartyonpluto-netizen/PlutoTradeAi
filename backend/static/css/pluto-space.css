@@ -188,3 +188,11 @@
 .setup-rule dl { display: grid; grid-template-columns: 110px 1fr; gap: 4px 10px; font-size: 0.85rem; }
 .setup-rule dt { color: var(--text-muted); }
 @media (max-width: 600px) { .setup-rule dl { grid-template-columns: 1fr; } }
+
+/* Broker sync */
+.broker-sync-note { font-size: 0.85rem; margin: 0 0 6px; }
+.broker-sync-items { margin: 6px 0 0; padding-left: 18px; font-size: 0.88rem; }
+.broker-sync-items li { margin: 3px 0; }
+.broker-sync-items .broker-sync-protection_missing_at_broker, .broker-sync-items .broker-sync-record_only { color: var(--negative); }
+.broker-sync-items .broker-sync-quantity_mismatch { color: var(--caution); }
+.broker-sync-items small { color: var(--text-muted); }

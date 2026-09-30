@@ -21,13 +21,16 @@ armed (two env vars, see `backend/integrations/webull.py::is_live_trading_armed`
 | Approval tickets + pre-submission recheck | `test_trade_tickets.py` |
 | Event trail signal → exit | `test_event_journal.py` |
 
-Full suite: 1390 tests passing (2026-09-29, local venv).
+Full suite: 1397 tests passing (2026-09-29, local venv).
 
 ## Level 2 — Replay tests
 
-None against recorded broker payloads yet. **Gap:** capture sanitized real
-sandbox responses (orders, positions, balances) and replay them through the
-reconciliation code.
+| Payload | Captured | Used by |
+|---|---|---|
+| Webull sandbox cash-account positions + open orders (sanitized: broker position ids replaced, no account ids) | 2026-09-29, read-only | `tests/test_broker_reconciliation.py::test_replay_*` |
+
+**Gap:** no captured order-detail, order-history or balance payloads yet;
+no option position payload exists (no option has been placed).
 
 ## Level 3 — Authenticated sandbox / paper (Webull)
 
@@ -41,7 +44,8 @@ reconciliation code.
 | Duplicate client order id rejected (HTTP 417 REPEAT) | confirmed earlier (see `order_lifecycle.deterministic_client_order_id`) | re-confirm pending |
 | Option preview | confirmed 2026-09-03 (code notes) | — |
 | **Option order placement / fill / exit** | **never done in sandbox** | — |
-| **Broker-vs-internal reconciliation report** | **not yet built** (next item) | — |
+| Broker-vs-internal reconciliation read path (accounts → positions → open orders) | OK - cash holds INTC 2, MSTR 5, MRVL 4; **0 working orders** (no protective stops at the broker); margin holds nothing | 2026-09-29 | read-only probe from local keys (same sandbox account as production) |
+| Reconciliation report in production | not yet observed (deploys with this change; runs every 15 min from the fast-monitor timer) | — | — |
 
 Known sandbox state (production): INTC, MSTR and MRVL positions are open at the
 broker with no protective orders (orphans after the 2026-09-29 record-loss

@@ -1,0 +1,56 @@
+{
+ "captured": "2026-09-29",
+ "source": "Webull sandbox, INDIVIDUAL_CASH account, read-only (positions + open orders)",
+ "sanitized": "position_id replaced; account id omitted",
+ "positions": [
+  {
+   "currency": "USD",
+   "quantity": "2",
+   "cost": "234.46",
+   "proportion": "0.1127",
+   "position_id": "sanitized-0",
+   "symbol": "INTC",
+   "instrument_type": "EQUITY",
+   "cost_price": "117.23",
+   "last_price": "115.93",
+   "market_value": "233.58",
+   "unrealized_profit_loss": "-0.88",
+   "unrealized_profit_loss_rate": "-0.0038",
+   "day_profit_loss": "1.52",
+   "day_realized_profit_loss": "0.00"
+  },
+  {
+   "currency": "USD",
+   "quantity": "5",
+   "cost": "743.40",
+   "proportion": "0.3760",
+   "position_id": "sanitized-1",
+   "symbol": "MSTR",
+   "instrument_type": "EQUITY",
+   "cost_price": "148.68",
+   "last_price": "154.67",
+   "market_value": "779.15",
+   "unrealized_profit_loss": "35.75",
+   "unrealized_profit_loss_rate": "0.0481",
+   "day_profit_loss": "-6.55",
+   "day_realized_profit_loss": "0.00"
+  },
+  {
+   "currency": "USD",
+   "quantity": "4",
+   "cost": "967.52",
+   "proportion": "0.5113",
+   "position_id": "sanitized-2",
+   "symbol": "MRVL",
+   "instrument_type": "EQUITY",
+   "cost_price": "241.88",
+   "last_price": "263.27",
+   "market_value": "1059.60",
+   "unrealized_profit_loss": "92.08",
+   "unrealized_profit_loss_rate": "0.0952",
+   "day_profit_loss": "52.00",
+   "day_realized_profit_loss": "0.00"
+  }
+ ],
+ "open_orders": []
+}

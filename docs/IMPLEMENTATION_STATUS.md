@@ -17,7 +17,7 @@ Levels: **mocked** (tests only) · **sandbox** (Webull paper, real requests) ·
 | 2 | E*TRADE read-only | **Not built** - needs owner's developer keys + OAuth | — |
 | 3 | Order state machine + execution adapter | Webull equities: lifecycle states, deterministic ids, 417 idempotency | sandbox (equity) / mocked (options) |
 | 4 | Reconciliation, idempotency, restart recovery | Ambiguous submissions, orphan import, position-absent detection, write-ahead records | sandbox + mocked |
-| 4 | Broker-vs-internal discrepancy report with last-reconciled time | **Not built** - next | — |
+| 4 | Broker-vs-internal discrepancy report with last-reconciled time | `broker_reconciliation.py`: matched / quantity mismatch / record-only / broker-only / protection missing; disconnected state keeps last good time; dashboard "Broker sync" panel; every 15 min + on demand | sandbox read path + replay |
 | 5 | Protection, sizing, deterministic risk | Stop placement, risk sizing, portfolio limits, dollar caps, 20% option trigger (owner must set) | mocked + sandbox (equity stops) |
 | 6 | Broker-derived performance | Closed trades from broker fills; per-environment reports; **fees not from broker** | mocked |
 | 7 | Strategy / options / patterns / news / evidence | Setup engine (36 detectors, validation harness, weekly refresh), plans, tickets; news not in decisions | mocked (patterns on synthetic data only - real-data run pending on Render) |
@@ -27,7 +27,7 @@ Levels: **mocked** (tests only) · **sandbox** (Webull paper, real requests) ·
 ## Known defects / gaps (highest first)
 
 1. Production sandbox holds 3 unprotected orphan positions and 5 stale records (owner action in Admin).
-2. No broker-vs-internal reconciliation report showing differences and last reconciled time.
+2. Reconciliation report not yet observed in production (just deployed).
 3. Fees are not taken from broker transaction records (options fees recorded as `None`).
 4. No replay tests from recorded broker payloads.
 5. No automated backup/restore of `/var/data`.
@@ -39,4 +39,5 @@ Levels: **mocked** (tests only) · **sandbox** (Webull paper, real requests) ·
 
 - 2026-09-29: release checklist; event journal (correlation ids); objective
   setup engine + Setup Discovery page + walk-forward validation; completed-bar
-  detection; environment isolation + cross-account reconciliation fixes.
+  detection; environment isolation + cross-account reconciliation fixes;
+  read-only broker reconciliation report + dashboard panel + replay fixture.
