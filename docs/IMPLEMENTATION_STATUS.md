@@ -21,7 +21,7 @@ Levels: **mocked** (tests only) · **sandbox** (Webull paper, real requests) ·
 | 5 | Protection, sizing, deterministic risk | Stop placement, risk sizing, portfolio limits, dollar caps, 20% option trigger (owner must set) | mocked + sandbox (equity stops) |
 | 6 | Broker-derived performance | Closed trades from broker fills; per-environment reports; fees from broker order history (unknown stays unknown, net marked as excluding fees) | replay (real sandbox history) |
 | 7 | Strategy / options / patterns / news / evidence | Setup engine (36 detectors, validation harness, weekly refresh), plans, tickets; news not in decisions | mocked (patterns on synthetic data only - real-data run pending on Render) |
-| 8 | 3D observatory on recorded events | Event journal with correlation ids exists; observatory still reads research log | mocked |
+| 8 | 3D observatory on recorded events | `/observatory`: stage flow / sectors / ticker chains from the event journal only; structural (dashed) vs observed (bright, count-sized) traffic; nothing animates without events; text version below | mocked + local preview (seeded events) |
 | 9 | Browser verification, runbooks, release checks | Setup Discovery page verified in local preview (desktop + phone) | — |
 
 ## Known defects / gaps (highest first)
@@ -33,7 +33,7 @@ Levels: **mocked** (tests only) · **sandbox** (Webull paper, real requests) ·
 5. Backups are on the same disk as the data; off-site copies depend on the owner downloading them (no external storage authorized).
 6. CSRF: SameSite=Lax + Origin/Referer check on every write (verified in production); no per-form tokens.
 7. E*TRADE adapter absent.
-8. Observatory not driven by the event journal yet.
+8. Observatory is new; production will look sparse until the journal accumulates events (it started 2026-09-29). The older /agent-map (architecture view) still reads the research log.
 
 ## Session log
 
@@ -44,4 +44,5 @@ Levels: **mocked** (tests only) · **sandbox** (Webull paper, real requests) ·
   daily data snapshots + restore runbook; unprotected-position flag (verified in
   production); broker-reported fees from order history; record-only items explained
   from broker history; test suite blocks all outbound network; news provider
-  outage no longer returns HTTP 500; cross-site write guard.
+  outage no longer returns HTTP 500; cross-site write guard; broker close evidence
+  in Admin; /observatory from the event journal.

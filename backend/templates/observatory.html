@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · Observatory{% endblock %}
+{% block head_extras %}
+<script type="importmap">{"imports": {"three": "/static/js/vendor/three.module.min.js"}}</script>
+<style>
+  .obs-shell { position: relative; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: radial-gradient(ellipse at 50% 40%, #1b1240 0%, #090614 62%, #04030c 100%); }
+  .obs-canvas { width: 100%; height: clamp(380px, 62vh, 720px); display: block; touch-action: none; cursor: grab; }
+  .obs-hud { position: absolute; left: 12px; top: 12px; right: 12px; display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; pointer-events: none; }
+  .obs-hud > * { pointer-events: auto; }
+  .obs-chip { background: rgba(10,7,26,.85); border: 1px solid rgba(139,92,255,.45); border-radius: 10px; padding: 7px 11px; font-size: 13px; }
+  .obs-chip button, .obs-controls button, .obs-controls select { background: none; border: 0; color: #cdbfff; font: inherit; cursor: pointer; padding: 0 2px; text-decoration: underline; }
+  .obs-controls { display: flex; gap: 8px; align-items: center; }
+  .obs-controls select { text-decoration: none; background: rgba(10,7,26,.85); border: 1px solid rgba(139,92,255,.45); border-radius: 8px; padding: 6px 8px; }
+  .obs-tip { position: absolute; pointer-events: none; background: rgba(8,5,24,.96); border: 1px solid rgba(139,92,255,.6); border-radius: 10px; padding: 8px 11px; font-size: 13px; max-width: 280px; transform: translate(12px, 12px); }
+  .obs-tip small { display: block; color: #a9a3cf; margin-top: 3px; }
+  .obs-key { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; margin: 10px 0 0; }
+  .obs-key i { display: inline-block; width: 22px; height: 0; vertical-align: middle; margin-right: 6px; }
+  .obs-text ul { margin: 4px 0 10px; padding-left: 18px; font-size: .9rem; }
+  .obs-text button { background: none; border: 0; color: var(--accent); cursor: pointer; padding: 0; font: inherit; text-decoration: underline; }
+  .obs-fallback { padding: 24px; text-align: center; }
+</style>
+{% endblock %}
+{% block content %}
+<section class="panel">
+    <div class="panel-head">
+        <h3>Observatory</h3>
+        <span>Recorded events, this account</span>
+    </div>
+    <p class="muted">
+        Every trade idea the agent handled, from the event journal: signal, plan, ticket, order, fill, protection and exit.
+        Faint dashed lines are the paths the design allows; bright lines are transitions that actually happened, sized by how
+        many. Nothing moves unless an event was recorded. Click a stage to see sectors, a sector to see its tickers, a ticker to
+        see its trade chains. Reporting only.
+    </p>
+    <div class="obs-shell">
+        <canvas id="obsCanvas" class="obs-canvas" tabindex="0" aria-label="3D view of recorded trade events. The same data is listed as text below."></canvas>
+        <div class="obs-hud">
+            <div class="obs-chip" id="obsCrumbs"></div>
+            <div class="obs-controls">
+                <button type="button" id="obsSectorsBtn">Sectors</button>
+                <select id="obsWindow" aria-label="Time window">
+                    <option value="24">Last 24 hours</option>
+                    <option value="168">Last 7 days</option>
+                    <option value="336">Last 14 days</option>
+                </select>
+            </div>
+        </div>
+        <div class="obs-tip" id="obsTip" hidden></div>
+        <div class="obs-fallback" id="obsFallback" hidden>3D graphics are not available in this browser; the list below shows the same recorded events.</div>
+    </div>
+    <p class="obs-key">
+        <span><i style="border-top: 2px dashed #6b7aa8"></i>Structural path (design, not activity)</span>
+        <span><i style="border-top: 3px solid #5ee7ff"></i>Observed transitions</span>
+        <span><i style="border-top: 3px solid #ffb547"></i>Observed outside the designed paths</span>
+    </p>
+    <p id="obsStatus" role="status" aria-live="polite">Loading…</p>
+</section>
+<section class="panel obs-text">
+    <div class="panel-head"><h3>As text</h3></div>
+    <div id="obsText"></div>
+</section>
+{% endblock %}
+{% block page_scripts %}
+<script type="module" src="/static/js/observatory_3d.js"></script>
+{% endblock %}

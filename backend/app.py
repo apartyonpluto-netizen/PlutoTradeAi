@@ -182,7 +182,7 @@ if __package__:
     from .paper_trader import list_trades as list_paper_trades
     from .paper_trader import open_trade as open_paper_trade
     from .pattern_brain import analyze_patterns
-    from . import backups, broker_env, broker_fees, broker_reconciliation
+    from . import backups, broker_env, broker_fees, broker_reconciliation, observatory
     from .setups import service as setups_service
     from .settings_store import available_themes, get_settings, update_settings
     from .watchlist import (
@@ -359,6 +359,7 @@ else:
     import backups
     import broker_fees
     import broker_reconciliation
+    import observatory
     from setups import service as setups_service
     from settings_store import available_themes, get_settings, update_settings
     from watchlist import (
@@ -3198,6 +3199,27 @@ def agent_map_3d_page() -> str:
     from /api/agent-map. Reporting only: nothing on it changes a decision."""
     context = _build_page_context(include_opportunities=False, include_market_scan=False)
     return render_template("agent_map_3d.html", **context)
+
+
+@app.route("/observatory")
+def observatory_page() -> str:
+    """3D view of recorded trade events (event_journal): structural paths vs
+    observed flows, drilling from the whole agent to sectors to one ticker's
+    trade chains. Reporting only."""
+    context = _build_page_context(include_opportunities=False, include_market_scan=False)
+    return render_template("observatory.html", **context)
+
+
+@app.route("/api/observatory")
+@api_guard
+def api_observatory():
+    return _api_success(observatory.build(
+        _current_user_id(),
+        level=request.args.get("level") or "agent",
+        window_hours=request.args.get("window_hours", default=24, type=float),
+        sector=request.args.get("sector") or None,
+        ticker=(request.args.get("ticker") or "").strip()[:12] or None,
+    ))
 
 
 @app.route("/api/agent-map")
