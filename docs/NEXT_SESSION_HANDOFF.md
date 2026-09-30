@@ -18,6 +18,7 @@ probes only, never orders.
 
 ## Changed this session (newest first)
 
+- `app.py::_reject_cross_site_writes` (Origin/Referer check), `tests/test_cross_site_writes.py`.
 - `broker_reconciliation.py`: record-only items carry `broker_close_evidence`
   from 30-day order history. `tests/conftest.py`: outbound network blocked in
   all tests. `news/news_service.py`: an unreachable provider is a reported
@@ -51,7 +52,8 @@ probes only, never orders.
 
 ## Checks actually run
 
-- Full suite: 1410 passed (local, mocked, outbound network blocked).
+- Full suite: 1413 passed (local, mocked, outbound network blocked).
+- Production 2026-09-30 14:28 UTC: Broker sync 3 matched / 5 record-only (MU with broker close evidence) / 3 unprotected; same-site writes pass the new guard.
 - Production (sandbox) Broker sync 2026-09-30 01:52 UTC: 3 matched, 5 record-only, 3 unprotected_at_broker.
 - Read-only probe: order history has fee fields; order detail does not.
 - Read-only sandbox probe 2026-09-29: cash INTC 2 / MSTR 5 / MRVL 4, no working orders.
@@ -68,16 +70,13 @@ page lives in the session scratchpad only.
 
 ## Next concrete actions (in order)
 
-1. Check production Broker sync shows close evidence for the 5 record-only
-   items; surface it in Admin's "Positions No Longer Held" panel. Add balances
-   to the report. Capture order-detail/history payloads for replay.
-2. Take fees from broker transactions (Webull order detail/transactions) into
-   closed trades; mark estimates as estimates.
-3. (done: on-disk snapshots) - owner should download one weekly for off-site keeping.
-4. CSRF tokens on state-changing routes.
-5. Drive the /agent-map observatory from `event_journal` (observed flows) vs
+1. Surface broker close evidence in Admin's "Positions No Longer Held" panel
+   (production shows MU closed at the broker 2026-09-17). Add balances.
+2. The weekly setup validation runs automatically tonight after 20:00 UTC
+   (evidence is stale/absent); check Admin -> Setup Evidence afterwards.
+3. Drive the /agent-map observatory from `event_journal` (observed flows) vs
    the static architecture (structural), per the spec.
-6. E*TRADE read-only adapter once the owner provides developer keys (entered
+4. E*TRADE read-only adapter once the owner provides developer keys (entered
    in the app, never in chat).
 
 ## Blockers needing the owner

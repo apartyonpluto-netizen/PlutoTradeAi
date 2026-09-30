@@ -31,7 +31,7 @@ Levels: **mocked** (tests only) · **sandbox** (Webull paper, real requests) ·
 3. Fees now come from broker order history for new closes; closed trades recorded earlier keep `fees: None`. Option fee shape unverified (no option has been placed).
 4. Replay coverage: positions, open orders, order history. No balance payload yet.
 5. Backups are on the same disk as the data; off-site copies depend on the owner downloading them (no external storage authorized).
-6. CSRF tokens absent (SameSite=Lax only).
+6. CSRF: SameSite=Lax + Origin/Referer check on every write (verified in production); no per-form tokens.
 7. E*TRADE adapter absent.
 8. Observatory not driven by the event journal yet.
 
@@ -44,4 +44,4 @@ Levels: **mocked** (tests only) · **sandbox** (Webull paper, real requests) ·
   daily data snapshots + restore runbook; unprotected-position flag (verified in
   production); broker-reported fees from order history; record-only items explained
   from broker history; test suite blocks all outbound network; news provider
-  outage no longer returns HTTP 500.
+  outage no longer returns HTTP 500; cross-site write guard.

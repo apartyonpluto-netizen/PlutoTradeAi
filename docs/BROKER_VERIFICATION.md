@@ -21,7 +21,7 @@ armed (two env vars, see `backend/integrations/webull.py::is_live_trading_armed`
 | Approval tickets + pre-submission recheck | `test_trade_tickets.py` |
 | Event trail signal → exit | `test_event_journal.py` |
 
-Full suite: 1410 tests passing (2026-09-30, local venv). Since 2026-09-30 the suite blocks every non-local network connection (`tests/conftest.py`), so no test can reach a broker; before that, several fast-monitor tests were reaching real Webull endpoints with fake keys (failing with 401, silently).
+Full suite: 1413 tests passing (2026-09-30, local venv). Since 2026-09-30 the suite blocks every non-local network connection (`tests/conftest.py`), so no test can reach a broker; before that, several fast-monitor tests were reaching real Webull endpoints with fake keys (failing with 401, silently).
 
 ## Level 2 — Replay tests
 
@@ -49,6 +49,8 @@ no option position payload exists (no option has been placed).
 | Broker-vs-internal reconciliation read path (accounts → positions → open orders) | OK - cash holds INTC 2, MSTR 5, MRVL 4; **0 working orders** (no protective stops at the broker); margin holds nothing | 2026-09-29 | read-only probe from local keys (same sandbox account as production) |
 | Reconciliation report in production (sandbox, both accounts ...2H6B cash / ...C5R8 margin) | status "differences": INTC 2, MRVL 4, MSTR 5 **matched** broker quantities; ADBE, COIN, MU, PLTR, SLB **record-only** (broker holds none) - exactly the known state | 2026-09-30 01:46 UTC | on-demand run (read-only) from the signed-in owner session |
 | Unprotected positions flagged in production | INTC, MRVL, MSTR reported `unprotected_at_broker` (3), plus 3 matched and 5 record-only | 2026-09-30 01:52 UTC | on-demand run after deploy of `8b43d14` |
+| Record-only items explained from broker history (production) | MU: broker shows LIMIT SELL 1 @ 981.97 on 2026-09-17 (closed at the broker); ADBE, COIN, PLTR, SLB: no closing fill in the last 30 days (reported as such, not guessed) | 2026-09-30 14:28 UTC | on-demand run after deploy of `ce19a65` |
+| Cross-site write guard does not block same-site use (production) | same-origin POSTs reach their handlers (reconciliation 200; unknown ticket decline 409) | 2026-09-30 14:28 UTC | signed-in owner session after deploy of `ecedbf3` |
 | Broker fee fields | Order **history** carries `fees` (SEC_FEE, FINRA_FEE with actual/receivable values) and `commission` ({} = zero); the order **detail** endpoint carries neither | 2026-09-30 | read-only probe; fixture `webull_sandbox_cash_order_history_2026-09-30.json` |
 
 Known sandbox state (production): INTC, MSTR and MRVL positions are open at the
