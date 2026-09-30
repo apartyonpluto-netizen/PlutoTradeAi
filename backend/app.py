@@ -182,6 +182,7 @@ if __package__:
     from .paper_trader import list_trades as list_paper_trades
     from .paper_trader import open_trade as open_paper_trade
     from .pattern_brain import analyze_patterns
+    from .setups import service as setups_service
     from .settings_store import available_themes, get_settings, update_settings
     from .watchlist import (
         add_stock,
@@ -353,6 +354,7 @@ else:
     from paper_trader import list_trades as list_paper_trades
     from paper_trader import open_trade as open_paper_trade
     from pattern_brain import analyze_patterns
+    from setups import service as setups_service
     from settings_store import available_themes, get_settings, update_settings
     from watchlist import (
         add_stock,
@@ -10653,6 +10655,33 @@ def api_trade_ticket_decline(ticket_id: str):
     except trade_tickets.TicketConflict as error:
         return _api_failure(str(error), status_code=409, error_code="ticket_conflict", ok=False)
     return _api_success({"ticket": _ticket_for_api(ticket)}, ok=True)
+
+
+SETUP_TIMEFRAMES = ("1d", "1h", "30m", "15m", "5m")
+
+
+@app.route("/api/setups/coverage", methods=["GET"])
+@api_guard
+def api_setups_coverage():
+    """Every setup the engine can detect, its rules and its validation
+    status per timeframe - plus named formations it cannot detect yet."""
+    return _api_success(setups_service.coverage())
+
+
+@app.route("/api/setups/scan", methods=["GET"])
+@api_guard
+def api_setups_scan():
+    """Setup discovery for up to 12 symbols (read-only market data)."""
+    symbols = [s.strip().upper() for s in (request.args.get("symbols") or "").split(",") if s.strip()][:12]
+    if not symbols:
+        return _api_failure("Pass symbols=AAPL,MSFT", status_code=400, error_code="missing_symbols", ok=False)
+    timeframes = [t for t in (request.args.get("timeframes") or "1d,5m").split(",") if t in SETUP_TIMEFRAMES] or ["1d"]
+    results = setups_service.analyze(symbols, timeframes)
+    for result in results:
+        for opportunity in result["opportunities"]:
+            opportunity.pop("primary_detection", None)
+    return _api_success({"results": results, "timeframes": timeframes,
+                         "qualifying": [r["trade_candidate"]["symbol"] for r in results if r.get("trade_candidate")]})
 
 
 @app.route("/api/events", methods=["GET"])

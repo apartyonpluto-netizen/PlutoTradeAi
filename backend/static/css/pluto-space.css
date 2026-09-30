@@ -142,3 +142,49 @@
 .trade-ticket-history > summary { cursor: pointer; color: var(--text-muted); font-size: 0.85rem; margin-bottom: 8px; }
 .trade-ticket-history .trade-ticket { margin-bottom: 8px; opacity: 0.85; }
 .risk-slider-group-title { margin: 18px 0 4px; font-weight: 600; color: var(--text-primary); }
+
+/* Setup discovery */
+.setup-intro { margin: 0 0 10px; font-size: 0.9rem; }
+.setup-card { display: flex; flex-direction: column; gap: 12px; }
+.setup-opportunity { border: 1px solid var(--border); border-radius: var(--radius-md, 10px); padding: 10px 12px; background: var(--bg-elevated-soft); }
+.setup-opportunity.decision-qualify { border-color: var(--positive); }
+.setup-opportunity.decision-reject { opacity: 0.75; }
+.setup-title { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; align-items: baseline; }
+.setup-title small { color: var(--text-muted); }
+.setup-badges { display: flex; gap: 6px; }
+.setup-state, .setup-decision { font-size: 0.75rem; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--text-secondary); text-transform: capitalize; }
+.setup-state.state-confirmed { background: rgba(95, 212, 184, 0.16); color: var(--positive); }
+.setup-state.state-developing { background: rgba(224, 187, 106, 0.14); color: var(--caution); }
+.decision-qualify .setup-decision { background: rgba(95, 212, 184, 0.2); color: var(--positive); }
+.decision-reject .setup-decision { background: rgba(240, 138, 148, 0.16); color: var(--negative); }
+.setup-chart { width: 100%; height: auto; margin: 8px 0; display: block; }
+.setup-chart .setup-wick { stroke: var(--text-muted); stroke-width: 1; }
+.setup-chart .setup-up { fill: var(--positive); opacity: 0.8; }
+.setup-chart .setup-down { fill: var(--negative); opacity: 0.8; }
+.setup-chart .setup-line { stroke: var(--accent); stroke-width: 1.6; fill: none; }
+.setup-chart .setup-line-reference { stroke: var(--accent-gold); stroke-dasharray: 3 3; }
+.setup-chart .setup-line-invalidation { stroke: var(--negative); }
+.setup-chart .setup-level { stroke-width: 1; stroke-dasharray: 5 4; }
+.setup-chart .setup-level.invalidation { stroke: var(--negative); }
+.setup-chart .setup-level.target { stroke: var(--positive); }
+.setup-chart .setup-level.trigger { stroke: var(--accent); }
+.setup-chart .setup-level-label { font-size: 10px; fill: var(--text-secondary); }
+.setup-chart .setup-level-label.invalidation { fill: var(--negative); }
+.setup-chart .setup-level-label.target { fill: var(--positive); }
+.setup-chart .setup-point { fill: var(--accent); stroke: var(--bg-base); stroke-width: 1; }
+.setup-chart .setup-point.provisional { fill: none; stroke: var(--caution); stroke-width: 1.5; }
+.setup-chart .setup-point-label { font-size: 9.5px; fill: var(--text-primary); text-anchor: middle; }
+.setup-levels { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 6px 12px; font-size: 0.85rem; }
+.setup-levels small { display: block; color: var(--text-muted); }
+.setup-levels div:first-child { grid-column: 1 / -1; }
+.setup-reason { font-size: 0.85rem; margin: 8px 0 4px; color: var(--text-secondary); }
+.setup-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.setup-columns h5 { margin: 4px 0; }
+.setup-columns ul { margin: 0; padding-left: 18px; font-size: 0.85rem; }
+.setup-ended { font-size: 0.8rem; }
+.setup-coverage > summary { cursor: pointer; list-style: none; }
+.setup-coverage > summary h3 { display: inline; }
+.setup-rule { border-top: 1px solid var(--border); padding: 6px 0; }
+.setup-rule dl { display: grid; grid-template-columns: 110px 1fr; gap: 4px 10px; font-size: 0.85rem; }
+.setup-rule dt { color: var(--text-muted); }
+@media (max-width: 600px) { .setup-rule dl { grid-template-columns: 1fr; } }

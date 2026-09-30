@@ -72,6 +72,8 @@ _PERIOD_TO_LOOKBACK_DAYS = {
     "5d": 12,
     "1mo": 40,
     "9mo": 285,
+    "1y": 380,
+    "2y": 760,
 }
 
 # yfinance-style interval string -> Alpaca timeframe string. Alpaca's real

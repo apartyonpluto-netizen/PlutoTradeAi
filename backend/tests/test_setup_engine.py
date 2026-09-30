@@ -280,3 +280,15 @@ def test_a_broken_detector_does_not_hide_the_others(monkeypatch):
     result = scan_bars(make_bars(DOUBLE_BOTTOM))
     assert result["errors"][0]["detector_id"] == "double_bottom"
     assert any(d["detector_id"] == "resistance_breakout" for d in result["detections"])
+
+
+def test_every_detection_and_opportunity_is_plain_json():
+    import json
+
+    charts = [HEAD_AND_SHOULDERS, DOUBLE_BOTTOM, BULL_FLAG_FORMING, RANGE_INSIDE, UPTREND_PULLBACK, ASCENDING_TRIANGLE, STAIRCASE,
+              path([(0, 80), (220, 130), (4, 121)])]
+    for closes in charts:
+        scan = scan_bars(make_bars(closes))
+        json.dumps(scan, allow_nan=False)
+        json.dumps(evaluate_symbol([scan]), allow_nan=False)
+    json.dumps(scan_bars(_vwap_bars(path([(0, 100), (10, 98), (4, 97.8)]) + [100.4])), allow_nan=False)

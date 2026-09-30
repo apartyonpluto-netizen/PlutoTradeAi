@@ -91,7 +91,7 @@ class Context:
             sma50 = self.sma(50)
             sma200 = self.sma(200)
             slope50 = sma50[self.last] - sma50[self.last - 10]
-            above200 = None if not np.isfinite(sma200[self.last]) else close > sma200[self.last]
+            above200 = None if not np.isfinite(sma200[self.last]) else bool(close > sma200[self.last])
             if close > sma50[self.last] and slope50 > 0 and above200 is not False:
                 trend = "uptrend"
             elif close < sma50[self.last] and slope50 < 0 and above200 is not True:

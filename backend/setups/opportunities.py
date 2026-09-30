@@ -61,6 +61,13 @@ def group(detections: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
 
 
 def _primary(members: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Most advanced state, then most specific rule. When members disagree on
+    direction, a direction-neutral detection (e.g. the range itself) leads,
+    since it describes the price action without taking a side."""
+    directions = {m["direction"] for m in members} - {"both"}
+    neutral = [m for m in members if m["direction"] == "both"]
+    if len(directions) > 1 and neutral:
+        members = neutral
     return max(members, key=lambda d: (model.STATE_RANK[d["state"]], d["specificity"], d.get("confirmed_index") or -1, d["end_index"]))
 
 
@@ -151,7 +158,10 @@ def build_opportunity(members: List[Dict[str, Any]], *, liquidity: Optional[Dict
     else:
         decision, why = QUALIFY, "confirmed, actionable, validated, regime and liquidity pass"
 
-    lv = primary["levels"]
+    lv = dict(primary["levels"])
+    two_sided = primary["direction"] == "both"
+    if two_sided:  # no side is taken yet, so there is no invalidation or target yet
+        lv["invalidation"] = lv["target"] = None
     expiry = primary.get("bars_until_expiry")
     return {
         "symbol": primary["symbol"],
@@ -164,11 +174,12 @@ def build_opportunity(members: List[Dict[str, Any]], *, liquidity: Optional[Dict
         "as_of": primary["as_of"],
         "levels": lv,
         "entry": entry,
-        "entry_conditions": f"{primary['trigger_rule']} (trigger now {lv['trigger_now']}); invalid on a close beyond {lv['invalidation']}",
+        "entry_conditions": (primary["trigger_rule"] if two_sided else
+                             f"{primary['trigger_rule']} (trigger now {lv['trigger_now']}); invalid on a close beyond {lv['invalidation']}"),
         "expires_in_bars": expiry,
         "evidence": support,
         "counter_evidence": counter,
-        "strongest_counterargument": counter[0] if counter else None,
+        "strongest_counterargument": next((c for c in counter if c != why), None),
         "historical": ev,
         "decision": decision,
         "decision_reason": why,
@@ -183,7 +194,10 @@ def build_opportunity(members: List[Dict[str, Any]], *, liquidity: Optional[Dict
 def explain(d: Dict[str, Any], decision: str, why: str, entry: Dict[str, Any]) -> str:
     lv = d["levels"]
     parts = [f"{d['symbol']} {d['timeframe']}: {d['name']} ({d['direction']}) is {d['state'].replace('_', ' ')} - {d['state_reason']}."]
-    parts.append(f"It confirms on {d['trigger_rule']} (level now {lv['trigger_now']}) and is invalidated by a close beyond {lv['invalidation']}.")
+    if d["direction"] == "both":
+        parts.append(f"It picks a direction on a {d['trigger_rule']}; invalidation and target are set by that break.")
+    else:
+        parts.append(f"It confirms on {d['trigger_rule']} (level now {lv['trigger_now']}) and is invalidated by a close beyond {lv['invalidation']}.")
     if lv.get("target") is not None:
         parts.append(f"The rule-based target is {lv['target']}.")
     if entry.get("reward_to_risk") is not None:

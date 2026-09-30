@@ -1,11 +1,12 @@
 {% extends "base.html" %}
-{% block title %}PlutoTrade AI · Pattern Brain{% endblock %}
+{% block title %}PlutoTrade AI · Setup Discovery{% endblock %}
 {% block content %}
-<section class="panel" data-analysis-section="{{ analysis_section }}" data-analysis-empty-label="No Pattern Signals - add a ticker below.">
+<section class="panel" data-analysis-section="{{ analysis_section }}" data-analysis-empty-label="No tickers yet - add one below.">
     <div class="panel-head">
-        <h3>Pattern Brain</h3>
+        <h3>Setup Discovery</h3>
         <span data-analysis-live-badge>Live updates every 8s</span>
     </div>
+    <p class="muted setup-intro">Rule-based setups found on daily and 5-minute bars. A detected setup is not permission to trade: every setup here is research/watch until its version passes out-of-sample and forward testing after costs. No confidence percentages are shown because none have been measured.</p>
     <div data-analysis-errors></div>
 
     <div class="analysis-list-editor" data-analysis-chips></div>
@@ -19,7 +20,14 @@
     <p class="analysis-cap-note" data-analysis-cap-note></p>
 
     <div class="price-map-list" data-analysis-rows>
-        <p class="muted">Loading pattern signals...</p>
+        <p class="muted">Scanning for setups...</p>
     </div>
+</section>
+
+<section class="panel">
+    <details class="setup-coverage" data-setup-coverage>
+        <summary><h3>What the engine can detect</h3></summary>
+        <div data-setup-coverage-body><p class="muted">Loading...</p></div>
+    </details>
 </section>
 {% endblock %}

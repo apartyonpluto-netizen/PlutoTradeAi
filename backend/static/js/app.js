@@ -2502,6 +2502,168 @@ const buildCandlePatternCard = (row) => `
     </div>
   </article>`;
 
+// Setup discovery (Pattern Brain). The chart draws only what the detection
+// itself carries - its swing points, lines and levels - over the bars it was
+// computed from, so the picture always matches the numbers.
+const SETUP_OPEN_DETAILS = new Set();
+document.addEventListener("toggle", (event) => {
+  const node = event.target;
+  if (node instanceof HTMLDetailsElement && node.dataset.keepOpen) {
+    if (node.open) SETUP_OPEN_DETAILS.add(node.dataset.keepOpen);
+    else SETUP_OPEN_DETAILS.delete(node.dataset.keepOpen);
+  }
+}, true);
+
+const setupNum = (value, digits = 2) => (value === null || value === undefined || Number.isNaN(Number(value)) ? "—" : Number(value).toFixed(digits));
+
+const renderSetupChart = (chart, direction) => {
+  if (!chart || !Array.isArray(chart.bars) || !chart.bars.length) return "";
+  const W = 640, H = 230, L = 4, R = 84, T = 10, B = 16;
+  const bars = chart.bars;
+  const n = bars.length;
+  const off = chart.offset || 0;
+  const levels = chart.levels || {};
+  const values = bars.flatMap((b) => [b[2], b[3]]);
+  (chart.points || []).forEach((p) => values.push(p.price));
+  (chart.lines || []).forEach((line) => { if (line.to.index >= off) values.push(line.to.price); if (line.from.index >= off) values.push(line.from.price); });
+  [levels.trigger_now, levels.invalidation, levels.target].forEach((v) => { if (v !== null && v !== undefined) values.push(v); });
+  let lo = Math.min(...values), hi = Math.max(...values);
+  const pad = (hi - lo) * 0.06 || 1;
+  lo -= pad; hi += pad;
+  const step = (W - L - R) / n;
+  const x = (i) => L + (i - off + 0.5) * step;
+  const y = (p) => T + (hi - p) / (hi - lo) * (H - T - B);
+  const candles = bars.map((b, k) => {
+    const i = off + k, up = b[4] >= b[1];
+    const top = y(Math.max(b[1], b[4])), bottom = y(Math.min(b[1], b[4]));
+    return `<line class="setup-wick" x1="${x(i)}" x2="${x(i)}" y1="${y(b[2])}" y2="${y(b[3])}"/>` +
+      `<rect class="${up ? "setup-up" : "setup-down"}" x="${x(i) - Math.max(step * 0.35, 0.6)}" y="${top}" width="${Math.max(step * 0.7, 1.2)}" height="${Math.max(bottom - top, 0.8)}"/>`;
+  }).join("");
+  const clip = (line) => {
+    let { from, to } = line;
+    if (to.index < off) return null;
+    if (from.index < off && to.index !== from.index) {
+      const slope = (to.price - from.price) / (to.index - from.index);
+      from = { index: off, price: from.price + slope * (off - from.index) };
+    }
+    return { from, to };
+  };
+  const lines = (chart.lines || []).map((line) => {
+    const c = clip(line);
+    if (!c) return "";
+    return `<line class="setup-line setup-line-${escapeHtml(line.kind || "boundary")}" x1="${x(c.from.index)}" y1="${y(c.from.price)}" x2="${x(c.to.index)}" y2="${y(c.to.price)}"><title>${escapeHtml(line.label)}</title></line>`;
+  }).join("");
+  const level = (value, cls, label) => (value === null || value === undefined ? "" :
+    `<line class="setup-level ${cls}" x1="${L}" x2="${W - R}" y1="${y(value)}" y2="${y(value)}"/><text class="setup-level-label ${cls}" x="${W - R + 4}" y="${y(value) + 3}">${label} ${setupNum(value)}</text>`);
+  const points = (chart.points || []).filter((p) => p.index >= off).map((p) =>
+    `<circle class="setup-point${p.provisional ? " provisional" : ""}" cx="${x(p.index)}" cy="${y(p.price)}" r="3.5"><title>${escapeHtml(p.label)} ${setupNum(p.price)} · ${escapeHtml((p.t || "").slice(0, 16))}${p.provisional ? " (provisional)" : ""}</title></circle>` +
+    `<text class="setup-point-label" x="${x(p.index)}" y="${y(p.price) + (p.price >= (hi + lo) / 2 ? -7 : 13)}">${escapeHtml(p.label)}${p.provisional ? "?" : ""}</text>`).join("");
+  return `<svg class="setup-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Price chart with the setup's swing points and levels">
+    ${candles}${lines}
+    ${level(levels.invalidation, "invalidation", "Invalid")}${level(levels.target, "target", "Target")}${direction === "both" ? "" : level(levels.trigger_now, "trigger", "Trigger")}
+    ${points}</svg>`;
+};
+
+const SETUP_STATE_LABELS = {
+  developing: "Developing", awaiting_confirmation: "Awaiting confirmation", confirmed: "Confirmed", invalidated: "Invalidated", expired: "Expired",
+};
+
+const buildSetupOpportunity = (ticker, o, index) => {
+  const key = `${ticker}-${o.setup.id}-${o.timeframe}`;
+  const hist = o.historical || {};
+  const oos = hist.out_of_sample || {};
+  const sample = oos.n
+    ? `${oos.n} out-of-sample trades · mean ${setupNum(oos.mean_r)}R after costs · win rate ${Math.round((oos.win_rate || 0) * 100)}%`
+    : "No historical sample on file yet for this setup version.";
+  const also = (o.also_matches || []).map((m) => `${escapeHtml(m.name)} (${escapeHtml(SETUP_STATE_LABELS[m.state] || m.state)})`).join(", ");
+  const entry = o.entry || {};
+  return `
+    <div class="setup-opportunity decision-${escapeHtml(o.decision)}">
+      <div class="setup-title">
+        <div><b>${escapeHtml(o.setup.name)}</b> <small>v${escapeHtml(o.setup.version)} · ${escapeHtml(o.timeframe)} · ${escapeHtml(o.direction)}</small></div>
+        <div class="setup-badges">
+          <span class="setup-state state-${escapeHtml(o.state)}">${escapeHtml(SETUP_STATE_LABELS[o.state] || o.state)}</span>
+          <span class="setup-decision">${escapeHtml(o.decision)}</span>
+        </div>
+      </div>
+      ${renderSetupChart(o.chart && { ...o.chart, levels: o.levels }, o.direction)}
+      <div class="setup-levels">
+        <div><small>Confirms on</small><b>${escapeHtml(o.entry_conditions || "")}</b></div>
+        <div><small>Invalidation</small><b>${setupNum(o.levels.invalidation)}</b></div>
+        <div><small>Target (rule)</small><b>${setupNum(o.levels.target)}</b></div>
+        <div><small>Reward : risk</small><b>${setupNum(entry.reward_to_risk)}</b></div>
+        <div><small>Signal expires</small><b>${o.expires_in_bars === null || o.expires_in_bars === undefined ? "—" : `${escapeHtml(o.expires_in_bars)} bar(s)`}</b></div>
+      </div>
+      <p class="setup-reason"><b>${escapeHtml(o.decision_reason)}.</b> Strongest counterargument: ${escapeHtml(o.strongest_counterargument || "none recorded")}</p>
+      <details data-keep-open="${escapeHtml(key)}"${SETUP_OPEN_DETAILS.has(key) ? " open" : ""}>
+        <summary>Evidence, rules and history</summary>
+        <p>${escapeHtml(o.explanation)}</p>
+        <div class="setup-columns">
+          <div><h5>Supporting</h5><ul>${(o.evidence || []).map((e) => `<li>${escapeHtml(e)}</li>`).join("") || "<li>—</li>"}</ul></div>
+          <div><h5>Against</h5><ul>${(o.counter_evidence || []).map((e) => `<li>${escapeHtml(e)}</li>`).join("")}</ul></div>
+        </div>
+        <p><small>Historical sample:</small> ${escapeHtml(sample)} <small>Status: ${escapeHtml(hist.status || "research")}</small></p>
+        <p><small>Definition:</small> ${escapeHtml(o.setup.definition || "")}</p>
+        ${also ? `<p><small>Also matches (same price action, not independent confirmation):</small> ${also}</p>` : ""}
+      </details>
+    </div>`;
+};
+
+const buildSetupCard = (row) => {
+  const opportunities = row.opportunities || [];
+  const ended = (row.recently_ended || []).slice(0, 4).map((d) => `${escapeHtml(d.name)} ${escapeHtml(d.timeframe)}: ${escapeHtml(d.state)}`).join(" · ");
+  return `
+  <article class="price-map-card setup-card">
+    <div class="price-map-head"><h4>${escapeHtml(row.ticker)}</h4><span>${escapeHtml(row.summary || "")}</span></div>
+    ${opportunities.length ? opportunities.map((o, i) => buildSetupOpportunity(row.ticker, o, i)).join("")
+      : `<p class="muted">No defined setup on this chart right now - no qualifying trade.</p>`}
+    ${ended ? `<p class="muted setup-ended">Recently ended: ${ended}</p>` : ""}
+    ${(row.data_errors || []).length ? `<p class="muted">${escapeHtml(row.data_errors.join("; "))}</p>` : ""}
+  </article>`;
+};
+
+const bindSetupCoverage = () => {
+  const root = document.querySelector("[data-setup-coverage]");
+  const body = document.querySelector("[data-setup-coverage-body]");
+  if (!(root instanceof HTMLDetailsElement) || !body) return;
+  let loaded = false;
+  root.addEventListener("toggle", async () => {
+    if (!root.open || loaded) return;
+    loaded = true;
+    try {
+      const response = await fetch("/api/setups/coverage", { credentials: "same-origin" });
+      const payload = await response.json();
+      const data = payload.data || {};
+      const byFamily = {};
+      (data.detectors || []).forEach((d) => { (byFamily[d.family_label] = byFamily[d.family_label] || []).push(d); });
+      const statusText = (v) => Object.entries(v || {}).map(([tf, st]) => `${tf}: ${st}`).join(", ");
+      body.innerHTML = Object.entries(byFamily).map(([family, rows]) => `
+        <h4>${escapeHtml(family)}</h4>
+        ${rows.map((d) => `<details class="setup-rule"><summary><b>${escapeHtml(d.name)}</b> <small>v${escapeHtml(d.version)} · ${escapeHtml(d.direction)} · ${escapeHtml(d.timeframes.join(", "))}</small></summary>
+          <dl>
+            <dt>Structure</dt><dd>${escapeHtml(d.structure)}</dd>
+            <dt>Prior trend</dt><dd>${escapeHtml(d.prior_trend)}</dd>
+            <dt>Swings</dt><dd>${escapeHtml(d.swing_rules)}</dd>
+            <dt>Duration</dt><dd>${escapeHtml(d.duration)}</dd>
+            <dt>Tolerances</dt><dd>${escapeHtml(d.tolerances)}</dd>
+            <dt>Volume</dt><dd>${escapeHtml(d.volume)}</dd>
+            <dt>Confirmation</dt><dd>${escapeHtml(d.confirmation)}</dd>
+            <dt>Invalidation</dt><dd>${escapeHtml(d.invalidation)}</dd>
+            <dt>Expiration</dt><dd>${escapeHtml(d.expiration)}</dd>
+            <dt>Regimes</dt><dd>${escapeHtml(d.regimes.join(", "))}</dd>
+            <dt>Interpretation</dt><dd>${escapeHtml(d.interpretation)}</dd>
+            <dt>Ambiguity</dt><dd>${escapeHtml(d.ambiguity)}</dd>
+            <dt>Sources</dt><dd>${escapeHtml((d.sources || []).join("; "))}</dd>
+            <dt>Validation</dt><dd>${escapeHtml(statusText(d.validation))}</dd>
+          </dl></details>`).join("")}`).join("") +
+        `<h4>Not supported yet</h4>${(data.not_supported || []).map((p) => `<p><b>${escapeHtml(p.name)}</b> - ${escapeHtml(p.note)}</p>`).join("")}`;
+    } catch (error) {
+      loaded = false;
+      body.innerHTML = `<p class="muted">Could not load coverage: ${escapeHtml(String(error))}</p>`;
+    }
+  });
+};
+
 const buildReversalCard = (row) => `
   <div class="price-map-card">
     <div class="price-map-head">
@@ -2556,7 +2718,7 @@ const buildTrendCard = (row) => `
 
 const ANALYSIS_SECTION_ROW_RENDERERS = {
   candle_brain: buildCandlePatternCard,
-  pattern_brain: buildCandlePatternCard,
+  pattern_brain: buildSetupCard,
   volume_intelligence: buildTrendCard,
   support_resistance: buildReversalCard,
 };
@@ -2830,6 +2992,7 @@ onReady(() => {
   bindAiChartMarks();
   bindScannerPage();
   bindAnalysisSectionPage();
+  bindSetupCoverage();
   bindOptionsSuggestions();
   bindSettingsPage();
   bindAccountHubPage();
