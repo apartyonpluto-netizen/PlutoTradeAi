@@ -18,6 +18,10 @@ probes only, never orders.
 
 ## Changed this session (newest first)
 
+- `backend/broker_fees.py` (new), `app.py::_apply_broker_fees` at the three
+  close points: fees from broker ORDER HISTORY (the detail endpoint has no fee
+  fields - verified). `tests/test_broker_fees.py` + history fixture.
+- `broker_reconciliation.py`: `unprotected_at_broker` (verified in production).
 - `backend/backups.py` (new), admin Backups panel, `/api/admin/backups*`,
   daily snapshot from the cron after 20:00 UTC, `docs/RUNBOOK_BACKUP_RESTORE.md`,
   `tests/test_backups.py`.
@@ -43,7 +47,9 @@ probes only, never orders.
 
 ## Checks actually run
 
-- Full suite: 1403 passed (local, mocked).
+- Full suite: 1408 passed (local, mocked).
+- Production (sandbox) Broker sync 2026-09-30 01:52 UTC: 3 matched, 5 record-only, 3 unprotected_at_broker.
+- Read-only probe: order history has fee fields; order detail does not.
 - Read-only sandbox probe 2026-09-29: cash INTC 2 / MSTR 5 / MRVL 4, no working orders.
 - Setup engine fuzz on 30 random-walk series: 0 detector errors; no detector
   passed the validation gate (expected on noise).
@@ -58,9 +64,9 @@ page lives in the session scratchpad only.
 
 ## Next concrete actions (in order)
 
-1. Production Broker sync verified 2026-09-30 (3 matched, 5 record-only).
-   Re-check that INTC/MSTR/MRVL now show `unprotected_at_broker`. Add balances
-   to the report. Capture order-detail/history payloads for replay.
+1. Explain record-only items from broker order history (a filled SELL /
+   STOP_LOSS after the record's entry means the broker closed it) and offer
+   that evidence in Admin's close-record flow. Add balances to the report. Capture order-detail/history payloads for replay.
 2. Take fees from broker transactions (Webull order detail/transactions) into
    closed trades; mark estimates as estimates.
 3. (done: on-disk snapshots) - owner should download one weekly for off-site keeping.

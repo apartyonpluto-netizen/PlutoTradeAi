@@ -19,7 +19,7 @@ Levels: **mocked** (tests only) · **sandbox** (Webull paper, real requests) ·
 | 4 | Reconciliation, idempotency, restart recovery | Ambiguous submissions, orphan import, position-absent detection, write-ahead records | sandbox + mocked |
 | 4 | Broker-vs-internal discrepancy report with last-reconciled time | `broker_reconciliation.py`: matched / quantity mismatch / record-only / broker-only / protection missing; disconnected state keeps last good time; dashboard "Broker sync" panel; every 15 min + on demand | production (sandbox) + replay |
 | 5 | Protection, sizing, deterministic risk | Stop placement, risk sizing, portfolio limits, dollar caps, 20% option trigger (owner must set) | mocked + sandbox (equity stops) |
-| 6 | Broker-derived performance | Closed trades from broker fills; per-environment reports; **fees not from broker** | mocked |
+| 6 | Broker-derived performance | Closed trades from broker fills; per-environment reports; fees from broker order history (unknown stays unknown, net marked as excluding fees) | replay (real sandbox history) |
 | 7 | Strategy / options / patterns / news / evidence | Setup engine (36 detectors, validation harness, weekly refresh), plans, tickets; news not in decisions | mocked (patterns on synthetic data only - real-data run pending on Render) |
 | 8 | 3D observatory on recorded events | Event journal with correlation ids exists; observatory still reads research log | mocked |
 | 9 | Browser verification, runbooks, release checks | Setup Discovery page verified in local preview (desktop + phone) | — |
@@ -27,9 +27,9 @@ Levels: **mocked** (tests only) · **sandbox** (Webull paper, real requests) ·
 ## Known defects / gaps (highest first)
 
 1. Production sandbox holds 3 unprotected orphan positions and 5 stale records (owner action in Admin).
-2. Reconciliation verified in production 2026-09-30 (3 matched, 5 record-only); the new `unprotected_at_broker` flag awaits a production re-check.
-3. Fees are not taken from broker transaction records (options fees recorded as `None`).
-4. Replay coverage is limited to positions + open orders (no order-detail, history or balance payloads yet).
+2. Record-only items are not yet explained from broker history (e.g. a filled STOP_LOSS that closed the position while the record was lost).
+3. Fees now come from broker order history for new closes; closed trades recorded earlier keep `fees: None`. Option fee shape unverified (no option has been placed).
+4. Replay coverage: positions, open orders, order history. No balance payload yet.
 5. Backups are on the same disk as the data; off-site copies depend on the owner downloading them (no external storage authorized).
 6. CSRF tokens absent (SameSite=Lax only).
 7. E*TRADE adapter absent.
@@ -41,4 +41,5 @@ Levels: **mocked** (tests only) · **sandbox** (Webull paper, real requests) ·
   setup engine + Setup Discovery page + walk-forward validation; completed-bar
   detection; environment isolation + cross-account reconciliation fixes;
   read-only broker reconciliation report + dashboard panel + replay fixture;
-  daily data snapshots + restore runbook.
+  daily data snapshots + restore runbook; unprotected-position flag (verified in
+  production); broker-reported fees from order history.

@@ -21,7 +21,7 @@ armed (two env vars, see `backend/integrations/webull.py::is_live_trading_armed`
 | Approval tickets + pre-submission recheck | `test_trade_tickets.py` |
 | Event trail signal → exit | `test_event_journal.py` |
 
-Full suite: 1403 tests passing (2026-09-29, local venv).
+Full suite: 1408 tests passing (2026-09-29, local venv).
 
 ## Level 2 — Replay tests
 
@@ -29,7 +29,9 @@ Full suite: 1403 tests passing (2026-09-29, local venv).
 |---|---|---|
 | Webull sandbox cash-account positions + open orders (sanitized: broker position ids replaced, no account ids) | 2026-09-29, read-only | `tests/test_broker_reconciliation.py::test_replay_*` |
 
-**Gap:** no captured order-detail, order-history or balance payloads yet;
+| Webull sandbox cash-account order history, 30 days, 30 orders (sanitized ids) | 2026-09-30, read-only | `tests/test_broker_fees.py` |
+
+**Gap:** no captured balance payload yet;
 no option position payload exists (no option has been placed).
 
 ## Level 3 — Authenticated sandbox / paper (Webull)
@@ -46,7 +48,8 @@ no option position payload exists (no option has been placed).
 | **Option order placement / fill / exit** | **never done in sandbox** | — |
 | Broker-vs-internal reconciliation read path (accounts → positions → open orders) | OK - cash holds INTC 2, MSTR 5, MRVL 4; **0 working orders** (no protective stops at the broker); margin holds nothing | 2026-09-29 | read-only probe from local keys (same sandbox account as production) |
 | Reconciliation report in production (sandbox, both accounts ...2H6B cash / ...C5R8 margin) | status "differences": INTC 2, MRVL 4, MSTR 5 **matched** broker quantities; ADBE, COIN, MU, PLTR, SLB **record-only** (broker holds none) - exactly the known state | 2026-09-30 01:46 UTC | on-demand run (read-only) from the signed-in owner session |
-| Unprotected positions flagged | added after that run: INTC/MRVL/MSTR have no working stop at the broker and are now reported `unprotected_at_broker` (replay-tested; production re-check pending deploy) | 2026-09-30 | — |
+| Unprotected positions flagged in production | INTC, MRVL, MSTR reported `unprotected_at_broker` (3), plus 3 matched and 5 record-only | 2026-09-30 01:52 UTC | on-demand run after deploy of `8b43d14` |
+| Broker fee fields | Order **history** carries `fees` (SEC_FEE, FINRA_FEE with actual/receivable values) and `commission` ({} = zero); the order **detail** endpoint carries neither | 2026-09-30 | read-only probe; fixture `webull_sandbox_cash_order_history_2026-09-30.json` |
 
 Known sandbox state (production): INTC, MSTR and MRVL positions are open at the
 broker with no protective orders (orphans after the 2026-09-29 record-loss

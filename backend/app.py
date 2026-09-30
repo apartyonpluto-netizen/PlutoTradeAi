@@ -182,7 +182,7 @@ if __package__:
     from .paper_trader import list_trades as list_paper_trades
     from .paper_trader import open_trade as open_paper_trade
     from .pattern_brain import analyze_patterns
-    from . import backups, broker_env, broker_reconciliation
+    from . import backups, broker_env, broker_fees, broker_reconciliation
     from .setups import service as setups_service
     from .settings_store import available_themes, get_settings, update_settings
     from .watchlist import (
@@ -357,6 +357,7 @@ else:
     from pattern_brain import analyze_patterns
     import broker_env
     import backups
+    import broker_fees
     import broker_reconciliation
     from setups import service as setups_service
     from settings_store import available_themes, get_settings, update_settings
@@ -6357,6 +6358,43 @@ def _reconcile_both_legs_filled_emergency(
     raise RuntimeError(f"{ticker}: {evidence_summary} - frozen pending manual review, no automatic corrective action taken")
 
 
+BROKER_FEE_LOOKBACK_DAYS = 30
+
+
+def _apply_broker_fees(creds: Dict[str, str], account_id: str, closed_record: Dict[str, object]) -> None:
+    """Fees from the broker's own order history (entry + the exit that
+    filled) - see broker_fees.py. Unknown stays unknown: if either order
+    can't be found or read, fees stay None and net P&L is marked as
+    excluding fees."""
+    order_ids = [closed_record.get("entry_client_order_id")]
+    exit_type = str(closed_record.get("exit_type") or "")
+    exit_id = (closed_record.get("exit_client_order_id") or
+               (closed_record.get("stop_client_order_id") if exit_type == "stop" else closed_record.get("target_client_order_id")))
+    order_ids.append(exit_id)
+    # Order HISTORY carries fees/commission; the order-detail endpoint does
+    # not (checked against the sandbox 2026-09-30).
+    wanted = [str(i) for i in order_ids if i]
+    try:
+        history = {str(o.get("client_order_id")): o for o in
+                   webull_api.get_order_history(creds["app_key"], creds["app_secret"], account_id, days_back=BROKER_FEE_LOOKBACK_DAYS)}
+        per_order = [broker_fees.from_order(history[i]) if i in history else None for i in wanted]
+    except Exception:  # noqa: BLE001 - unknown, never guessed
+        per_order = [None]
+    fees = broker_fees.combine(per_order) if len(wanted) == 2 else None
+    if fees is None:
+        closed_record["fees"] = None
+        closed_record["fees_source"] = "unavailable"
+        closed_record["net_excludes_fees"] = True
+        return
+    closed_record["fees"] = fees["total"]
+    closed_record["fee_items"] = fees["items"]
+    closed_record["fees_source"] = "broker order history"
+    gross = closed_record.get("gross_realized_pnl")
+    if gross is not None:
+        closed_record["net_realized_pnl"] = round(float(gross) - fees["total"], 4)
+    closed_record["net_excludes_fees"] = False
+
+
 def _check_and_execute_target_exit(
     user_id: str,
     creds: Dict[str, str],
@@ -6559,6 +6597,7 @@ def _check_and_execute_target_exit(
         "broker_evidence": {"exited_leg_status": "app_monitored_target_exit"},
         "reconciled_at": _now_utc().isoformat(),
     }
+    _apply_broker_fees(creds, account_id, closed_record)
     record_closed_trade(user_id, trade_id, closed_record)
     maybe_trigger_real_outcomes_recalibration()
     ol.transition(entry, ol.CLOSED, closed_trade_id=trade_id, close_reason="target_exit_executed")
@@ -6954,6 +6993,7 @@ def _reconcile_position_exit(
             "broker_evidence": {"exited_leg_status": exited_status},
             "reconciled_at": _now_utc().isoformat(),
         }
+        _apply_broker_fees(creds, account_id, closed_record)
         record_closed_trade(user_id, trade_id, closed_record)
         maybe_trigger_real_outcomes_recalibration()
         ol.transition(entry, ol.CLOSED, closed_trade_id=trade_id, close_reason=f"{exited_leg}_filled")
@@ -7596,6 +7636,7 @@ def _check_and_execute_option_exit(
         "broker_evidence": {"exited_leg_status": "app_monitored_option_exit"},
         "reconciled_at": _now_utc().isoformat(),
     }
+    _apply_broker_fees(creds, account_id, closed_record)
     record_closed_trade(user_id, trade_id, closed_record)
     maybe_trigger_real_outcomes_recalibration()
     ol.transition(entry, ol.CLOSED, closed_trade_id=trade_id, close_reason=close_reason)
