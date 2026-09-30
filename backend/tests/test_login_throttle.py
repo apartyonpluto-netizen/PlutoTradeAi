@@ -51,3 +51,13 @@ def test_after_sign_in_only_same_site_paths_are_followed(user_id, isolated, targ
     with pluto_app.app.test_client() as client:
         response = _post(client, name, "TestPassword123!", next_path=target)
     assert response.status_code == 302 and response.headers["Location"].endswith(expected)
+
+
+def test_a_storage_failure_never_blocks_sign_in(user_id, isolated, monkeypatch):
+    name = f"fo-{user_id[:8]}"
+    user = auth.register_user(name, "TestPassword123!")
+    auth.approve_user(user["id"])
+    monkeypatch.setattr(login_throttle, "_file", lambda: (_ for _ in ()).throw(OSError("read-only disk")))
+    with pluto_app.app.test_client() as client:
+        assert _post(client, name, "TestPassword123!").status_code == 302
+        assert _post(client, name, "wrong").status_code == 401

@@ -55,6 +55,23 @@ def _locked():
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def _fail_open(fn):
+    """A storage problem must never lock people out of signing in: the
+    throttle is skipped (and logged) rather than failing the request."""
+    import functools
+    import logging
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as error:  # noqa: BLE001
+            logging.getLogger(__name__).warning("login throttle unavailable: %s", error)
+            return None
+    return wrapper
+
+
+@_fail_open
 def blocked_for(username: str, address: str) -> Optional[int]:
     """Seconds until another attempt is allowed, or None if allowed now."""
     now = time.time()
@@ -67,12 +84,14 @@ def blocked_for(username: str, address: str) -> Optional[int]:
         return max(waits) if waits else None
 
 
+@_fail_open
 def record_failure(username: str, address: str) -> None:
     with _locked() as data:
         for key in (_key("user", username), _key("addr", address)):
             data.setdefault(key, []).append(time.time())
 
 
+@_fail_open
 def record_success(username: str) -> None:
     with _locked() as data:
         data.pop(_key("user", username), None)
