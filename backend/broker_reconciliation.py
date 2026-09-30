@@ -10,6 +10,9 @@ module never places, cancels or edits anything - it reports:
                                (a manual holding or an orphan) - left untouched
   protection_missing_at_broker the record says a protective stop is active; no
                                matching working order exists at the broker
+  unprotected_at_broker        an open equity position the app tracks has no
+                               working stop at the broker (and the record does
+                               not claim one)
 
 Only records from the CURRENT environment are compared (broker_env.py), each
 against its own account. A failed broker read makes the whole run
@@ -99,18 +102,23 @@ def compare(records: List[Dict[str, Any]], positions_by_account: Dict[str, List[
                 continue
             items.append({**base, "category": "matched" if abs(broker_qty - record_qty) < 1e-9 else "quantity_mismatch",
                           "detail": None if abs(broker_qty - record_qty) < 1e-9 else f"broker {broker_qty:g} vs recorded {record_qty:g}"})
-            for record in recs:
-                if record.get("lifecycle_state") not in BROKER_STOP_EXPECTED or record.get("instrument_type") == "OPTION":
-                    continue  # option exits are app-monitored; no resting broker stop is expected
-                stop_id = record.get("stop_client_order_id")
-                has_stop = any(
-                    (stop_id and o.get("client_order_id") == stop_id)
-                    or (str(o.get("symbol") or "").upper() == symbol and "STOP" in str(o.get("order_type") or "").upper())
-                    for o in working
-                )
-                if not has_stop:
-                    items.append({**base, "category": "protection_missing_at_broker",
-                                  "detail": "record says a protective stop is active, but no matching working stop order is at the broker"})
+            equity = [r for r in recs if r.get("instrument_type") != "OPTION"]  # option exits are app-monitored
+            if not equity or not broker_qty:
+                continue
+            stop_ids = {r.get("stop_client_order_id") for r in equity if r.get("stop_client_order_id")}
+            has_stop = any(
+                o.get("client_order_id") in stop_ids
+                or (str(o.get("symbol") or "").upper() == symbol and "STOP" in str(o.get("order_type") or "").upper())
+                for o in working
+            )
+            if has_stop:
+                continue
+            if any(r.get("lifecycle_state") in BROKER_STOP_EXPECTED for r in equity):
+                items.append({**base, "category": "protection_missing_at_broker",
+                              "detail": "record says a protective stop is active, but no matching working stop order is at the broker"})
+            else:
+                items.append({**base, "category": "unprotected_at_broker",
+                              "detail": "open at the broker with no working stop order"})
     counts: Dict[str, int] = {}
     for item in items:
         counts[item["category"]] = counts.get(item["category"], 0) + 1

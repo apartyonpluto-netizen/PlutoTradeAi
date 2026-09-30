@@ -17,7 +17,7 @@ Levels: **mocked** (tests only) · **sandbox** (Webull paper, real requests) ·
 | 2 | E*TRADE read-only | **Not built** - needs owner's developer keys + OAuth | — |
 | 3 | Order state machine + execution adapter | Webull equities: lifecycle states, deterministic ids, 417 idempotency | sandbox (equity) / mocked (options) |
 | 4 | Reconciliation, idempotency, restart recovery | Ambiguous submissions, orphan import, position-absent detection, write-ahead records | sandbox + mocked |
-| 4 | Broker-vs-internal discrepancy report with last-reconciled time | `broker_reconciliation.py`: matched / quantity mismatch / record-only / broker-only / protection missing; disconnected state keeps last good time; dashboard "Broker sync" panel; every 15 min + on demand | sandbox read path + replay |
+| 4 | Broker-vs-internal discrepancy report with last-reconciled time | `broker_reconciliation.py`: matched / quantity mismatch / record-only / broker-only / protection missing; disconnected state keeps last good time; dashboard "Broker sync" panel; every 15 min + on demand | production (sandbox) + replay |
 | 5 | Protection, sizing, deterministic risk | Stop placement, risk sizing, portfolio limits, dollar caps, 20% option trigger (owner must set) | mocked + sandbox (equity stops) |
 | 6 | Broker-derived performance | Closed trades from broker fills; per-environment reports; **fees not from broker** | mocked |
 | 7 | Strategy / options / patterns / news / evidence | Setup engine (36 detectors, validation harness, weekly refresh), plans, tickets; news not in decisions | mocked (patterns on synthetic data only - real-data run pending on Render) |
@@ -27,7 +27,7 @@ Levels: **mocked** (tests only) · **sandbox** (Webull paper, real requests) ·
 ## Known defects / gaps (highest first)
 
 1. Production sandbox holds 3 unprotected orphan positions and 5 stale records (owner action in Admin).
-2. Reconciliation report not yet observed in production (just deployed).
+2. Reconciliation verified in production 2026-09-30 (3 matched, 5 record-only); the new `unprotected_at_broker` flag awaits a production re-check.
 3. Fees are not taken from broker transaction records (options fees recorded as `None`).
 4. Replay coverage is limited to positions + open orders (no order-detail, history or balance payloads yet).
 5. Backups are on the same disk as the data; off-site copies depend on the owner downloading them (no external storage authorized).

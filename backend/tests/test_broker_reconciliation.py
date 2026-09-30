@@ -102,6 +102,13 @@ def _fixture():
     return json.loads((Path(__file__).parent / "fixtures" / "webull_sandbox_cash_2026-09-29.json").read_text())
 
 
+def test_replay_imported_orphans_without_stops_are_unprotected():
+    payload = _fixture()
+    records = [_record(p["symbol"], qty=float(p["quantity"]), state=ol.PROTECTION_FAILED) for p in payload["positions"]]
+    report = br.compare(records, {"cash": payload["positions"]}, {"cash": payload["open_orders"]}, environment="sandbox")
+    assert _categories(report) == {(s, c) for s in ("INTC", "MSTR", "MRVL") for c in ("matched", "unprotected_at_broker")}
+
+
 def test_replay_untracked_sandbox_positions_are_broker_only():
     payload = _fixture()
     report = br.compare([], {"cash": payload["positions"]}, {"cash": payload["open_orders"]}, environment="sandbox")

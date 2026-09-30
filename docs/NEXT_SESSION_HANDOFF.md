@@ -58,9 +58,9 @@ page lives in the session scratchpad only.
 
 ## Next concrete actions (in order)
 
-1. Confirm the Broker sync panel in production shows the expected
-   differences (INTC/MSTR/MRVL, and the 5 stale records as record-only).
-   Add balances to the report. Capture order-detail/history payloads for replay.
+1. Production Broker sync verified 2026-09-30 (3 matched, 5 record-only).
+   Re-check that INTC/MSTR/MRVL now show `unprotected_at_broker`. Add balances
+   to the report. Capture order-detail/history payloads for replay.
 2. Take fees from broker transactions (Webull order detail/transactions) into
    closed trades; mark estimates as estimates.
 3. (done: on-disk snapshots) - owner should download one weekly for off-site keeping.

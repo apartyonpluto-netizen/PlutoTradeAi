@@ -45,7 +45,8 @@ no option position payload exists (no option has been placed).
 | Option preview | confirmed 2026-09-03 (code notes) | — |
 | **Option order placement / fill / exit** | **never done in sandbox** | — |
 | Broker-vs-internal reconciliation read path (accounts → positions → open orders) | OK - cash holds INTC 2, MSTR 5, MRVL 4; **0 working orders** (no protective stops at the broker); margin holds nothing | 2026-09-29 | read-only probe from local keys (same sandbox account as production) |
-| Reconciliation report in production | not yet observed (deploys with this change; runs every 15 min from the fast-monitor timer) | — | — |
+| Reconciliation report in production (sandbox, both accounts ...2H6B cash / ...C5R8 margin) | status "differences": INTC 2, MRVL 4, MSTR 5 **matched** broker quantities; ADBE, COIN, MU, PLTR, SLB **record-only** (broker holds none) - exactly the known state | 2026-09-30 01:46 UTC | on-demand run (read-only) from the signed-in owner session |
+| Unprotected positions flagged | added after that run: INTC/MRVL/MSTR have no working stop at the broker and are now reported `unprotected_at_broker` (replay-tested; production re-check pending deploy) | 2026-09-30 | — |
 
 Known sandbox state (production): INTC, MSTR and MRVL positions are open at the
 broker with no protective orders (orphans after the 2026-09-29 record-loss

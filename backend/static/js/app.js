@@ -866,7 +866,8 @@ const BROKER_SYNC_LABELS = {
   quantity_mismatch: "Quantity differs",
   record_only: "App shows open, broker shows none",
   broker_only: "Held at broker, not tracked by the app",
-  protection_missing_at_broker: "No protective stop at the broker",
+  protection_missing_at_broker: "Record says protected, but no stop at the broker",
+  unprotected_at_broker: "Open with no protective stop at the broker",
 };
 
 const bindBrokerSync = () => {
