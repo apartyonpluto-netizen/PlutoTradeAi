@@ -655,6 +655,33 @@ _TOKEN_AUTH_PATHS = {
 }
 
 
+_STATE_CHANGING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+@app.before_request
+def _reject_cross_site_writes():
+    """CSRF defense in depth (on top of the SameSite=Lax session cookie):
+    a state-changing request whose Origin - or, without Origin, Referer -
+    names a different host is refused. Browsers always send Origin on
+    cross-origin POSTs, so a forged request from another site cannot pass;
+    server-to-server callers (the cron, webhooks) send neither header and
+    authenticate with their own secret."""
+    if request.method not in _STATE_CHANGING_METHODS or request.path in _TOKEN_AUTH_PATHS:
+        return None
+    from urllib.parse import urlsplit
+
+    source = request.headers.get("Origin") or request.headers.get("Referer")
+    if not source:
+        return None
+    source_host = urlsplit(source).netloc.lower()
+    if source == "null" or source_host != request.host.lower():
+        logger.warning("Refused cross-site %s %s from %s", request.method, request.path, source_host or source)
+        if request.path.startswith("/api/"):
+            return _api_failure("Cross-site request refused.", status_code=403, error_code="cross_site", ok=False)
+        return ("Cross-site request refused.", 403)
+    return None
+
+
 @app.before_request
 def _require_login():
     path = request.path
