@@ -182,7 +182,7 @@ if __package__:
     from .paper_trader import list_trades as list_paper_trades
     from .paper_trader import open_trade as open_paper_trade
     from .pattern_brain import analyze_patterns
-    from . import backups, broker_env, broker_fees, broker_reconciliation, observatory
+    from . import backups, broker_env, broker_fees, broker_reconciliation, login_throttle, observatory
     from .setups import service as setups_service
     from .settings_store import available_themes, get_settings, update_settings
     from .watchlist import (
@@ -360,6 +360,7 @@ else:
     import broker_fees
     import broker_reconciliation
     import observatory
+    import login_throttle
     from setups import service as setups_service
     from settings_store import available_themes, get_settings, update_settings
     from watchlist import (
@@ -711,10 +712,19 @@ def login_page():
 
     username = request.form.get("username", "")
     password = request.form.get("password", "")
-    next_path = request.form.get("next", "") or ""
+    next_path = login_throttle.safe_next_path(request.form.get("next", "") or "") or ""
+    # Render's proxy appends the connecting address LAST; earlier entries can be
+    # supplied by the client, so they are not trusted for throttling.
+    client_address = (request.headers.get("X-Forwarded-For") or request.remote_addr or "").split(",")[-1].strip()
+    wait = login_throttle.blocked_for(username, client_address)
+    if wait:
+        return render_template("login.html", error=f"Too many failed sign-in attempts. Try again in {max(1, wait // 60)} minute(s).",
+                               next_path=next_path), 429
     user = authenticate_user(username, password)
     if not user:
+        login_throttle.record_failure(username, client_address)
         return render_template("login.html", error="Incorrect username or password.", next_path=next_path), 401
+    login_throttle.record_success(username)
     if not user.get("approved", True):
         return render_template("login.html", error="Your account is still pending admin approval.", next_path=next_path), 403
     if user.get("suspended", False):
@@ -722,7 +732,7 @@ def login_page():
 
     session["user_id"] = user["id"]
     session.permanent = True
-    target = next_path if next_path.startswith("/") else url_for("dashboard_page")
+    target = next_path or url_for("dashboard_page")
     return redirect(target)
 
 

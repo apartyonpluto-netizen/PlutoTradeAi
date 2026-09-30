@@ -80,7 +80,7 @@ outbound network blocked in tests). Broker evidence by level: `docs/BROKER_VERIF
 | Broker/API credentials encrypted at rest | TESTED | `docs/SECURITY.md`, Fernet | — |
 | Secrets redacted in logs and Sentry | TESTED | Webull SDK log filter; `observability.py` scrubbing | — |
 | CSRF | TESTED + prod | SameSite=Lax + Origin/Referer check on every write (`test_cross_site_writes.py`; same-site verified in production) | No per-form tokens |
-| Rate limiting on login/webhooks | INCOMPLETE | Not found | Add |
+| Rate limiting on login | TESTED | `login_throttle.py`, `test_login_throttle.py`; open redirect after sign-in fixed | Webhook not rate limited |
 
 ## Gate 6 — Restart and failure recovery
 

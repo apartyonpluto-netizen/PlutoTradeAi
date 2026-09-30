@@ -18,6 +18,9 @@ probes only, never orders.
 
 ## Changed this session (newest first)
 
+- `backend/login_throttle.py`: 8 failed sign-ins per username or per client
+  address in 15 min -> 429 (hashed keys, file-backed, shared by workers);
+  post-sign-in redirect limited to same-site paths (fixed `//host` open redirect).
 - Broker balances in the reconciliation report + Broker sync panel;
   `backend/docs/RELEASE_CHECKLIST.md` brought up to date.
 - `backend/setups/forward.py`: daily (21:00-21:55 UTC cron, weekdays) records
@@ -60,7 +63,7 @@ probes only, never orders.
 
 ## Checks actually run
 
-- Full suite: 1423 passed (local, mocked, outbound network blocked).
+- Full suite: 1429 passed (local, mocked, outbound network blocked).
 - Production 2026-09-30 14:28 UTC: Broker sync 3 matched / 5 record-only (MU with broker close evidence) / 3 unprotected; same-site writes pass the new guard.
 - Production (sandbox) Broker sync 2026-09-30 01:52 UTC: 3 matched, 5 record-only, 3 unprotected_at_broker.
 - Read-only probe: order history has fee fields; order detail does not.
@@ -78,8 +81,7 @@ page lives in the session scratchpad only.
 
 ## Next concrete actions (in order)
 
-1. Rate limiting on /login and the webhook; per-form CSRF tokens are optional
-   on top of the origin check.
+1. Rate limiting on the TradingView webhook (login is done).
 2. Tonight after 20:00 UTC the cron starts the first real-data setup
    validation and the first forward-tracking run; check Admin -> Setup Evidence
    (walk-forward trade counts, per-setup status, forward open/resolved).
