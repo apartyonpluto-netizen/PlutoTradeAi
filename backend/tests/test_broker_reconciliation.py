@@ -143,3 +143,27 @@ def test_replay_record_only_items_carry_broker_close_evidence():
     record["lifecycle_history"] = [{"state": "entry_submitted", "at": "2099-01-01T00:00:00+00:00"}]
     report = br.compare([record], {"cash": []}, {"cash": []}, environment="sandbox", history_by_account={"cash": history})
     assert report["items"][0]["broker_close_evidence"] == []
+
+
+def test_admin_panel_shows_broker_close_evidence(user_id):
+    from autonomy.overnight_orders import record_overnight_order
+
+    record = _record("MU", qty=1, state=ol.PROTECTION_CONFIRMED_ACTIVE, position_absent_unexplained=True)
+    record_overnight_order(user_id, record)
+    evidence = [{"order_type": "LIMIT", "side": "SELL", "filled_quantity": 1.0, "filled_price": "981.97",
+                 "filled_at": "2026-09-17T14:43:00Z", "client_order_id": "c"}]
+    history = [{"symbol": "MU", "side": "SELL", "status": "FILLED", "filled_quantity": "1", "filled_price": "981.97",
+                "filled_time_at": "2026-09-17T14:43:00Z", "order_type": "LIMIT", "client_order_id": "c"}]
+    record["lifecycle_history"] = [{"state": "entry_submitted", "at": "2026-09-16T00:00:00+00:00"}]
+    br.run(user_id, accounts=["cash"], records=[record], read_positions=lambda a: [], read_open_orders=lambda a: [],
+           read_history=lambda a: history)
+    admin = auth.register_user(f"adm-{user_id[:8]}", "TestPassword123!")
+    auth.approve_user(admin["id"])
+    with pluto_app.app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["user_id"] = admin["id"]
+        with patch.object(pluto_app, "is_admin", return_value=True), \
+             patch.object(pluto_app, "list_all_users", return_value=[{"id": user_id, "username": "owner"}]):
+            html = client.get("/admin").get_data(as_text=True)
+    assert "Closed at broker: LIMIT SELL 1 @ 981.97 on 2026-09-17" in html
+    assert evidence[0]["filled_price"] in html

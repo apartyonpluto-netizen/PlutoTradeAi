@@ -829,8 +829,17 @@ def admin_page():
         target_user_id = user.get("id", "")
         if not target_user_id:
             continue
+        # Broker close evidence from the latest read-only reconciliation, by record.
+        close_evidence: Dict[str, List[Dict[str, object]]] = {}
+        latest_sync = broker_reconciliation.load(target_user_id).get("latest") or {}
+        for item in latest_sync.get("items") or []:
+            for record_id in item.get("record_ids") or []:
+                if item.get("broker_close_evidence"):
+                    close_evidence[str(record_id)] = item["broker_close_evidence"]
         for order in list_overnight_orders(target_user_id):
-            row = {**order, "user_id": target_user_id, "username": user.get("username", "")}
+            row = {**order, "user_id": target_user_id, "username": user.get("username", ""),
+                   "broker_close_evidence": close_evidence.get(str(order.get("record_id") or order.get("entry_client_order_id") or ""), []),
+                   "broker_checked_at": latest_sync.get("checked_at")}
             if order.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE:
                 pending_ambiguous.append(row)
             if order.get("position_absent_unexplained") and order.get("lifecycle_state") in (ol.PROTECTION_FAILED, ol.PROTECTION_CONFIRMED_ACTIVE):

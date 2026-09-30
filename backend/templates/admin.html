@@ -105,7 +105,7 @@
         <em>unknown</em> - nothing is invented - and needs a reason plus the ticker typed exactly.
     </p>
     <table id="positionAbsentTable">
-        <thead><tr><th>User</th><th>Ticker</th><th>Qty</th><th>Entered</th><th>Absent Since</th><th>Actions</th></tr></thead>
+        <thead><tr><th>User</th><th>Ticker</th><th>Qty</th><th>Entered</th><th>Absent Since</th><th>Broker evidence</th><th>Actions</th></tr></thead>
         <tbody>
         {% for entry in position_absent_entries %}
         <tr data-user-id="{{ entry.user_id }}" data-entry-client-order-id="{{ entry.entry_client_order_id }}" data-ticker="{{ entry.ticker }}">
@@ -114,10 +114,11 @@
             <td>{{ entry.filled_quantity or entry.quantity }}</td>
             <td class="alert-time" data-timestamp="{{ entry.logged_at or '' }}">--</td>
             <td class="alert-time" data-timestamp="{{ entry.position_absent_first_seen_at or (entry.position_absent_evidence or {}).get('checked_at') or '' }}">--</td>
+            <td>{% if entry.broker_close_evidence %}{% for fill in entry.broker_close_evidence %}Closed at broker: {{ fill.order_type }} {{ fill.side }} {{ '%g'|format(fill.filled_quantity) }} @ {{ fill.filled_price }} on {{ fill.filled_at[:10] }}{% if not loop.last %}<br>{% endif %}{% endfor %}{% elif entry.broker_checked_at %}<span class="muted">No closing fill in the broker's last 30 days</span>{% else %}<span class="muted">Not compared yet</span>{% endif %}</td>
             <td class="action-row"><button class="close-position-absent" type="button">Close record</button></td>
         </tr>
         {% else %}
-        <tr><td colspan="6" class="muted">Nothing to review - every tracked position is still held at the broker.</td></tr>
+        <tr><td colspan="7" class="muted">Nothing to review - every tracked position is still held at the broker.</td></tr>
         {% endfor %}
         </tbody>
     </table>

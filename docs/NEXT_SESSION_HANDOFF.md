@@ -52,7 +52,7 @@ probes only, never orders.
 
 ## Checks actually run
 
-- Full suite: 1413 passed (local, mocked, outbound network blocked).
+- Full suite: 1414 passed (local, mocked, outbound network blocked).
 - Production 2026-09-30 14:28 UTC: Broker sync 3 matched / 5 record-only (MU with broker close evidence) / 3 unprotected; same-site writes pass the new guard.
 - Production (sandbox) Broker sync 2026-09-30 01:52 UTC: 3 matched, 5 record-only, 3 unprotected_at_broker.
 - Read-only probe: order history has fee fields; order detail does not.
@@ -70,8 +70,8 @@ page lives in the session scratchpad only.
 
 ## Next concrete actions (in order)
 
-1. Surface broker close evidence in Admin's "Positions No Longer Held" panel
-   (production shows MU closed at the broker 2026-09-17). Add balances.
+1. (done) Admin "Positions No Longer Held" shows broker close evidence. Next:
+   add balances to the reconciliation report.
 2. The weekly setup validation runs automatically tonight after 20:00 UTC
    (evidence is stale/absent); check Admin -> Setup Evidence afterwards.
 3. Drive the /agent-map observatory from `event_journal` (observed flows) vs
