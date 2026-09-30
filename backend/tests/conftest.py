@@ -36,3 +36,25 @@ def user_id() -> str:
 def other_user_id() -> str:
     """A second, distinct user id for tenant-isolation tests."""
     return f"test-{uuid.uuid4().hex[:12]}"
+
+
+_LOCAL_HOSTS = ("127.0.0.1", "::1", "localhost")
+
+
+@pytest.fixture(autouse=True)
+def _no_outbound_network(monkeypatch):
+    """Tests must never contact a real broker or data provider. Any
+    non-local connection fails exactly like a network outage (OSError), so
+    code under test takes its normal failure path. Found 2026-09-30: several
+    fast-monitor tests were reaching real Webull endpoints with fake keys."""
+    import socket
+
+    real_connect = socket.socket.connect
+
+    def guarded(self, address):
+        host = address[0] if isinstance(address, tuple) else address
+        if isinstance(host, str) and host not in _LOCAL_HOSTS and not host.startswith("/"):
+            raise OSError(f"outbound network blocked in tests: {address!r}")
+        return real_connect(self, address)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded)

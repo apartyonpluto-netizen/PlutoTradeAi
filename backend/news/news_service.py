@@ -102,7 +102,17 @@ class NewsService:
         ]
 
     def get_news(self, tickers: Sequence[str], limit: int = 20, user_id: str = "") -> Dict[str, Any]:
-        results: List[ProviderResult] = [provider.fetch(tickers=tickers, limit=limit, user_id=user_id) for provider in self.providers]
+        results: List[ProviderResult] = []
+        for provider in self.providers:
+            # A provider that cannot be reached (DNS, timeout, refused
+            # connection) must degrade to a reported error, never take the
+            # page down - found 2026-09-30 when a network-level failure of
+            # Alpaca News turned the dashboard into an HTTP 500.
+            try:
+                results.append(provider.fetch(tickers=tickers, limit=limit, user_id=user_id))
+            except Exception as error:  # noqa: BLE001
+                results.append(ProviderResult(provider=provider.provider_name, items=[],
+                                              errors=[f"{provider.provider_name} unreachable: {type(error).__name__}"]))
         items: List[Dict[str, Any]] = []
         errors: List[str] = []
         provider_status: List[Dict[str, Any]] = []

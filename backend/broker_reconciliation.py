@@ -68,7 +68,8 @@ def is_open(record: Dict[str, Any]) -> bool:
 
 def compare(records: List[Dict[str, Any]], positions_by_account: Dict[str, List[Dict[str, Any]]],
             open_orders_by_account: Dict[str, List[Dict[str, Any]]], *, environment: str,
-            default_account: Optional[str] = None) -> Dict[str, Any]:
+            default_account: Optional[str] = None,
+            history_by_account: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> Dict[str, Any]:
     """Pure comparison. `records` may contain any environment; only
     `environment`'s open records for the given accounts are used."""
     items: List[Dict[str, Any]] = []
@@ -93,8 +94,12 @@ def compare(records: List[Dict[str, Any]], positions_by_account: Dict[str, List[
                     "record_ids": [r.get("record_id") or r.get("entry_client_order_id") for r in recs],
                     "instrument_type": recs[0].get("instrument_type") if recs else None}
             if recs and broker_qty == 0:
-                items.append({**base, "category": "record_only",
-                              "detail": "the app has an open position recorded; the broker shows none (closed outside the app, or a stale record)"})
+                evidence = closing_fills(recs, (history_by_account or {}).get(account_id) or [])
+                items.append({**base, "category": "record_only", "broker_close_evidence": evidence,
+                              "detail": ("broker history shows the position was closed: " + "; ".join(
+                                  f"{e['order_type']} {e['side']} {e['filled_quantity']:g} @ {e['filled_price']} on {e['filled_at'][:16]}" for e in evidence))
+                              if evidence else
+                              "the app has an open position recorded; the broker shows none and its recent history has no closing fill"})
                 continue
             if broker_qty and not recs:
                 items.append({**base, "category": "broker_only",
@@ -127,6 +132,28 @@ def compare(records: List[Dict[str, Any]], positions_by_account: Dict[str, List[
             "status": "differences" if differences else "ok"}
 
 
+def _entry_time(record: Dict[str, Any]) -> str:
+    history = record.get("lifecycle_history") or []
+    return str((history[0] or {}).get("at") if history else record.get("logged_at") or "")
+
+
+def closing_fills(records: List[Dict[str, Any]], history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Filled broker orders that would have closed these records' position:
+    same symbol, the opposite side, filled after the entry."""
+    out = []
+    for record in records:
+        symbol = _record_symbol(record)
+        closing_side = "BUY" if record.get("direction") == "short" else "SELL"
+        since = _entry_time(record)
+        for order in history:
+            if (str(order.get("symbol") or "").upper() == symbol and str(order.get("side") or "").upper() == closing_side
+                    and str(order.get("status") or "").upper() == "FILLED" and str(order.get("filled_time_at") or "") > since):
+                out.append({"order_type": order.get("order_type"), "side": closing_side, "filled_quantity": _qty(order.get("filled_quantity")),
+                            "filled_price": order.get("filled_price"), "filled_at": str(order.get("filled_time_at") or ""),
+                            "client_order_id": order.get("client_order_id")})
+    return sorted(out, key=lambda e: e["filled_at"])
+
+
 def _file(user_id: str) -> Path:
     path = DATA_DIR / "users" / user_id
     path.mkdir(parents=True, exist_ok=True)
@@ -157,12 +184,14 @@ def _save(user_id: str, report: Dict[str, Any]) -> Dict[str, Any]:
 
 def run(user_id: str, *, accounts: List[str], records: List[Dict[str, Any]],
         read_positions: Callable[[str], List[Dict[str, Any]]], read_open_orders: Callable[[str], List[Dict[str, Any]]],
-        account_error: Optional[str] = None) -> Dict[str, Any]:
+        account_error: Optional[str] = None, read_history: Optional[Callable[[str], List[Dict[str, Any]]]] = None) -> Dict[str, Any]:
     """Reads the broker for each account (read-only), compares, persists."""
     environment = broker_env.current()["environment"]
     checked_at = _now()
     positions: Dict[str, List[Dict[str, Any]]] = {}
     orders: Dict[str, List[Dict[str, Any]]] = {}
+    histories: Dict[str, List[Dict[str, Any]]] = {}
+    history_notes: List[str] = []
     errors: List[str] = [f"could not list broker accounts: {account_error}"] if account_error else []
     for account_id in accounts:
         try:
@@ -170,12 +199,19 @@ def run(user_id: str, *, accounts: List[str], records: List[Dict[str, Any]],
             orders[account_id] = read_open_orders(account_id)
         except Exception as error:  # noqa: BLE001 - reported as disconnected, never guessed
             errors.append(f"account ...{str(account_id)[-4:]}: {type(error).__name__}: {str(error)[:160]}")
+            continue
+        if read_history is not None:
+            try:
+                histories[account_id] = read_history(account_id)
+            except Exception as error:  # noqa: BLE001 - history only explains differences; its absence is noted
+                history_notes.append(f"order history unavailable for ...{str(account_id)[-4:]}: {type(error).__name__}")
     if errors or not accounts:
         report = {"environment": environment, "status": "disconnected", "items": [], "counts": {}, "differences": None,
                   "errors": errors or ["no broker account found for this environment"]}
     else:
-        report = compare(records, positions, orders, environment=environment, default_account=accounts[0])
+        report = compare(records, positions, orders, environment=environment, default_account=accounts[0], history_by_account=histories)
         report["errors"] = []
+        report["notes"] = history_notes
     report.update({"run_id": uuid.uuid4().hex[:12], "checked_at": checked_at, "accounts": [f"...{str(a)[-4:]}" for a in accounts],
                    "broker": "webull"})
     return _save(user_id, report)

@@ -10806,6 +10806,7 @@ def _run_broker_reconciliation(user_id: str) -> Dict[str, object]:
         user_id, accounts=accounts, records=list_overnight_orders(user_id),
         read_positions=lambda account_id: webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id),
         read_open_orders=lambda account_id: webull_api.get_open_orders(creds["app_key"], creds["app_secret"], account_id),
+        read_history=lambda account_id: webull_api.get_order_history(creds["app_key"], creds["app_secret"], account_id, days_back=30),
     )
 
 

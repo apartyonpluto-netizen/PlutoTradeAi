@@ -18,6 +18,10 @@ probes only, never orders.
 
 ## Changed this session (newest first)
 
+- `broker_reconciliation.py`: record-only items carry `broker_close_evidence`
+  from 30-day order history. `tests/conftest.py`: outbound network blocked in
+  all tests. `news/news_service.py`: an unreachable provider is a reported
+  error, not an HTTP 500.
 - `backend/broker_fees.py` (new), `app.py::_apply_broker_fees` at the three
   close points: fees from broker ORDER HISTORY (the detail endpoint has no fee
   fields - verified). `tests/test_broker_fees.py` + history fixture.
@@ -47,7 +51,7 @@ probes only, never orders.
 
 ## Checks actually run
 
-- Full suite: 1408 passed (local, mocked).
+- Full suite: 1410 passed (local, mocked, outbound network blocked).
 - Production (sandbox) Broker sync 2026-09-30 01:52 UTC: 3 matched, 5 record-only, 3 unprotected_at_broker.
 - Read-only probe: order history has fee fields; order detail does not.
 - Read-only sandbox probe 2026-09-29: cash INTC 2 / MSTR 5 / MRVL 4, no working orders.
@@ -64,9 +68,9 @@ page lives in the session scratchpad only.
 
 ## Next concrete actions (in order)
 
-1. Explain record-only items from broker order history (a filled SELL /
-   STOP_LOSS after the record's entry means the broker closed it) and offer
-   that evidence in Admin's close-record flow. Add balances to the report. Capture order-detail/history payloads for replay.
+1. Check production Broker sync shows close evidence for the 5 record-only
+   items; surface it in Admin's "Positions No Longer Held" panel. Add balances
+   to the report. Capture order-detail/history payloads for replay.
 2. Take fees from broker transactions (Webull order detail/transactions) into
    closed trades; mark estimates as estimates.
 3. (done: on-disk snapshots) - owner should download one weekly for off-site keeping.

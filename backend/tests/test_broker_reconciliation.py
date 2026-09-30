@@ -124,3 +124,22 @@ def test_replay_records_claiming_protection_are_flagged_when_the_broker_has_no_s
     for symbol in held:
         assert (symbol, "matched") in categories and (symbol, "protection_missing_at_broker") in categories
     assert ("MU", "record_only") in categories
+
+
+
+def test_replay_record_only_items_carry_broker_close_evidence():
+    import json
+    from pathlib import Path
+
+    history = json.loads((Path(__file__).parent / "fixtures" / "webull_sandbox_cash_order_history_2026-09-30.json").read_text())["orders"]
+    sold = next(o for o in history if o["status"] == "FILLED" and o["side"] == "SELL")
+    record = _record(sold["symbol"], qty=float(sold["filled_quantity"]))
+    record["lifecycle_history"] = [{"state": "entry_submitted", "at": "2026-09-01T00:00:00+00:00"}]
+    report = br.compare([record], {"cash": []}, {"cash": []}, environment="sandbox", history_by_account={"cash": history})
+    item = report["items"][0]
+    assert item["category"] == "record_only" and item["broker_close_evidence"]
+    assert "closed" in item["detail"] and sold["order_type"] in item["detail"]
+    # Fills from before the entry do not count as evidence.
+    record["lifecycle_history"] = [{"state": "entry_submitted", "at": "2099-01-01T00:00:00+00:00"}]
+    report = br.compare([record], {"cash": []}, {"cash": []}, environment="sandbox", history_by_account={"cash": history})
+    assert report["items"][0]["broker_close_evidence"] == []

@@ -21,7 +21,7 @@ armed (two env vars, see `backend/integrations/webull.py::is_live_trading_armed`
 | Approval tickets + pre-submission recheck | `test_trade_tickets.py` |
 | Event trail signal → exit | `test_event_journal.py` |
 
-Full suite: 1408 tests passing (2026-09-29, local venv).
+Full suite: 1410 tests passing (2026-09-30, local venv). Since 2026-09-30 the suite blocks every non-local network connection (`tests/conftest.py`), so no test can reach a broker; before that, several fast-monitor tests were reaching real Webull endpoints with fake keys (failing with 401, silently).
 
 ## Level 2 — Replay tests
 

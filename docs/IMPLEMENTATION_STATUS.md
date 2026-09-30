@@ -27,7 +27,7 @@ Levels: **mocked** (tests only) · **sandbox** (Webull paper, real requests) ·
 ## Known defects / gaps (highest first)
 
 1. Production sandbox holds 3 unprotected orphan positions and 5 stale records (owner action in Admin).
-2. Record-only items are not yet explained from broker history (e.g. a filled STOP_LOSS that closed the position while the record was lost).
+2. Record-only items now carry broker close evidence (filled closing orders after entry); closing those records remains an owner action in Admin.
 3. Fees now come from broker order history for new closes; closed trades recorded earlier keep `fees: None`. Option fee shape unverified (no option has been placed).
 4. Replay coverage: positions, open orders, order history. No balance payload yet.
 5. Backups are on the same disk as the data; off-site copies depend on the owner downloading them (no external storage authorized).
@@ -42,4 +42,6 @@ Levels: **mocked** (tests only) · **sandbox** (Webull paper, real requests) ·
   detection; environment isolation + cross-account reconciliation fixes;
   read-only broker reconciliation report + dashboard panel + replay fixture;
   daily data snapshots + restore runbook; unprotected-position flag (verified in
-  production); broker-reported fees from order history.
+  production); broker-reported fees from order history; record-only items explained
+  from broker history; test suite blocks all outbound network; news provider
+  outage no longer returns HTTP 500.
