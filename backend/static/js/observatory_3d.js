@@ -62,7 +62,7 @@ function clearWorld() {
   particles = [];
 }
 
-const size = (count) => 0.45 + Math.log2(1 + (count || 0)) * 0.28;
+const size = (count) => Math.min(1.35, 0.45 + Math.log2(1 + (count || 0)) * 0.2);
 
 function curveBetween(a, b, lift) {
   const mid = a.clone().add(b).multiplyScalar(0.5);
@@ -87,7 +87,7 @@ function drawAgent(d) {
     world.add(mesh);
     pickables.push(mesh);
     const tag = label(`${s.label} · ${s.count}`, active ? hex(color) : "#8a86b0", 1.25);
-    tag.position.copy(pos).add(new THREE.Vector3(0, -1.6, 0));
+    tag.position.copy(pos).add(new THREE.Vector3(0, -(size(s.count) + 0.75), 0));
     world.add(tag);
   });
   d.structural_edges.forEach((e) => {
