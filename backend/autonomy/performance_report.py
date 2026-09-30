@@ -108,8 +108,17 @@ def _ordered_buckets(accumulators: Dict[str, Dict[str, Any]], bucket_defs: List[
     return ordered
 
 
-def build_performance_report(user_id: str) -> Dict[str, Any]:
-    closed_trades = list_closed_trades(user_id)
+def build_performance_report(user_id: str, environment: str = "") -> Dict[str, Any]:
+    """One environment only (default: where orders currently go). Sandbox and
+    live results are separate books and are never combined."""
+    try:
+        import broker_env
+    except ImportError:  # pragma: no cover
+        from .. import broker_env  # type: ignore
+    environment = environment or broker_env.current()["environment"]
+    all_closed = list_closed_trades(user_id)
+    closed_trades = broker_env.only_current(all_closed, environment)
+    inferred_count = sum(1 for trade in closed_trades if broker_env.environment_of(trade)[1] or trade.get("environment_inferred"))
     research_by_client_order_id = {
         record["entry_client_order_id"]: record
         for record in list_research_decisions(user_id)
@@ -151,6 +160,9 @@ def build_performance_report(user_id: str) -> Dict[str, Any]:
         "by_confidence": _ordered_buckets(by_confidence, CONFIDENCE_BUCKETS),
         "by_regime": _ordered_buckets(by_regime, VIX_BUCKETS),
         "total_closed_trades": len(closed_trades),
+        "environment": environment,
+        "environment_inferred_count": inferred_count,
+        "other_environment_trades": len(all_closed) - len(closed_trades),
         "incomplete_pnl_count": incomplete_pnl_count,
         "min_sample_size_for_rates": MIN_SAMPLE_SIZE_FOR_RATES,
     }

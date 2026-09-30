@@ -53,7 +53,7 @@ TICKET_TTL_SECONDS = 20 * 60
 MAX_TICKETS_PER_USER = 500
 
 MATERIAL_FIELDS = (
-    "ticker", "instrument_type", "direction", "quantity", "limit_price", "stop", "target", "account_id",
+    "ticker", "instrument_type", "direction", "quantity", "limit_price", "stop", "target", "account_id", "environment",
     "option_symbol", "strike", "expiration_date", "option_type",
 )
 

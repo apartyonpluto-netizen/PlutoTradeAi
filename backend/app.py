@@ -182,6 +182,7 @@ if __package__:
     from .paper_trader import list_trades as list_paper_trades
     from .paper_trader import open_trade as open_paper_trade
     from .pattern_brain import analyze_patterns
+    from . import broker_env
     from .setups import service as setups_service
     from .settings_store import available_themes, get_settings, update_settings
     from .watchlist import (
@@ -354,6 +355,7 @@ else:
     from paper_trader import list_trades as list_paper_trades
     from paper_trader import open_trade as open_paper_trade
     from pattern_brain import analyze_patterns
+    import broker_env
     from setups import service as setups_service
     from settings_store import available_themes, get_settings, update_settings
     from watchlist import (
@@ -4548,6 +4550,10 @@ def _reconcile_exit_orders(user_id: str, creds: Dict[str, str], account_id: str)
             or order.get("status") != "placed"
             or order.get("side") != "BUY"
             or ticker not in open_tickers
+            # Only this account's records, in the current environment: a
+            # stop is never placed on one account for another's position.
+            or (order.get("account_id") and order.get("account_id") != account_id)
+            or not broker_env.in_current(order)
         ):
             continue
         handled_tickers.add(ticker)
@@ -5495,7 +5501,7 @@ def _user_needs_fast_monitor_pass(user_id: str) -> bool:
     OWN new-entry gate is completely unaffected by this function; this only
     decides whether the FAST MONITOR (reconciliation/resumption only,
     never a new entry) has anything to do for this user this tick."""
-    if any(ol.is_transitional(order) for order in list_overnight_orders(user_id)):
+    if any(ol.is_transitional(order) for order in broker_env.only_current(list_overnight_orders(user_id))):
         return True
     if webull_tracked_tickers(user_id):
         return True
@@ -8165,12 +8171,17 @@ def _reconcile_unknown_submissions(user_id: str, creds: Dict[str, str], account_
     _refresh_stop_confidence, both already run before this) is NOT gated by
     this - already-open positions stay monitored and protected regardless."""
     orders = list_overnight_orders(user_id)
-    pending = [order for order in orders if order.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE]
+    pending = [
+        order for order in orders
+        if order.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE and broker_env.in_current(order)
+    ]
     if not pending:
         return False
     for order in pending:
         try:
-            _reconcile_unknown_submission(user_id, creds, account_id, order)
+            # The record's own account - an ambiguous margin-account order
+            # looked up on the cash account would never be found there.
+            _reconcile_unknown_submission(user_id, creds, str(order.get("account_id") or account_id), order)
         except Exception:  # noqa: BLE001 - one bad record shouldn't block the others or the scan itself
             pass
     replace_overnight_orders(user_id, orders)
@@ -8259,7 +8270,7 @@ def _recover_incomplete_manual_resolutions(user_id: str, creds: Dict[str, str], 
                 entry = _poll_fill_and_protect(
                     user_id=user_id,
                     creds=creds,
-                    account_id=account_id,
+                    account_id=str(entry.get("account_id") or account_id),
                     ticker=str(entry.get("ticker", "")),
                     entry_client_order_id=entry_client_order_id,
                     limit_price=float(entry.get("limit_price") or 0),
@@ -9477,7 +9488,8 @@ def _monitor_transitional_orders(user_id: str, creds: Dict[str, str], account_id
     all_orders = list_overnight_orders(user_id)
     orders = [
         order for order in all_orders
-        if order.get("account_id") == account_id or (include_unstamped and not order.get("account_id"))
+        if (order.get("account_id") == account_id or (include_unstamped and not order.get("account_id")))
+        and broker_env.in_current(order)
     ]
     resumable = [order for order in orders if order.get("lifecycle_state") in ol.MONITOR_RESUMABLE_STATES]
     exit_checkable = [order for order in orders if order.get("lifecycle_state") == ol.PROTECTION_CONFIRMED_ACTIVE]
@@ -9628,7 +9640,7 @@ def _has_stuck_transitional_orders_locally(user_id: str) -> bool:
     anything CLOSED/terminal, regardless of what monitor_first_failure_at
     still says."""
     now = _now_utc()
-    for order in list_overnight_orders(user_id):
+    for order in broker_env.only_current(list_overnight_orders(user_id)):
         if not ol.is_transitional(order):
             continue
         stuck_since_raw = order.get("monitor_first_failure_at")
@@ -9664,7 +9676,7 @@ def _has_active_protection_gap_locally(user_id: str) -> bool:
     skipped so a resolved-but-still-flagged historical record (the flag
     was never explicitly cleared on close, only found irrelevant) can't
     freeze an account forever."""
-    for order in list_overnight_orders(user_id):
+    for order in broker_env.only_current(list_overnight_orders(user_id)):
         if order.get("lifecycle_state") in ol.TERMINAL_STATES:
             continue
         if order.get("ambiguous_exit_unresolved"):
@@ -9703,7 +9715,7 @@ def _has_unresolved_ambiguous_submission_locally(user_id: str) -> bool:
         LOCAL-ONLY disk read (the audit log and overnight_orders.json are
         both local files, not broker calls), so it doesn't violate this
         function's own no-broker-calls contract."""
-    if any(order.get("lifecycle_state") in ol.FROZEN_STATES for order in list_overnight_orders(user_id)):
+    if any(order.get("lifecycle_state") in ol.FROZEN_STATES for order in broker_env.only_current(list_overnight_orders(user_id))):
         return True
     if find_incomplete_resolutions(user_id):
         return True
@@ -10352,6 +10364,7 @@ def _propose_trade_ticket(user_id: str, entry: Dict[str, object], opp: Dict[str,
         "llm_verdict": entry.get("llm_verdict"),
         "llm_reasoning": entry.get("llm_reasoning"),
         "correlation_id": entry.get("correlation_id"),
+        **broker_env.current(),
     }
     ticket, outcome = trade_tickets.create_or_refresh_ticket(user_id, proposal)
     # A refreshed ticket keeps the id it was created under, so every scan
@@ -10398,6 +10411,9 @@ def _recheck_ticket_before_submission(user_id: str, creds: Dict[str, str], ticke
 
     if ticket.get("trading_day") != _trading_day_key():
         reasons.append("this ticket is from a previous trading day")
+    if not broker_env.in_current(ticket):
+        reasons.append(f"this ticket was proposed in the {broker_env.environment_of(ticket)[0]} environment, "
+                       f"but orders now go to {broker_env.current()['environment']} - it cannot be submitted here")
     if _new_entries_disabled_by_deployment_kill_switch():
         reasons.append("new entries are disabled platform-wide (PLUTO_DISABLE_NEW_ENTRIES)")
     if not _new_entries_allowed(_current_webull_trading_session()):
@@ -10409,7 +10425,7 @@ def _recheck_ticket_before_submission(user_id: str, creds: Dict[str, str], ticke
         reasons.append("a prior order submission is unresolved (ambiguous) - entries are frozen until it is resolved")
     if _has_stuck_transitional_orders_locally(user_id):
         reasons.append("an existing entry has made no progress for too long - entries are frozen until a human reviews it")
-    if ticker in _tickers_with_open_positions(list_overnight_orders(user_id)):
+    if ticker in _tickers_with_open_positions(broker_env.only_current(list_overnight_orders(user_id))):
         reasons.append(f"{ticker} already has an open, unclosed position")
     if quantity < 1 or limit_price <= 0 or not account_id:
         reasons.append("the ticket is missing a valid quantity, price or account")
@@ -10958,7 +10974,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
     # and oversubscribe the same dollars. See _build_capital_snapshot for the
     # fail-closed handling of a broker failure or malformed response.
     tracked_tickers_for_user = {
-        str(order.get("ticker", "")).upper() for order in list_overnight_orders(user_id) if order.get("ticker")
+        str(order.get("ticker", "")).upper() for order in broker_env.only_current(list_overnight_orders(user_id)) if order.get("ticker")
     }
     snapshot_available_buying_power = _build_capital_snapshot(
         fetch_open_orders=lambda: _remember_rows(scan_working_orders, webull_api.get_open_orders(creds["app_key"], creds["app_secret"], account_id)),
@@ -11072,7 +11088,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
 
     already_placed_today = {
         str(order.get("ticker", "")).upper()
-        for order in list_overnight_orders(user_id)
+        for order in broker_env.only_current(list_overnight_orders(user_id))
         if order.get("status") == "placed" and _order_trading_day(order) == today_key
     }
 
@@ -11088,7 +11104,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
     # real response shape for an OPTION row is documented elsewhere in this
     # function as unconfirmed, so matching on the broker snapshot directly
     # would silently miss every open option position.
-    tickers_with_open_positions = _tickers_with_open_positions(list_overnight_orders(user_id))
+    tickers_with_open_positions = _tickers_with_open_positions(broker_env.only_current(list_overnight_orders(user_id)))
 
     # APPROVAL mode (autonomous_controller): the scan runs exactly as it
     # does in AUTONOMOUS mode - same data, sizing, LLM step and gates - but

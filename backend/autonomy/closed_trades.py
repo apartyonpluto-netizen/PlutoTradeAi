@@ -97,6 +97,8 @@ def record_closed_trade(user_id: str, trade_id: str, record: Dict[str, Any]) -> 
     with _locked(path):
         records = _read(user_id)
         stamped = {**record, "trade_id": trade_id}
+        if not stamped.get("environment"):
+            stamped.update(_environment_for(user_id, stamped))
         index = next((i for i, existing in enumerate(records) if existing.get("trade_id") == trade_id), None)
         previous = records[index] if index is not None else None
         if index is not None:
@@ -107,6 +109,26 @@ def record_closed_trade(user_id: str, trade_id: str, record: Dict[str, Any]) -> 
     if previous != stamped:
         _journal_close(user_id, stamped, revised=previous is not None)
     return stamped
+
+
+def _environment_for(user_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
+    """The environment of the order this trade closed; else the current one."""
+    try:
+        import broker_env
+    except ImportError:  # pragma: no cover
+        from .. import broker_env  # type: ignore
+    from .overnight_orders import list_overnight_orders
+
+    coid = record.get("entry_client_order_id") or record.get("trade_id")
+    matches = [o for o in list_overnight_orders(user_id) if o.get("entry_client_order_id") == coid]
+    match = next((o for o in matches if o.get("environment")), matches[0] if matches else None)
+    if match is not None:
+        environment, inferred = broker_env.environment_of(match)
+        out = {"broker": match.get("broker") or "webull", "environment": environment}
+        if inferred:
+            out["environment_inferred"] = True
+        return out
+    return broker_env.current()
 
 
 def _journal_close(user_id: str, record: Dict[str, Any], *, revised: bool) -> None:

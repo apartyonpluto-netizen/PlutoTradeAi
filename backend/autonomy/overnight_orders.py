@@ -26,6 +26,15 @@ def _orders_file(user_id: str) -> Path:
     return path / "overnight_orders.json"
 
 
+def _stamp_environment(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Broker + environment at creation (see broker_env.py)."""
+    try:
+        import broker_env
+    except ImportError:  # pragma: no cover
+        from .. import broker_env  # type: ignore
+    return broker_env.stamp(entry)
+
+
 def list_overnight_orders(user_id: str) -> List[Dict[str, Any]]:
     orders_file = _orders_file(user_id)
     if not orders_file.exists():
@@ -72,11 +81,14 @@ def record_overnight_order(user_id: str, entry: Dict[str, Any]) -> Dict[str, Any
         for index, existing in enumerate(orders):
             if str(existing.get("record_id") or "") == record_id:
                 merged = {**entry, "logged_at": existing.get("logged_at") or _now_iso()}
+                for field in ("broker", "environment"):
+                    if existing.get(field):
+                        merged[field] = existing[field]
                 orders[index] = merged
                 _atomic_write(_orders_file(user_id), orders)
                 event_journal.journal_record_changes(user_id, [existing], [merged])
                 return merged
-    entry = {**entry, "logged_at": _now_iso()}
+    entry = _stamp_environment({**entry, "logged_at": _now_iso()})
     orders.insert(0, entry)
     _atomic_write(_orders_file(user_id), orders)
     event_journal.journal_record_changes(user_id, [], [entry])
@@ -91,5 +103,10 @@ def replace_overnight_orders(user_id: str, orders: List[Dict[str, Any]]) -> None
     Lifecycle steps that are new relative to what was on disk are journaled
     after the write (event_journal.py)."""
     before = list_overnight_orders(user_id)
+    known = {str(o.get("record_id") or o.get("entry_client_order_id") or "") for o in before}
+    for order in orders:
+        key = str(order.get("record_id") or order.get("entry_client_order_id") or "")
+        if not key or key not in known:
+            _stamp_environment(order)  # new records only; stored legacy records are never rewritten
     _atomic_write(_orders_file(user_id), orders)
     event_journal.journal_record_changes(user_id, before, orders)
