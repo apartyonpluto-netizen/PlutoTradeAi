@@ -82,6 +82,36 @@ def chart_for(bars: Bars, detection: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+_BAR_MINUTES = {"1m": 1, "5m": 5, "10m": 10, "15m": 15, "30m": 30, "1h": 60}
+
+
+def last_bar_complete(bars: Bars, now=None) -> bool:
+    """False while the newest bar is still forming. A daily bar is complete
+    after 16:15 ET on its session date; an intraday bar once its interval
+    has elapsed. Detection runs on completed bars only - a 'close beyond the
+    trigger' on an unfinished bar is not a close."""
+    from datetime import datetime, time as dtime, timedelta, timezone
+
+    from .bars import _NEW_YORK, parse_time
+
+    if not len(bars):
+        return True
+    now = now or datetime.now(timezone.utc)
+    start = parse_time(bars.t[-1])
+    if bars.timeframe == "1d":
+        if _NEW_YORK is None:
+            return now - start > timedelta(hours=24)
+        session_date = start.astimezone(_NEW_YORK).date() if start.tzinfo else start.date()
+        close = datetime.combine(session_date, dtime(16, 15), tzinfo=_NEW_YORK)
+        return now >= close
+    minutes = _BAR_MINUTES.get(bars.timeframe)
+    return minutes is None or now >= start + timedelta(minutes=minutes)
+
+
+def completed(bars: Bars, now=None) -> Bars:
+    return bars if last_bar_complete(bars, now) else bars.upto(len(bars) - 2)
+
+
 def analyze(symbols: Sequence[str], timeframes: Sequence[str] = DEFAULT_TIMEFRAMES) -> List[Dict[str, Any]]:
     symbols = [s.strip().upper() for s in symbols if s and s.strip()]
     bars_by_tf: Dict[str, Dict[str, Bars]] = {}
@@ -104,7 +134,14 @@ def analyze(symbols: Sequence[str], timeframes: Sequence[str] = DEFAULT_TIMEFRAM
                     errors[symbol].append(f"not enough {timeframe} bars")
                 continue
             bars_for[timeframe] = bars
-            scans.append(scan_bars(bars))
+            closed = completed(bars)
+            scan = scan_bars(closed)
+            live_price = float(bars.c[-1])
+            for detection in scan["detections"]:
+                # Rules use closed bars; actionability uses the latest trade.
+                detection["levels"]["last_close"] = round(live_price, 4)
+                detection["levels"]["price_source"] = "latest (forming) bar" if len(closed) < len(bars) else "last closed bar"
+            scans.append(scan)
         result = evaluate_symbol(scans, liquidity=liquidity_from_daily(bars_for.get("1d"))) if scans else {
             "symbol": symbol, "opportunities": [], "summary": "no data", "trade_candidate": None, "recently_ended": [], "errors": []}
         for opportunity in result["opportunities"]:

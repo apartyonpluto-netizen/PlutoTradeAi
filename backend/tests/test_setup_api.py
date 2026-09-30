@@ -66,3 +66,18 @@ def test_coverage_route_lists_rules_status_and_unsupported_names(user_id):
 def test_setup_routes_require_login():
     client = pluto_app.app.test_client()
     assert client.get("/api/setups/coverage").status_code in (302, 401)
+
+
+def test_detection_ignores_a_bar_that_is_still_forming():
+    from datetime import datetime, timezone
+
+    bars = make_bars(FLAG)
+    last = datetime.fromisoformat(bars.t[-1])
+    assert service.last_bar_complete(bars, now=last.replace(hour=23, minute=59))
+    assert not service.last_bar_complete(bars, now=last.replace(hour=16, minute=0))  # 12:00 ET same day
+    assert len(service.completed(bars, now=last.replace(hour=16))) == len(bars) - 1
+    intraday = make_bars([100.0] * 30, timeframe="5m", start=datetime(2026, 9, 29, 13, 30, tzinfo=timezone.utc))
+    newest = datetime.fromisoformat(intraday.t[-1])
+    from datetime import timedelta
+    assert not service.last_bar_complete(intraday, now=newest + timedelta(minutes=2))
+    assert service.last_bar_complete(intraday, now=newest + timedelta(minutes=5))
