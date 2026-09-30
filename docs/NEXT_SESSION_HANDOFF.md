@@ -63,16 +63,17 @@ probes only, never orders.
 
 ## Checks actually run
 
-- Full suite: 1429 passed (local, mocked, outbound network blocked).
-- Production 2026-09-30 14:28 UTC: Broker sync 3 matched / 5 record-only (MU with broker close evidence) / 3 unprotected; same-site writes pass the new guard.
-- Production (sandbox) Broker sync 2026-09-30 01:52 UTC: 3 matched, 5 record-only, 3 unprotected_at_broker.
-- Read-only probe: order history has fee fields; order detail does not.
-- Read-only sandbox probe 2026-09-29: cash INTC 2 / MSTR 5 / MRVL 4, no working orders.
-- Setup engine fuzz on 30 random-walk series: 0 detector errors; no detector
-  passed the validation gate (expected on noise).
-- Setup Discovery page: local preview with synthetic bars, desktop + 375px.
-- Not run: any sandbox order; real-data setup validation (needs the Render
-  run - Admin → Setup Evidence → Run now, or wait for the weekly cron).
+- Full suite: 1430 passed (local, mocked, outbound network blocked).
+- Production (Webull sandbox, read-only, owner's signed-in session), 2026-09-30:
+  Broker sync 3 matched / 5 record-only (MU closed at the broker 2026-09-17) /
+  3 unprotected; balances read; same-site writes pass the cross-site guard;
+  /login 200; /observatory shows 65 real events (signal stage only).
+- Read-only local probes: positions/open orders (INTC 2, MSTR 5, MRVL 4, no
+  working orders); order history has fee fields, order detail does not.
+- Setup engine fuzz (30 random walks): no errors, nothing passes the gate.
+- Local preview (synthetic data): Setup Discovery, Broker sync, Observatory.
+- Not run: any sandbox or live order; real-data setup validation and forward
+  tracking (first runs happen automatically tonight after 20:00/21:00 UTC).
 
 ## Running local services
 
@@ -81,14 +82,16 @@ page lives in the session scratchpad only.
 
 ## Next concrete actions (in order)
 
-1. Rate limiting on the TradingView webhook (login is done).
-2. Tonight after 20:00 UTC the cron starts the first real-data setup
-   validation and the first forward-tracking run; check Admin -> Setup Evidence
-   (walk-forward trade counts, per-setup status, forward open/resolved).
-3. Drive the /agent-map observatory from `event_journal` (observed flows) vs
-   the static architecture (structural), per the spec.
-4. E*TRADE read-only adapter once the owner provides developer keys (entered
-   in the app, never in chat).
+1. After tonight's cron: Admin -> Setup Evidence - confirm the walk-forward
+   run finished (trade counts per setup, statuses) and forward tracking ran.
+   If a run failed, the panel shows the error.
+2. Once the owner clears the orphans (slots free), watch /observatory for the
+   first chains past `signal` and check Broker sync after the first fill.
+3. Rate-limit the TradingView webhook (logged-only today, low risk).
+4. Capture a real option order payload once an option is placed in the sandbox
+   (entry, fees shape, position symbol) and add replay tests.
+5. E*TRADE read-only adapter when the owner provides developer keys (entered
+   in the app, never in chat); then production read-only checks at Level 4.
 
 ## Blockers needing the owner
 

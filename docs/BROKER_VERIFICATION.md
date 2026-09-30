@@ -21,7 +21,7 @@ armed (two env vars, see `backend/integrations/webull.py::is_live_trading_armed`
 | Approval tickets + pre-submission recheck | `test_trade_tickets.py` |
 | Event trail signal → exit | `test_event_journal.py` |
 
-Full suite: 1413 tests passing (2026-09-30, local venv). Since 2026-09-30 the suite blocks every non-local network connection (`tests/conftest.py`), so no test can reach a broker; before that, several fast-monitor tests were reaching real Webull endpoints with fake keys (failing with 401, silently).
+Full suite: 1430 tests passing (2026-09-30, local venv). Since 2026-09-30 the suite blocks every non-local network connection (`tests/conftest.py`), so no test can reach a broker; before that, several fast-monitor tests were reaching real Webull endpoints with fake keys (failing with 401, silently).
 
 ## Level 2 — Replay tests
 
@@ -51,6 +51,8 @@ no option position payload exists (no option has been placed).
 | Unprotected positions flagged in production | INTC, MRVL, MSTR reported `unprotected_at_broker` (3), plus 3 matched and 5 record-only | 2026-09-30 01:52 UTC | on-demand run after deploy of `8b43d14` |
 | Record-only items explained from broker history (production) | MU: broker shows LIMIT SELL 1 @ 981.97 on 2026-09-17 (closed at the broker); ADBE, COIN, PLTR, SLB: no closing fill in the last 30 days (reported as such, not guessed) | 2026-09-30 14:28 UTC | on-demand run after deploy of `ce19a65` |
 | Cross-site write guard does not block same-site use (production) | same-origin POSTs reach their handlers (reconciliation 200; unknown ticket decline 409) | 2026-09-30 14:28 UTC | signed-in owner session after deploy of `ecedbf3` |
+| Broker balances in reconciliation (production) | cash ...2H6B net liquidation 1,000,085.43 (day P/L -26.04); margin ...C5R8 999,824.85 - Webull's default paper funds, not the owner's $3,000 plan (the app sizes from its configured paper balance) | 2026-09-30 14:42 UTC | on-demand run after deploy of `3d65381` |
+| Event journal in production | 65 recorded events in 24 h, all `signal.evaluated`: no candidate reached a plan because the 3 orphan positions fill all 3 slots (visible in /observatory) | 2026-09-30 14:42 UTC | `/api/observatory` |
 | Broker fee fields | Order **history** carries `fees` (SEC_FEE, FINRA_FEE with actual/receivable values) and `commission` ({} = zero); the order **detail** endpoint carries neither | 2026-09-30 | read-only probe; fixture `webull_sandbox_cash_order_history_2026-09-30.json` |
 
 Known sandbox state (production): INTC, MSTR and MRVL positions are open at the
