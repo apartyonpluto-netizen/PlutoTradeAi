@@ -5,8 +5,8 @@ Living document. Every row names its **verification level** and its
 profitability. Live (real-money) submission stays disabled until the owner
 approves a specific account and explicit limits.
 
-Last audited: **2026-09-29** (main app, `PlutoTradeAI/backend`, commit `028b9fc`,
-1350 automated tests passing after the event journal).
+Last audited: **2026-09-30** (main app, `PlutoTradeAI/backend`; 1423 automated tests passing,
+outbound network blocked in tests). Broker evidence by level: `docs/BROKER_VERIFICATION.md`.
 
 ## Verification levels
 
@@ -29,7 +29,7 @@ Last audited: **2026-09-29** (main app, `PlutoTradeAI/backend`, commit `028b9fc`
 | Stock sizing: risk, buying power, reservations, position/total/sector caps | TESTED | `test_trade_planner.py`, `test_portfolio_limits.py`, existing sizing tests | — |
 | Option sizing by premium | TESTED | `test_option_trade_plan.py` | — |
 | Decimal money math in sizing | TESTED | `_compute_position_quantity` / `_floor_shares` | Plans round for display only |
-| Fees in net results | INCOMPLETE | Equity: $0 commission assumed; options: `fees: None` on closed trades | Model option regulatory/contract fees |
+| Fees in net results | TESTED (replay) | Broker order history fees (SEC/FINRA) applied at close; unknown stays unknown | Earlier closed trades keep `fees: None`; option fee shape unverified |
 | Closed-trade P&L for options counted in evidence | TESTED | `ea94e9b` (was silently excluded) | — |
 
 ## Gate 2 — Broker integration
@@ -57,7 +57,8 @@ Last audited: **2026-09-29** (main app, `PlutoTradeAI/backend`, commit `028b9fc`
 | Position-absent detection + admin close | TESTED | `test_position_absent_reconciliation.py`; Admin panel `dcba188` | 5 ghost records awaiting owner |
 | Partial fills / protective-leg resize | TESTED | `test_partial_fill_resize_and_crash_recovery.py` | — |
 | One correlation id linking signal → plan → ticket → order → fill → exit | TESTED | `autonomy/event_journal.py`; `test_event_journal.py` (autonomous + approval chains end to end, mocked broker); `/api/events`, `/api/events/chains`, `/api/events/trace/<id>` | Not yet seen in prod; records older than the journal trace via `rec-<record_id>` stand-ins |
-| Reconciliation against broker *transactions* (fills/fees) | INCOMPLETE | Uses order detail + positions + history | Transactions endpoint not wired |
+| Broker-vs-app reconciliation report (positions, working stops, balances, close evidence) | PROD-DATA (sandbox) | `broker_reconciliation.py`; production 2026-09-30: 3 matched, 5 record-only (MU closed at broker), 3 unprotected | Owner to resolve the differences |
+| Sandbox/live record separation; per-account reconciliation | TESTED | `test_environment_isolation.py` (two cross-account defects fixed) | — |
 
 ## Gate 4 — Risk enforcement
 
@@ -78,7 +79,7 @@ Last audited: **2026-09-29** (main app, `PlutoTradeAI/backend`, commit `028b9fc`
 | Session auth, admin approval of accounts, per-user data | TESTED | `auth.py`, before_request login gate | — |
 | Broker/API credentials encrypted at rest | TESTED | `docs/SECURITY.md`, Fernet | — |
 | Secrets redacted in logs and Sentry | TESTED | Webull SDK log filter; `observability.py` scrubbing | — |
-| CSRF | INCOMPLETE (partial) | `SESSION_COOKIE_SAMESITE=Lax`, JSON APIs | No CSRF tokens on form/JSON POSTs |
+| CSRF | TESTED + prod | SameSite=Lax + Origin/Referer check on every write (`test_cross_site_writes.py`; same-site verified in production) | No per-form tokens |
 | Rate limiting on login/webhooks | INCOMPLETE | Not found | Add |
 
 ## Gate 6 — Restart and failure recovery
@@ -88,14 +89,15 @@ Last audited: **2026-09-29** (main app, `PlutoTradeAI/backend`, commit `028b9fc`
 | Crash mid-submission leaves a resumable record | TESTED | `dcba188` | — |
 | Per-account scan lock across workers | TESTED + prod | `scan_lock.py` (flock) | — |
 | Webull 429 handling / monitor load | PROD-DATA | `1409227`: 4 calls/tick, 0 × 429 after deploy | — |
-| Storage | INCOMPLETE | JSON files, atomic writes + flock on Render disk | No transactional DB, no automated backup/restore runbook |
+| Storage | TESTED | JSON + flock + atomic writes; daily snapshots, verify/download, `docs/RUNBOOK_BACKUP_RESTORE.md` | Snapshots share the disk - download for off-site |
 
 ## Gate 7 — UI acceptance
 
 | Capability | Level | Evidence | Gap / next |
 |---|---|---|---|
 | Trade plans (stock + option), tickets, settings | TESTED + browser (local preview) | Screenshots this session, desktop + phone | Not yet seen with real prod data |
-| 2D/3D agent map | TESTED | Built from research-log records; pulses only on recent records | Not event-traced; no drill-down levels (spec §11) |
+| 2D/3D agent map | TESTED | Architecture view from research-log records | — |
+| Observatory (recorded events) | TESTED + local preview | `/observatory`: structural vs observed flows, sectors, ticker chains | Sparse until the journal accumulates |
 | Accessibility (reduced motion, keyboard) | INCOMPLETE (partial) | 3D map honors reduced motion | No full audit |
 
 ## Gate 8 — Deployment and operations
@@ -105,7 +107,7 @@ Last audited: **2026-09-29** (main app, `PlutoTradeAI/backend`, commit `028b9fc`
 | Render web + worker + cron | PROD-DATA | Deploys this session | — |
 | Sentry errors | PROD-DATA | Readiness panel "Reporting to Sentry" | Cron check-in: DSN on the cron service unconfirmed |
 | Readiness report | PROD-DATA | Admin panel | — |
-| Backup / restore / rollback runbook | INCOMPLETE | — | Write |
+| Backup / restore runbook | DONE | `docs/RUNBOOK_BACKUP_RESTORE.md` | Rollback = redeploy previous commit on Render |
 
 ## Spec coverage (5th spec, 2026-09-29) — main app
 
@@ -115,14 +117,14 @@ Last audited: **2026-09-29** (main app, `PlutoTradeAI/backend`, commit `028b9fc`
 | §2 Competitor research | Not started |
 | §3 Shared research/evidence layer | Not started |
 | §4 Market intelligence (news) | INCOMPLETE — Alpaca news + X wired, demo fallback labeled, not used in decisions, no dedup/corrections |
-| §5 Objective patterns | INCOMPLETE — `pattern_brain.py` is a shadow-only heuristic |
+| §5 Objective patterns | TESTED — 36 versioned detectors, walk-forward + forward evidence; none validated yet (research/watch only) |
 | §6 Account-aware plans | TESTED (advisory; `trade_plan_v1`) |
 | §7 Financial requirements | Mostly TESTED; 20% rule and overnight permission need owner settings |
 | §8 Broker execution | Webull SANDBOX (equity); E\*TRADE INCOMPLETE |
-| §9 Lifecycle proof | Event journal TESTED (correlation ids, trace API); broker transactions reconciliation still INCOMPLETE |
+| §9 Lifecycle proof | Event journal TESTED; broker reconciliation PROD-DATA (sandbox) |
 | §10 Honest research | Evidence rules in planner; research engine not started |
-| §11 3D observatory | Partial — needs real event provenance + drill-down |
-| §12 Security/ops | Partial (see Gates 5, 8) |
+| §11 3D observatory | TESTED — driven by the event journal, three levels with breadcrumbs |
+| §12 Security/ops | CSRF origin check, backups + runbook, network-isolated tests; rate limiting still missing |
 | §13 Verification | Ongoing — this document |
 | §14 Dependency order | Done: checklist, event journal. Next: evidence layer → patterns → news → observatory |
 

@@ -892,6 +892,9 @@ const bindBrokerSync = () => {
       const diffs = latest.differences || 0;
       summary.textContent = `${env}: ${diffs ? `${diffs} difference(s)` : "matches the broker"} as of ${when(latest.checked_at)}${stale ? " (stale - older than two check intervals)" : ""}.`;
     }
+    const balances = Object.entries(latest.balances || {}).map(([acct, b]) =>
+      `acct ${acct}: net liquidation ${b.net_liquidation ?? "-"} ${b.currency || ""}${b.day_profit_loss !== undefined && b.day_profit_loss !== null ? `, today ${b.day_profit_loss}` : ""}`);
+    if (balances.length) summary.textContent += ` Broker balances - ${balances.join("; ")}.`;
     const items = (latest.items || []).filter((i) => i.category !== "matched");
     list.innerHTML = items.map((i) => `<li class="broker-sync-${escapeHtml(i.category)}"><b>${escapeHtml(i.symbol)}</b> <small>${escapeHtml(i.account_id ? `acct ...${String(i.account_id).slice(-4)}` : "")}</small> - ${escapeHtml(BROKER_SYNC_LABELS[i.category] || i.category)}: broker ${escapeHtml(i.broker_quantity)}, app ${escapeHtml(i.record_quantity)}${i.category === "broker_only" ? " <small>(left untouched)</small>" : ""}</li>`).join("");
   };

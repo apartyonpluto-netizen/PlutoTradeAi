@@ -167,3 +167,10 @@ def test_admin_panel_shows_broker_close_evidence(user_id):
             html = client.get("/admin").get_data(as_text=True)
     assert "Closed at broker: LIMIT SELL 1 @ 981.97 on 2026-09-17" in html
     assert evidence[0]["filled_price"] in html
+
+
+
+def test_balances_are_reported_as_the_broker_gives_them(user_id):
+    stored = br.run(user_id, accounts=["cash-1234"], records=[], read_positions=lambda a: [], read_open_orders=lambda a: [],
+                    read_balance=lambda a: {"total_net_liquidation_value": "2064.10", "total_day_profit_loss": "1.52"})
+    assert stored["latest"]["balances"] == {"...1234": {"net_liquidation": "2064.10", "cash": None, "day_profit_loss": "1.52", "currency": "USD"}}

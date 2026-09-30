@@ -184,13 +184,15 @@ def _save(user_id: str, report: Dict[str, Any]) -> Dict[str, Any]:
 
 def run(user_id: str, *, accounts: List[str], records: List[Dict[str, Any]],
         read_positions: Callable[[str], List[Dict[str, Any]]], read_open_orders: Callable[[str], List[Dict[str, Any]]],
-        account_error: Optional[str] = None, read_history: Optional[Callable[[str], List[Dict[str, Any]]]] = None) -> Dict[str, Any]:
+        account_error: Optional[str] = None, read_history: Optional[Callable[[str], List[Dict[str, Any]]]] = None,
+        read_balance: Optional[Callable[[str], Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Reads the broker for each account (read-only), compares, persists."""
     environment = broker_env.current()["environment"]
     checked_at = _now()
     positions: Dict[str, List[Dict[str, Any]]] = {}
     orders: Dict[str, List[Dict[str, Any]]] = {}
     histories: Dict[str, List[Dict[str, Any]]] = {}
+    balances: Dict[str, Dict[str, Any]] = {}
     history_notes: List[str] = []
     errors: List[str] = [f"could not list broker accounts: {account_error}"] if account_error else []
     for account_id in accounts:
@@ -200,6 +202,17 @@ def run(user_id: str, *, accounts: List[str], records: List[Dict[str, Any]],
         except Exception as error:  # noqa: BLE001 - reported as disconnected, never guessed
             errors.append(f"account ...{str(account_id)[-4:]}: {type(error).__name__}: {str(error)[:160]}")
             continue
+        if read_balance is not None:
+            try:
+                raw = read_balance(account_id) or {}
+                balances[f"...{str(account_id)[-4:]}"] = {
+                    "net_liquidation": raw.get("total_net_liquidation_value"),
+                    "cash": raw.get("total_cash_balance") or raw.get("cash_balance"),
+                    "day_profit_loss": raw.get("total_day_profit_loss"),
+                    "currency": raw.get("currency") or "USD",
+                }
+            except Exception as error:  # noqa: BLE001 - balances are informational here
+                history_notes.append(f"balance unavailable for ...{str(account_id)[-4:]}: {type(error).__name__}")
         if read_history is not None:
             try:
                 histories[account_id] = read_history(account_id)
@@ -212,6 +225,7 @@ def run(user_id: str, *, accounts: List[str], records: List[Dict[str, Any]],
         report = compare(records, positions, orders, environment=environment, default_account=accounts[0], history_by_account=histories)
         report["errors"] = []
         report["notes"] = history_notes
+        report["balances"] = balances
     report.update({"run_id": uuid.uuid4().hex[:12], "checked_at": checked_at, "accounts": [f"...{str(a)[-4:]}" for a in accounts],
                    "broker": "webull"})
     return _save(user_id, report)
