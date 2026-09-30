@@ -283,7 +283,9 @@
         const run = st.state === "running" ? `Running: ${st.progress || ""}. `
             : st.state === "failed" ? `Last run failed: ${st.error || "unknown error"}. `
             : st.state === "done" ? `Last run finished ${String(st.finished_at || "").slice(0, 16).replace("T", " ")} UTC. ` : "";
-        return run + last;
+        const fw = st.forward || {};
+        const forward = ` Forward tracking: ${fw.resolved || 0} resolved, ${fw.open || 0} open${fw.updated_at ? ` (updated ${String(fw.updated_at).slice(0, 16).replace("T", " ")} UTC)` : " (not run yet - daily after 21:00 UTC)"}.`;
+        return run + last + forward;
     };
     async function load(method = "GET") {
         try {

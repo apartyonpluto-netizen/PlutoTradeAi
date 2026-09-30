@@ -189,6 +189,8 @@ def validation_status() -> Dict[str, Any]:
     except (OSError, ValueError):
         status = {"state": "never_run"}
     status["evidence"] = evidence.latest_snapshot_summary()
+    from . import forward
+    status["forward"] = forward.summary()
     return status
 
 
@@ -258,3 +260,26 @@ def validation_is_stale() -> bool:
     except ValueError:
         return True
     return (datetime.now(timezone.utc) - generated).total_seconds() > VALIDATION_MAX_AGE_SECONDS
+
+
+# --- forward evidence ---------------------------------------------------------------
+
+
+def forward_tracking_due(now=None) -> bool:
+    """Once per trading day, after the daily bar has closed."""
+    from datetime import datetime, timezone
+
+    from . import forward
+
+    now = now or datetime.now(timezone.utc)
+    if now.weekday() >= 5 or now.hour < 21:
+        return False
+    updated = forward.summary().get("updated_at")
+    return not updated or str(updated)[:10] != now.date().isoformat()
+
+
+def run_forward_tracking(symbols: List[str]) -> Dict[str, Any]:
+    from . import forward
+
+    bars = fetch_bars(symbols, "1d")
+    return forward.run(bars, completed=completed)

@@ -12681,13 +12681,19 @@ def api_autonomy_cron_trigger():
             data_backup = backups.create("daily (cron)")
     except Exception as error:  # noqa: BLE001 - a backup failure must never affect trading
         logger.warning("data backup failed: %s", error)
+    setup_forward = None
+    try:
+        if setups_service.forward_tracking_due():
+            setup_forward = setups_service.run_forward_tracking(list(CORE_SCAN_UNIVERSE))
+    except Exception as error:  # noqa: BLE001 - research must never affect trading
+        logger.warning("setup forward tracking failed: %s", error)
     try:
         if _now_utc().hour >= 20 and setups_service.validation_is_stale():
             setup_validation = setups_service.start_validation(list(CORE_SCAN_UNIVERSE), reason="weekly refresh (cron)")
     except Exception as error:  # noqa: BLE001 - research refresh must never affect trading
         logger.warning("setup validation refresh not started: %s", error)
     return _api_success({"ran_for_users": len(results), "results": results, "setup_validation": setup_validation,
-                         "data_backup": data_backup},
+                         "data_backup": data_backup, "setup_forward": setup_forward},
                         ok=True, ran_for_users=len(results))
 
 

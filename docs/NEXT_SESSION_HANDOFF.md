@@ -18,6 +18,9 @@ probes only, never orders.
 
 ## Changed this session (newest first)
 
+- `backend/setups/forward.py`: daily (21:00-21:55 UTC cron, weekdays) records
+  setups confirmed on the newest completed daily bar and resolves earlier ones;
+  feeds `evidence.FORWARD_FILE`. Admin Setup Evidence shows open/resolved counts.
 - `backend/observatory.py`, `templates/observatory.html`, `static/js/observatory_3d.js`,
   `/api/observatory`, nav link, `tests/test_observatory.py`. Verified in local
   preview (seeded events): agent flow, sectors, ticker chains, no console errors.
@@ -55,7 +58,7 @@ probes only, never orders.
 
 ## Checks actually run
 
-- Full suite: 1418 passed (local, mocked, outbound network blocked).
+- Full suite: 1422 passed (local, mocked, outbound network blocked).
 - Production 2026-09-30 14:28 UTC: Broker sync 3 matched / 5 record-only (MU with broker close evidence) / 3 unprotected; same-site writes pass the new guard.
 - Production (sandbox) Broker sync 2026-09-30 01:52 UTC: 3 matched, 5 record-only, 3 unprotected_at_broker.
 - Read-only probe: order history has fee fields; order detail does not.
@@ -75,8 +78,9 @@ page lives in the session scratchpad only.
 
 1. (done) Admin "Positions No Longer Held" shows broker close evidence. Next:
    add balances to the reconciliation report.
-2. The weekly setup validation runs automatically tonight after 20:00 UTC
-   (evidence is stale/absent); check Admin -> Setup Evidence afterwards.
+2. Tonight after 20:00 UTC the cron starts the first real-data setup
+   validation and the first forward-tracking run; check Admin -> Setup Evidence
+   (walk-forward trade counts, per-setup status, forward open/resolved).
 3. Drive the /agent-map observatory from `event_journal` (observed flows) vs
    the static architecture (structural), per the spec.
 4. E*TRADE read-only adapter once the owner provides developer keys (entered
