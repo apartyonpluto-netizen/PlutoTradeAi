@@ -896,7 +896,18 @@ const bindBrokerSync = () => {
       `acct ${acct}: net liquidation ${b.net_liquidation ?? "-"} ${b.currency || ""}${b.day_profit_loss !== undefined && b.day_profit_loss !== null ? `, today ${b.day_profit_loss}` : ""}`);
     if (balances.length) summary.textContent += ` Broker balances - ${balances.join("; ")}.`;
     const items = (latest.items || []).filter((i) => i.category !== "matched");
-    list.innerHTML = items.map((i) => `<li class="broker-sync-${escapeHtml(i.category)}"><b>${escapeHtml(i.symbol)}</b> <small>${escapeHtml(i.account_id ? `acct ...${String(i.account_id).slice(-4)}` : "")}</small> - ${escapeHtml(BROKER_SYNC_LABELS[i.category] || i.category)}: broker ${escapeHtml(i.broker_quantity)}, app ${escapeHtml(i.record_quantity)}${i.category === "broker_only" ? " <small>(left untouched)</small>" : ""}</li>`).join("");
+    const actionable = (i) => (i.category === "unprotected_at_broker" || i.category === "protection_missing_at_broker") && (i.record_ids || [])[0] && i.instrument_type !== "OPTION";
+    const actionForm = (i) => `
+      <form class="broker-sync-action" data-record-id="${escapeHtml(i.record_ids[0])}" data-symbol="${escapeHtml(i.symbol)}">
+        <small>Broker: ${escapeHtml(i.broker_quantity)} sh · cost ${escapeHtml(i.broker_cost_price ?? "-")} · last ${escapeHtml(i.broker_last_price ?? "-")}. You choose the stop - nothing is suggested.</small>
+        <label>Stop <input name="stop_price" type="number" step="0.01" min="0" inputmode="decimal" placeholder="e.g. below ${escapeHtml(i.broker_last_price ?? "")}"></label>
+        <label>Target (optional) <input name="target_price" type="number" step="0.01" min="0" inputmode="decimal"></label>
+        <label>Type ${escapeHtml(i.symbol)} <input name="confirm_symbol" autocomplete="off" maxlength="12"></label>
+        <button type="submit" class="ghost-button" data-action="protect">Set stop</button>
+        <button type="button" class="ghost-button" data-action="close">Close position</button>
+        <span class="broker-sync-action-result" role="status"></span>
+      </form>`;
+    list.innerHTML = items.map((i) => `<li class="broker-sync-${escapeHtml(i.category)}"><b>${escapeHtml(i.symbol)}</b> <small>${escapeHtml(i.account_id ? `acct ...${String(i.account_id).slice(-4)}` : "")}</small> - ${escapeHtml(BROKER_SYNC_LABELS[i.category] || i.category)}: broker ${escapeHtml(i.broker_quantity)}, app ${escapeHtml(i.record_quantity)}${i.category === "broker_only" ? " <small>(left untouched)</small>" : ""}${actionable(i) ? actionForm(i) : ""}</li>`).join("");
   };
   const load = async (method = "GET") => {
     button.disabled = true;
@@ -913,6 +924,34 @@ const bindBrokerSync = () => {
     }
   };
   button.addEventListener("click", () => load("POST"));
+  const act = async (form, action) => {
+    const result = form.querySelector(".broker-sync-action-result");
+    const data = Object.fromEntries(new FormData(form).entries());
+    if (action === "close" && !window.confirm(`Send a closing order for ${form.dataset.symbol} to Webull (sandbox)?`)) return;
+    result.textContent = "Sending...";
+    form.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    try {
+      const response = await fetch(`/api/broker/positions/${encodeURIComponent(form.dataset.recordId)}/${action}`, {
+        method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
+      });
+      const payload = await response.json();
+      result.textContent = response.ok && payload.success ? payload.data.next : ((payload.error && payload.error.message) || "Refused.");
+    } catch (error) {
+      result.textContent = `Could not send: ${error.message}`;
+    } finally {
+      form.querySelectorAll("button").forEach((b) => (b.disabled = false));
+    }
+  };
+  list.addEventListener("submit", (event) => {
+    const form = event.target.closest(".broker-sync-action");
+    if (!form) return;
+    event.preventDefault();
+    act(form, "protect");
+  });
+  list.addEventListener("click", (event) => {
+    const close = event.target.closest('[data-action="close"]');
+    if (close) act(close.closest(".broker-sync-action"), "close");
+  });
   load();
 };
 

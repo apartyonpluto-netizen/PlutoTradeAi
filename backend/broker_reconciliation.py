@@ -75,10 +75,12 @@ def compare(records: List[Dict[str, Any]], positions_by_account: Dict[str, List[
     items: List[Dict[str, Any]] = []
     for account_id, positions in positions_by_account.items():
         held: Dict[str, float] = {}
+        quotes: Dict[str, Dict[str, Any]] = {}
         for position in positions:
             symbol = str(position.get("symbol") or "").upper()
             if symbol:
                 held[symbol] = held.get(symbol, 0.0) + _qty(position.get("quantity"))
+                quotes[symbol] = {"cost_price": position.get("cost_price"), "last_price": position.get("last_price")}
         mine = [r for r in broker_env.only_current(records, environment)
                 if is_open(r) and (r.get("account_id") == account_id
                                    or (not r.get("account_id") and account_id == (default_account or next(iter(positions_by_account)))))]
@@ -92,7 +94,9 @@ def compare(records: List[Dict[str, Any]], positions_by_account: Dict[str, List[
             record_qty = sum(_qty(r.get("filled_quantity") or r.get("quantity")) for r in recs)
             base = {"account_id": account_id, "symbol": symbol, "broker_quantity": broker_qty, "record_quantity": record_qty,
                     "record_ids": [r.get("record_id") or r.get("entry_client_order_id") for r in recs],
-                    "instrument_type": recs[0].get("instrument_type") if recs else None}
+                    "instrument_type": recs[0].get("instrument_type") if recs else None,
+                    "broker_cost_price": quotes.get(symbol, {}).get("cost_price"),
+                    "broker_last_price": quotes.get(symbol, {}).get("last_price")}
             if recs and broker_qty == 0:
                 evidence = closing_fills(recs, (history_by_account or {}).get(account_id) or [])
                 items.append({**base, "category": "record_only", "broker_close_evidence": evidence,

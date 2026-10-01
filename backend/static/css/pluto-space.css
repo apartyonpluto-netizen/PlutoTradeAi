@@ -196,3 +196,8 @@
 .broker-sync-items .broker-sync-protection_missing_at_broker, .broker-sync-items .broker-sync-unprotected_at_broker, .broker-sync-items .broker-sync-record_only { color: var(--negative); }
 .broker-sync-items .broker-sync-quantity_mismatch { color: var(--caution); }
 .broker-sync-items small { color: var(--text-muted); }
+.broker-sync-action { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin: 6px 0 10px; color: var(--text-primary); }
+.broker-sync-action small { flex-basis: 100%; }
+.broker-sync-action label { display: flex; gap: 6px; align-items: center; font-size: 0.85rem; }
+.broker-sync-action input { width: 96px; min-height: 34px; }
+.broker-sync-action-result { flex-basis: 100%; font-size: 0.85rem; color: var(--text-secondary); }

@@ -10892,6 +10892,130 @@ def _maybe_run_broker_reconciliation(user_id: str) -> None:
     _run_broker_reconciliation(user_id)
 
 
+# --- owner actions for positions held with no protective stop -----------------
+#
+# Protect: the owner chooses a stop price; it is saved on the position's own
+# record and the existing monitor places, confirms and keeps watching the
+# stop at the broker (_reconcile_entry_fill_and_protection - the same path
+# every app-opened position uses). Close: a marketable limit order for the
+# exact quantity the broker reports. Both: sandbox only, a fresh broker read
+# first, the ticker typed to confirm, under the account's scan lock.
+
+UNPROTECTED_CATEGORIES = ("unprotected_at_broker", "protection_missing_at_broker")
+MANUAL_CLOSE_SLIPPAGE = 0.01
+
+
+def _owner_position_action_guard(user_id: str, record_id: str, confirm_symbol: str):
+    """(record, account_id, broker_position) or raises ValidationError."""
+    if broker_env.current()["environment"] != broker_env.SANDBOX:
+        raise ValidationError("Protect/close from here is enabled for the sandbox only.")
+    record = next((o for o in list_overnight_orders(user_id) if str(o.get("record_id") or o.get("entry_client_order_id")) == record_id), None)
+    if record is None or not broker_env.in_current(record):
+        raise ValidationError("No such position record.")
+    symbol = str(record.get("ticker") or "").upper()
+    if confirm_symbol.strip().upper() != symbol:
+        raise ValidationError(f"Type {symbol} exactly to confirm.")
+    if record.get("instrument_type") == "OPTION":
+        raise ValidationError("Options are exited by the app's own monitor; this action is for stock positions.")
+    creds = get_webull_credentials(user_id)
+    account_id = str(record.get("account_id") or "")
+    if not account_id:
+        listed = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
+        account_id = str((webull_api.find_individual_cash_account(listed) or {}).get("account_id") or "")
+    positions = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
+    position = next((p for p in positions if str(p.get("symbol") or "").upper() == symbol), None)
+    if position is None or float(position.get("quantity") or 0) == 0:
+        raise ValidationError(f"The broker shows no {symbol} position right now - nothing to protect or close.")
+    return record, account_id, position, creds
+
+
+@app.route("/api/broker/positions/<record_id>/protect", methods=["POST"])
+@api_guard
+def api_broker_protect_position(record_id: str):
+    user_id = _current_user_id()
+    payload = request.get_json(silent=True) or {}
+    try:
+        stop_price = float(payload.get("stop_price") or 0)
+        target_price = float(payload.get("target_price") or 0)
+    except (TypeError, ValueError):
+        return _api_failure("Stop and target must be numbers.", status_code=400, error_code="invalid", ok=False)
+
+    def _protect():
+        record, account_id, position, _creds = _owner_position_action_guard(user_id, record_id, str(payload.get("confirm_symbol") or ""))
+        last = float(position.get("last_price") or 0)
+        short = record.get("direction") == "short"
+        if stop_price <= 0:
+            raise ValidationError("Enter a stop price.")
+        if last and ((not short and stop_price >= last) or (short and stop_price <= last)):
+            raise ValidationError(f"A stop at {stop_price:.2f} would trigger immediately (last price {last:.2f}).")
+        if target_price and last and ((not short and target_price <= last) or (short and target_price >= last)):
+            raise ValidationError(f"A target at {target_price:.2f} is already reached (last price {last:.2f}).")
+        orders = list_overnight_orders(user_id)
+        stored = next(o for o in orders if str(o.get("record_id") or o.get("entry_client_order_id")) == record_id)
+        stored["stop"] = round(stop_price, 2)
+        if target_price:
+            stored["target"] = round(target_price, 2)
+        stored["account_id"] = stored.get("account_id") or account_id
+        stored["owner_protection_set_at"] = _now_utc().isoformat()
+        stored["owner_protection_set_by"] = user_id
+        replace_overnight_orders(user_id, orders)
+        event_journal.emit(user_id, "protection.owner_stop_set", correlation_id=event_journal.correlation_id_for(stored),
+                           ticker=stored.get("ticker"), account_id=account_id, source="owner",
+                           data={"stop": stored["stop"], "target": stored.get("target"), "broker_quantity": position.get("quantity"), "last_price": last})
+        return stored
+
+    try:
+        stored = _call_holding_user_scan_lock(user_id, _protect)
+    except ValidationError as error:
+        return _api_failure(str(error), status_code=400, error_code="refused", ok=False)
+    except ScanAlreadyRunningError:
+        return _api_failure("A scan is running for this account - try again in a few seconds.", status_code=409, error_code="busy", ok=False)
+    return _api_success({"record_id": record_id, "stop": stored.get("stop"), "target": stored.get("target"),
+                         "next": "The monitor places and confirms the stop at Webull on its next pass during market hours (9:30-4:00 ET). Broker sync will show it once it is working."})
+
+
+@app.route("/api/broker/positions/<record_id>/close", methods=["POST"])
+@api_guard
+def api_broker_close_position(record_id: str):
+    user_id = _current_user_id()
+    payload = request.get_json(silent=True) or {}
+    if _current_webull_trading_session() != "CORE":
+        return _api_failure("Closing from here needs regular market hours (9:30-4:00 ET) so the order can fill.", status_code=400, error_code="market_closed", ok=False)
+
+    def _close():
+        record, account_id, position, creds = _owner_position_action_guard(user_id, record_id, str(payload.get("confirm_symbol") or ""))
+        symbol = str(record.get("ticker")).upper()
+        quantity = abs(float(position.get("quantity") or 0))
+        last = float(position.get("last_price") or 0)
+        if last <= 0:
+            raise ValidationError("The broker did not report a last price - cannot price a closing order safely.")
+        short = record.get("direction") == "short" or float(position.get("quantity") or 0) < 0
+        side = "BUY" if short else "SELL"
+        limit = round(last * (1 + MANUAL_CLOSE_SLIPPAGE) if short else last * (1 - MANUAL_CLOSE_SLIPPAGE), 2)
+        result = webull_api.place_stock_order(creds["app_key"], creds["app_secret"], account_id, symbol, side, quantity, limit,
+                                              trading_session="CORE", opens_position=False)
+        orders = list_overnight_orders(user_id)
+        stored = next(o for o in orders if str(o.get("record_id") or o.get("entry_client_order_id")) == record_id)
+        stored["owner_close"] = {"client_order_id": result.get("client_order_id"), "side": side, "quantity": quantity,
+                                 "limit_price": limit, "submitted_at": _now_utc().isoformat(), "submitted_by": user_id}
+        replace_overnight_orders(user_id, orders)
+        event_journal.emit(user_id, "exit.owner_close_submitted", correlation_id=event_journal.correlation_id_for(stored),
+                           ticker=symbol, account_id=account_id, source="owner",
+                           data={"side": side, "quantity": quantity, "limit_price": limit, "client_order_id": result.get("client_order_id")})
+        return stored["owner_close"]
+
+    try:
+        submitted = _call_holding_user_scan_lock(user_id, _close)
+    except ValidationError as error:
+        return _api_failure(str(error), status_code=400, error_code="refused", ok=False)
+    except ScanAlreadyRunningError:
+        return _api_failure("A scan is running for this account - try again in a few seconds.", status_code=409, error_code="busy", ok=False)
+    except Exception as error:  # noqa: BLE001 - the broker's own answer, shown as-is
+        return _api_failure(f"Webull did not accept the order: {str(error)[:200]}", status_code=502, error_code="broker_rejected", ok=False)
+    return _api_success({"submitted": submitted,
+                         "next": "Submitted to Webull - not yet a fill. Broker sync will show the position gone once it fills; then close the record in Admin (the sale shows there as evidence)."})
+
+
 @app.route("/api/broker/reconciliation", methods=["GET", "POST"])
 @api_guard
 def api_broker_reconciliation():

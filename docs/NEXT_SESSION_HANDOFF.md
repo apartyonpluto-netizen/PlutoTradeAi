@@ -18,6 +18,12 @@ probes only, never orders.
 
 ## Changed this session (newest first)
 
+- Owner Protect / Close for positions held with no stop (Broker sync panel):
+  `/api/broker/positions/<record_id>/protect` saves the owner's stop on the
+  record so the existing monitor places + confirms it; `/close` sends a
+  marketable limit for the broker's quantity (CORE hours). Sandbox only,
+  typed-ticker confirmation, fresh broker read, scan lock.
+  `tests/test_owner_position_actions.py` (7).
 - `backend/login_throttle.py`: 8 failed sign-ins per username or per client
   address in 15 min -> 429 (hashed keys, file-backed, shared by workers);
   post-sign-in redirect limited to same-site paths (fixed `//host` open redirect).
