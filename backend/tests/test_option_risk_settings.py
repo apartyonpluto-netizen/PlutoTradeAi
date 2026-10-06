@@ -14,7 +14,7 @@ way equity does - its exits are premium-percentage-based instead."""
 def test_defaults_present_without_ever_calling_update_risk_settings(user_id):
     status = controller.get_autonomy_status(user_id)
     assert status["option_target_gain_percent"] == 50.0
-    assert status["option_stop_loss_percent"] == 50.0
+    assert status["option_stop_loss_percent"] == 20.0
     assert status["option_close_days_before_expiration"] == 3
 
 
@@ -62,6 +62,20 @@ def test_option_stop_loss_percent_allows_exactly_100(user_id):
 def test_option_close_days_before_expiration_rejects_negative(user_id):
     with pytest.raises(ValueError):
         controller.update_risk_settings(user_id, option_close_days_before_expiration=-1)
+
+
+def test_stored_untouched_50_percent_stop_migrates_to_20(user_id):
+    import json
+
+    path = controller._settings_file(user_id)
+    path.write_text(json.dumps({"option_stop_loss_percent": 50.0, "current_mode": "OFF"}), encoding="utf-8")
+    assert controller.get_autonomy_status(user_id)["option_stop_loss_percent"] == 20.0
+
+
+def test_explicit_50_percent_stop_is_kept(user_id):
+    result = controller.update_risk_settings(user_id, option_stop_loss_percent=50)
+    assert result["option_stop_loss_percent"] == 50.0
+    assert controller.get_autonomy_status(user_id)["option_stop_loss_percent"] == 50.0
 
 
 def test_option_close_days_before_expiration_allows_zero(user_id):

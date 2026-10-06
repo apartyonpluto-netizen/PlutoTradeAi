@@ -67,7 +67,7 @@ outbound network blocked in tests). Broker evidence by level: `docs/BROKER_VERIF
 | Daily loss limit, max positions, risk per trade | TESTED + SANDBOX | Scan skip categories in prod (`max_positions` 3/3) | — |
 | Portfolio limits: position, total, sector, drawdown | TESTED | `028b9fc`, 20 tests | Off until owner sets them |
 | Live dollar caps (per order / per day) | TESTED | `live_limits.py`, `591f71f` | Only active when live armed |
-| Option exit on executable bid, % of actual entry premium | TESTED | `_check_and_execute_option_exit`; `test_option_trade_plan.py` | **Owner's 20% rule not set** (app default 50%); never exercised on a real option |
+| Option exit on executable bid, % of actual entry premium | TESTED | `_check_and_execute_option_exit`; `test_option_trade_plan.py` | Default stop is 20% (a stored untouched 50% migrates on read). Never exercised on a real option. See `docs/SANDBOX_OPTIONS_CYCLE.md`. |
 | Approval bound to ticket version; recheck before submit | TESTED | `5000638`, `test_trade_tickets.py` | APPROVAL mode not yet enabled in prod |
 | Emergency stop / kill switch / pause keeps monitoring | TESTED | Controller + scan gates | — |
 | Overnight-holding permission | INCOMPLETE | No setting | Spec §7 — owner setting required |

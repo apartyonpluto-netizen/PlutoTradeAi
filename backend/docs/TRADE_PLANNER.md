@@ -110,7 +110,7 @@ wider than 10% of the mid; gain at target is below the loss at the trigger.
 
 Option evidence comes only from closed **option** trades of the strategy;
 equity plans use only equity trades. The exit percentages are set in
-Account Hub → Risk Limits → Options (default 50% / 50% / 3 days).
+Account Hub → Risk Limits → Options (default target 50% / stop 20% / 3 days).
 
 Approving an option ticket also refuses when the fresh bid is at or below
 the trigger computed from the ticket's premium.

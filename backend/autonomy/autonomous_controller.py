@@ -92,7 +92,9 @@ def _default_settings() -> Dict[str, object]:
         # risk_percent_of_balance above (not a new field) for how much
         # premium to risk per trade - see the scanner's option sizing path.
         "option_target_gain_percent": 50.0,
-        "option_stop_loss_percent": 50.0,
+        # 20% of premium, Tre's rule. 50% was the original code default and
+        # is migrated on read when it was never explicitly saved.
+        "option_stop_loss_percent": 20.0,
         "option_close_days_before_expiration": 3,
         # Portfolio limits - percent of equity, 0 = off. Never defaulted on:
         # these are the user's risk tolerance, not the app's to choose.
@@ -157,6 +159,24 @@ def _read_raw(path: Path) -> Optional[Dict[str, object]]:
     return data if isinstance(data, dict) else None
 
 
+def _apply_legacy_option_stop_migration(settings: Dict[str, object], raw: Optional[Dict[str, object]]) -> None:
+    """The untouched code default used to be 50%. A stored 50 that the user
+    never set explicitly becomes 20%. A later save of 50 sets
+    option_stop_loss_percent_explicit and is left alone."""
+    if not isinstance(raw, dict) or raw.get("option_stop_loss_percent_explicit"):
+        return
+    stored = raw.get("option_stop_loss_percent")
+    if stored is None:
+        return
+    try:
+        stored_value = float(stored)
+    except (TypeError, ValueError):
+        return
+    if stored_value == 50.0:
+        settings["option_stop_loss_percent"] = 20.0
+        settings["option_stop_migrated_from_legacy_default"] = True
+
+
 def _load(user_id: str) -> Dict[str, object]:
     """Lock-free read - atomic writes (see _atomic_write) make a torn
     read impossible, so the only remaining question is "does a real,
@@ -170,7 +190,9 @@ def _load(user_id: str) -> Dict[str, object]:
     raw = _read_raw(path)
     if raw is None:
         raw = _ensure_file_exists_locked(path)
-    return {**_default_settings(), **raw}
+    merged = {**_default_settings(), **raw}
+    _apply_legacy_option_stop_migration(merged, raw)
+    return merged
 
 
 def _ensure_file_exists_locked(path: Path) -> Dict[str, object]:
@@ -197,6 +219,7 @@ def _locked_read_modify_write(user_id: str, mutate: Callable[[Dict[str, object]]
         if raw is None:
             raw = _default_settings()
         settings = {**_default_settings(), **raw}
+        _apply_legacy_option_stop_migration(settings, raw)
         mutate(settings)
         _atomic_write(path, settings)
         return settings
@@ -295,6 +318,7 @@ def update_risk_settings(
             settings["option_target_gain_percent"] = float(option_target_gain_percent)
         if option_stop_loss_percent is not None:
             settings["option_stop_loss_percent"] = float(option_stop_loss_percent)
+            settings["option_stop_loss_percent_explicit"] = True
         if option_close_days_before_expiration is not None:
             settings["option_close_days_before_expiration"] = int(option_close_days_before_expiration)
         for key, value in (

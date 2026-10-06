@@ -9,6 +9,17 @@
             <button id="refreshScannerButton" type="button">Refresh</button>
         </div>
     </div>
+    <p class="muted" id="scannerSummary">
+        {% if scanner_summary and scanner_summary.universe_count %}
+        Scanned {{ scanner_summary.universe_count }} symbols
+        ({{ scanner_summary.universe_source or "list" }}).
+        {{ scanner_summary.liquid_count or 0 }} passed the liquidity screen.
+        Showing the top {{ scanner_summary.shown_count or scanner_rows|length }}.
+        Strategy and charting still deep-analyze up to 6 of these per cycle (watchlist first, then this rank).
+        {% else %}
+        Each cycle screens the Nasdaq list, then shows the top qualifying names and why they qualified.
+        {% endif %}
+    </p>
     <p class="muted" id="scannerLiveBadge">Live updates every 20s</p>
     <div id="scannerLoadingState" class="scanner-skeleton" hidden>
         <div></div><div></div><div></div>
@@ -25,6 +36,7 @@
             <th>Relative Volume</th>
             <th>Volume</th>
             <th>Scanner Score</th>
+            <th>Why it qualified</th>
             <th>Last Updated</th>
             <th>Watchlist Status</th>
         </tr>
@@ -38,6 +50,7 @@
             <td>{{ row.relative_volume }}x</td>
             <td>{{ row.volume }}</td>
             <td>{{ row.scanner_score }}</td>
+            <td>{{ row.qualification_reason or '—' }}</td>
             <td>{{ row.last_updated }}</td>
             <td>{{ 'Tracked' if row.on_watchlist else 'Not tracked' }}</td>
         </tr>

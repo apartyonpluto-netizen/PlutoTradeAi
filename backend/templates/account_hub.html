@@ -423,8 +423,8 @@
         {% endfor %}
         <p class="risk-slider-group-title">Options (calls and puts you buy)</p>
         <div class="risk-slider-row">
-            <div class="risk-slider-label"><span>Exit when the premium falls</span><b id="optionStopLossValue">{{ autonomy_status.option_stop_loss_percent if autonomy_status else 50 }}%</b></div>
-            <input type="range" id="optionStopLossSlider" min="5" max="90" step="1" value="{{ autonomy_status.option_stop_loss_percent if autonomy_status else 50 }}">
+            <div class="risk-slider-label"><span>Exit when the premium falls</span><b id="optionStopLossValue">{{ autonomy_status.option_stop_loss_percent if autonomy_status else 20 }}%</b></div>
+            <input type="range" id="optionStopLossSlider" min="5" max="90" step="1" value="{{ autonomy_status.option_stop_loss_percent if autonomy_status else 20 }}">
             <p class="risk-slider-preview" id="optionStopLossPreview">&nbsp;</p>
         </div>
         <div class="risk-slider-row">

@@ -178,7 +178,7 @@ def test_option_exit_target_reached_closes_with_profit(user_id):
 def test_option_exit_stop_reached_closes_with_loss(user_id):
     entry = _active_option_entry("opt-entry-d")
     sell_id = ol.deterministic_client_order_id(user_id, TICKER, TRADING_DAY, "option_exit", attempt=1)
-    # premium_paid=5.0, default stop_loss_percent=50% -> stop value 2.5.
+    # premium_paid=5.0, default stop_loss_percent=20% -> stop value 4.0.
     # bid=2.0 breaches it.
     with patch.object(pluto_app.webull_api, "get_option_snapshot", return_value=_snapshot_row(CONTRACT["option_symbol"], 2.0)), \
          patch.object(pluto_app.webull_api, "place_option_order", return_value={"client_order_id": sell_id}), \
@@ -207,6 +207,23 @@ def test_option_exit_expiration_safety_net_closes_regardless_of_pnl(user_id):
     assert result is True
     record = list_closed_trades(user_id)[0]
     assert record["exit_type"] == "option_expiration_safety_close"
+
+
+def test_unfilled_option_exit_is_polled_instead_of_placing_another_sell(user_id):
+    entry = _active_option_entry("opt-entry-pending")
+    submitted = _order_detail("SUBMITTED", 2, 0)
+    filled = _order_detail("FILLED", 2, 2, average_price=2.0)
+    with patch.object(pluto_app.webull_api, "get_option_snapshot", return_value=_snapshot_row(CONTRACT["option_symbol"], 2.0)), \
+         patch.object(pluto_app.webull_api, "place_option_order", return_value={"client_order_id": "sell"}) as mock_sell, \
+         patch.object(pluto_app.webull_api, "get_order_detail", side_effect=[submitted] * pluto_app.ENTRY_FILL_POLL_ATTEMPTS + [filled]), \
+         patch.object(pluto_app, "time"):
+        first = pluto_app._check_and_execute_option_exit(user_id, CREDS, ACCOUNT_ID, TICKER, TRADING_DAY, entry)
+        assert first is False
+        assert entry.get("option_exit_client_order_id")
+        second = pluto_app._check_and_execute_option_exit(user_id, CREDS, ACCOUNT_ID, TICKER, TRADING_DAY, entry)
+    assert mock_sell.call_count == 1
+    assert second is True
+    assert entry["lifecycle_state"] == ol.CLOSED
 
 
 def test_option_exit_thresholds_are_read_from_the_users_real_risk_settings(user_id):

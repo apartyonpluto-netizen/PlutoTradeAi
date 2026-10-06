@@ -1632,7 +1632,11 @@ def _ticker_key(tickers: List[str]) -> Tuple[str, ...]:
 
 # Overridable in tests so a "stuck" fetch can be simulated with a short
 # sleep instead of a real multi-second one. See test_hard_deadline_degradation.py.
-SCAN_MARKET_DEADLINE_SECONDS = 20
+# A full Nasdaq screen is a few dozen Alpaca snapshot calls plus bar
+# scoring of the liquid survivors. 20s was enough for the old fixed list
+# and cut the new screen off. 75s stays under the 90s gunicorn timeout;
+# gthread keeps /healthz responsive while one scan runs.
+SCAN_MARKET_DEADLINE_SECONDS = 75
 TICKER_INTELLIGENCE_DEADLINE_SECONDS = 30
 OPTIONS_FETCH_DEADLINE_SECONDS = 30
 
@@ -1720,12 +1724,16 @@ def get_market_data(force_refresh: bool = False) -> Tuple[List[Dict[str, object]
         return MARKET_CACHE["rows"], MARKET_CACHE["errors"], MARKET_CACHE["last_updated"]
 
     watchlist_tickers = get_watchlist_tickers(_current_user_id())
-    scan_universe = list(CORE_SCAN_UNIVERSE)
     rows, errors, last_updated = _run_with_hard_deadline(
         scan_market,
-        kwargs={"tickers": scan_universe, "watchlist_tickers": watchlist_tickers},
+        kwargs={
+            "tickers": None,
+            "watchlist_tickers": watchlist_tickers,
+            "universe_fallback": list(CORE_SCAN_UNIVERSE),
+            "force_refresh": force_refresh,
+        },
         deadline_seconds=SCAN_MARKET_DEADLINE_SECONDS,
-        default=([], ["Scanner timed out - Yahoo Finance is rate limiting."], _now_utc().isoformat()),
+        default=([], ["Scanner timed out before the Nasdaq screen finished. Showing the last good list if one is cached."], _now_utc().isoformat()),
     )
     if not rows and MARKET_CACHE.get("rows"):
         stale_errors = list(MARKET_CACHE.get("errors", [])) + errors
@@ -1742,6 +1750,7 @@ def get_market_data(force_refresh: bool = False) -> Tuple[List[Dict[str, object]
             "rows": rows,
             "errors": errors,
             "last_updated": last_updated,
+            "summary": getattr(rows, "summary", None) or {},
             "expires_at": _now_utc() + timedelta(seconds=CACHE_SECONDS),
         }
     )
@@ -2243,8 +2252,10 @@ def _build_page_context(
     settings_payload = get_settings(user_id)
     watchlist = get_watchlist(user_id)
     watchlist_tickers = [row["ticker"] for row in watchlist]
+    scanner_summary: Dict[str, object] = {}
     if include_market_scan:
         scanner_rows, scanner_errors, scanner_last_updated = get_market_data(force_refresh=force_refresh)
+        scanner_summary = MARKET_CACHE.get("summary") or {}
     else:
         scanner_rows, scanner_errors, scanner_last_updated = [], [], ""
     suggestions = (
@@ -2580,6 +2591,7 @@ def _build_page_context(
         "scanner_rows": scanner_rows,
         "scanner_errors": scanner_errors,
         "scanner_last_updated": scanner_last_updated,
+        "scanner_summary": scanner_summary,
         "suggestions": suggestions,
         "reversal_rows": reversal_rows,
         "trend_rows": trend_rows,
@@ -3998,11 +4010,13 @@ def api_alerts():
 def api_scanner():
     force_refresh = request.args.get("refresh", "false").lower() == "true"
     scanner_rows, scanner_errors, last_updated = get_market_data(force_refresh=force_refresh)
+    summary = MARKET_CACHE.get("summary") or {}
     return _api_success(
-        {"rows": scanner_rows, "errors": scanner_errors, "last_updated": last_updated},
+        {"rows": scanner_rows, "errors": scanner_errors, "last_updated": last_updated, "summary": summary},
         rows=scanner_rows,
         errors=scanner_errors,
         last_updated=last_updated,
+        summary=summary,
         ok=True,
     )
 
@@ -5640,6 +5654,182 @@ def _log_fast_monitor_timing(user_id: str, started: float, stages: Dict[str, flo
         pass
 
 
+def _review_naked_equity_positions(user_id: str, creds: Dict[str, str], account_id: str) -> List[Dict[str, object]]:
+    """Every 10-second monitor tick: any open equity position with no working stop.
+
+    Attaches a stop only when a price is already known and still below the
+    last trade — the record's own stop, or the newest unfilled STOP_LOSS
+    from order history (the cancelled sandbox stops on INTC, MSTR, and
+    MRVL). Never invents a price. Outside CORE hours it flags the position
+    and waits, because Webull rejects STOP_LOSS outside that session.
+    Shorts are flagged and left alone; their position sign is unconfirmed.
+    """
+    import protective_stops
+
+    try:
+        positions = _positions_for_pass(creds, account_id)
+        open_orders = webull_api.get_open_orders(creds["app_key"], creds["app_secret"], account_id)
+    except Exception as error:  # noqa: BLE001 - a positions read failing must not fail the rest of the tick
+        return [{"action": "review_failed", "reason": str(error), "account_id": account_id}]
+
+    protected = protective_stops.symbols_with_working_stop(open_orders)
+    orders = list_overnight_orders(user_id)
+    session = _current_webull_trading_session()
+    report: List[Dict[str, object]] = []
+    changed = False
+    history_stops: Optional[Dict[str, float]] = None
+
+    def _history() -> Dict[str, float]:
+        nonlocal history_stops
+        if history_stops is None:
+            history_stops = protective_stops.historical_stops_for_account(
+                account_id,
+                lambda: webull_api.get_order_history(creds["app_key"], creds["app_secret"], account_id, days_back=30),
+            )
+        return history_stops
+
+    for position in positions:
+        symbol = str(position.get("symbol") or "").strip().upper()
+        quantity = protective_stops.position_quantity(position)
+        if not symbol or quantity <= 0 or not protective_stops.is_equity_symbol(symbol):
+            continue
+        if symbol in protected:
+            continue
+        record = _naked_review_record(orders, symbol, account_id)
+        if record is not None and record.get("stop_client_order_id"):
+            continue
+        last_price = protective_stops.position_last_price(position)
+        item: Dict[str, object] = {
+            "ticker": symbol,
+            "quantity": quantity,
+            "account_id": account_id,
+            "last_price": last_price,
+            "action": "flagged",
+        }
+        if record is None:
+            item["reason"] = "broker position has no local record, so a stop will not be placed without one"
+            report.append(item)
+            continue
+        if record.get("position_absent_unexplained"):
+            item["reason"] = "position is flagged absent; not attaching a stop"
+            record["naked_position"] = True
+            record["naked_position_reason"] = item["reason"]
+            record["naked_position_checked_at"] = _now_utc().isoformat()
+            changed = True
+            report.append(item)
+            continue
+        if record.get("direction") == "short":
+            item["reason"] = "short positions are not auto-protected"
+            record["naked_position"] = True
+            record["naked_position_reason"] = item["reason"]
+            record["naked_position_checked_at"] = _now_utc().isoformat()
+            changed = True
+            report.append(item)
+            continue
+
+        stored_stop = float(record.get("stop") or 0)
+        source = ""
+        stop_price = 0.0
+        if stored_stop > 0:
+            source = "record"
+            stop_price = stored_stop
+        else:
+            recovered = _history().get(symbol)
+            if recovered:
+                source = "order_history"
+                stop_price = float(recovered)
+
+        if stop_price <= 0:
+            item["reason"] = "no stop price on the record and none in recent unfilled stop orders"
+        elif not protective_stops.stop_is_below_market(stop_price, last_price):
+            item["reason"] = f"{source} stop ${stop_price:.2f} is not below the last price; not attaching it"
+        elif session != "CORE":
+            item["reason"] = f"will attach ${stop_price:.2f} ({source}) on the next CORE session"
+            item["stop_price"] = stop_price
+        else:
+            trading_day = str(record.get("trading_day") or _trading_day_key())
+            attempt = int(record.get("naked_stop_attempt") or 0) + 1
+            client_order_id = ol.deterministic_client_order_id(user_id, symbol, trading_day, "naked_stop", attempt=attempt)
+            try:
+                webull_api.place_stop_loss_order(
+                    app_key=creds["app_key"],
+                    app_secret=creds["app_secret"],
+                    account_id=account_id,
+                    symbol=symbol,
+                    quantity=quantity,
+                    stop_price=stop_price,
+                    client_order_id=client_order_id,
+                )
+            except Exception as error:  # noqa: BLE001
+                item["action"] = "attach_failed"
+                item["reason"] = str(error)
+                record["naked_position"] = True
+                record["naked_position_reason"] = f"stop attach failed: {error}"
+                record["naked_position_checked_at"] = _now_utc().isoformat()
+                record["naked_stop_attempt"] = attempt
+                changed = True
+                report.append(item)
+                continue
+            record["stop"] = stop_price
+            record["stop_client_order_id"] = client_order_id
+            record["stop_leg_quantity"] = quantity
+            record["filled_quantity"] = float(record.get("filled_quantity") or quantity)
+            record["naked_stop_attempt"] = attempt
+            record["naked_position"] = False
+            record["naked_position_reason"] = ""
+            record["naked_stop_attached_at"] = _now_utc().isoformat()
+            record["stop_rearm_reason"] = f"attached {source} stop at ${stop_price:.2f} for {quantity:g} shares with no working stop"
+            item["action"] = "attached"
+            item["reason"] = record["stop_rearm_reason"]
+            item["stop_price"] = stop_price
+            changed = True
+            try:
+                add_manual_alert(
+                    user_id,
+                    {
+                        "type": "stop_rearmed",
+                        "ticker": symbol,
+                        "priority": "critical",
+                        "message": (
+                            f"{symbol}: no working protective stop was on the {quantity:g} shares held. "
+                            f"A stop at ${stop_price:.2f} from the {source} was placed. Confirm it on the position."
+                        ),
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            report.append(item)
+            continue
+
+        record["naked_position"] = True
+        record["naked_position_reason"] = str(item["reason"])
+        record["naked_position_checked_at"] = _now_utc().isoformat()
+        changed = True
+        report.append(item)
+
+    if changed:
+        replace_overnight_orders(user_id, orders)
+    return report
+
+
+def _naked_review_record(orders: List[Dict[str, object]], ticker: str, account_id: str) -> Optional[Dict[str, object]]:
+    matches = []
+    for order in orders:
+        if str(order.get("ticker") or "").upper() != ticker:
+            continue
+        if order.get("instrument_type") == "OPTION":
+            continue
+        if order.get("lifecycle_state") in ol.TERMINAL_STATES:
+            continue
+        if order.get("account_id") and order.get("account_id") != account_id:
+            continue
+        matches.append(order)
+    if not matches:
+        return None
+    matches.sort(key=lambda order: (float(order.get("stop") or 0) > 0, str(order.get("logged_at") or "")))
+    return matches[-1]
+
+
 def _run_fast_order_monitor(user_id: str) -> Dict[str, object]:
     """The FAST per-order monitor tick - task list: "Build fast per-order
     monitor decoupled from the 5-minute scan". Meant to be called on a
@@ -5734,6 +5924,11 @@ def _run_fast_order_monitor(user_id: str) -> Dict[str, object]:
             # _run_autonomous_trade_scan_locked's matching comment.
             if margin_account_id:
                 still_transitional = _timed(stages, "transitional_margin", _monitor_transitional_orders, user_id, creds, margin_account_id, False) or still_transitional
+            naked_positions = _timed(stages, "naked_positions", _review_naked_equity_positions, user_id, creds, account_id)
+            if margin_account_id:
+                naked_positions = list(naked_positions or []) + list(
+                    _timed(stages, "naked_positions_margin", _review_naked_equity_positions, user_id, creds, margin_account_id) or []
+                )
 
         entries_checked_after = sum(1 for order in list_overnight_orders(user_id) if ol.is_transitional(order))
 
@@ -5748,6 +5943,7 @@ def _run_fast_order_monitor(user_id: str) -> Dict[str, object]:
             # "not checked".
             "entries_checked": entries_checked_before,
             "still_transitional_count": entries_checked_after,
+            "naked_positions": naked_positions,
         }
     finally:
         _log_fast_monitor_timing(user_id, started, stages, webull_api.take_call_stats())
@@ -6791,18 +6987,26 @@ def _check_and_rearm_dead_stop(
     is confirmed naked and a replacement placement attempt itself fails,
     so the caller's own failed-attempt tracking applies on top and this
     keeps retrying every subsequent tick rather than going silent."""
+    if entry.get("direction") == "short":
+        return False
+
     stop_client_order_id = entry.get("stop_client_order_id")
-    if not stop_client_order_id or entry.get("direction") == "short":
-        return False
+    if not stop_client_order_id:
+        # A known stop price with no order id is the same naked position as
+        # a DAY stop that expired, except there is nothing to look up.
+        # Inventing a price is still refused: stop <= 0 returns here.
+        if float(entry.get("stop") or 0) <= 0:
+            return False
+        stop_fill = {"status": "MISSING", "filled_quantity": 0}
+    else:
+        try:
+            stop_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, stop_client_order_id)
+            stop_fill = ol.summarize_fill(stop_detail)
+        except Exception:  # noqa: BLE001 - transient lookup failure, try again next tick
+            return False
 
-    try:
-        stop_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, stop_client_order_id)
-        stop_fill = ol.summarize_fill(stop_detail)
-    except Exception:  # noqa: BLE001 - transient lookup failure, try again next tick
-        return False
-
-    if stop_fill["filled_quantity"] > 0 or _protective_leg_is_active(stop_fill["status"]):
-        return False  # a genuine fill (real exit, handled elsewhere) or still genuinely resting - nothing to rearm
+        if stop_fill["filled_quantity"] > 0 or _protective_leg_is_active(stop_fill["status"]):
+            return False  # a genuine fill (real exit, handled elsewhere) or still genuinely resting - nothing to rearm
 
     try:
         positions = _positions_for_pass(creds, account_id)
@@ -7550,6 +7754,116 @@ def _submit_and_confirm_option_entry(
     return _poll_option_fill(user_id, creds, account_id, entry_client_order_id, entry)
 
 
+def _settle_option_exit_order(
+    user_id: str,
+    creds: Dict[str, str],
+    account_id: str,
+    ticker: str,
+    entry: Dict[str, object],
+    *,
+    sell_client_order_id: str,
+    close_reason: str,
+    contracts: float,
+    premium_paid: float,
+    option_symbol: object,
+    strike: object,
+    expiration_date: object,
+    option_type: object,
+) -> bool:
+    """Poll one option exit sell. A still-working order returns False and
+    keeps option_exit_client_order_id so the next tick polls the same
+    order instead of placing another. A cancelled sell with zero fill
+    clears the id so the next tick may place a new attempt. Returns True
+    only once the sell is filled and the trade is recorded closed."""
+    filled_this_sell = 0.0
+    average_exit_price: Optional[float] = None
+    status = ""
+    for attempt in range(ENTRY_FILL_POLL_ATTEMPTS):
+        if attempt > 0:
+            time.sleep(ENTRY_FILL_POLL_INTERVAL_SECONDS)
+        try:
+            sell_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, sell_client_order_id)
+            sell_fill = ol.summarize_fill(sell_detail)
+        except Exception:  # noqa: BLE001 - transient lookup failure, try again next tick
+            continue
+        filled_this_sell = sell_fill["filled_quantity"]
+        average_exit_price = sell_fill.get("average_price")
+        status = sell_fill["status"]
+        if filled_this_sell >= contracts or _entry_fill_is_final(status):
+            break
+
+    if not (filled_this_sell >= contracts or (filled_this_sell > 0 and _entry_fill_is_final(status))):
+        if _entry_fill_is_final(status) and filled_this_sell <= 0:
+            entry["option_exit_client_order_id"] = None
+        return False
+
+    trade_id = str(entry.get("entry_client_order_id") or "")
+    pnl_complete = average_exit_price is not None and not entry.get("premium_paid_is_estimated")
+    gross_pnl = (
+        round(filled_this_sell * (average_exit_price - premium_paid) * 100, 2)
+        if pnl_complete else None
+    )
+    closed_record = {
+        "ticker": ticker,
+        "instrument_type": "OPTION",
+        "side": "BUY",
+        "option_symbol": option_symbol,
+        "strike": strike,
+        "expiration_date": expiration_date,
+        "option_type": option_type,
+        "entry_client_order_id": entry.get("entry_client_order_id"),
+        "exit_client_order_id": sell_client_order_id,
+        "requested_quantity": entry.get("quantity"),
+        "filled_quantity": contracts,
+        "premium_paid_per_contract": premium_paid,
+        "premium_paid_is_estimated": bool(entry.get("premium_paid_is_estimated")),
+        "exit_type": close_reason,
+        "exited_quantity": filled_this_sell,
+        "average_exit_price": average_exit_price,
+        "entry_timestamp": entry.get("logged_at"),
+        "exit_timestamp": _now_utc().isoformat(),
+        "gross_realized_pnl": gross_pnl,
+        "fees": None,
+        "net_realized_pnl": gross_pnl,
+        "pnl_status": "complete" if pnl_complete else "incomplete_missing_fill_price",
+        "strategy": entry.get("strategy"),
+        "close_reason": close_reason,
+        "broker_evidence": {"exited_leg_status": "app_monitored_option_exit"},
+        "reconciled_at": _now_utc().isoformat(),
+    }
+    _apply_broker_fees(creds, account_id, closed_record)
+    record_closed_trade(user_id, trade_id, closed_record)
+    maybe_trigger_real_outcomes_recalibration()
+    ol.transition(entry, ol.CLOSED, closed_trade_id=trade_id, close_reason=close_reason)
+    entry["option_exit_client_order_id"] = None
+    try:
+        if pnl_complete:
+            add_manual_alert(
+                user_id,
+                {
+                    "type": "position_closed",
+                    "ticker": ticker,
+                    "message": f"{ticker} {option_type} ${strike}: option position closed ({close_reason}, {filled_this_sell:g} contracts). Realized P&L: ${gross_pnl:.2f}.",
+                },
+            )
+        else:
+            add_manual_alert(
+                user_id,
+                {
+                    "type": "position_closed_pnl_incomplete",
+                    "ticker": ticker,
+                    "message": (
+                        f"{ticker} {option_type} ${strike}: option position closed ({close_reason}, {filled_this_sell:g} contracts), "
+                        "but realized P&L could not be computed - the entry premium was estimated and/or the exit fill price wasn't "
+                        "reported. Review this trade's actual fill prices manually."
+                    ),
+                },
+            )
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
 def _check_and_execute_option_exit(
     user_id: str,
     creds: Dict[str, str],
@@ -7587,6 +7901,18 @@ def _check_and_execute_option_exit(
     if not option_symbol or not strike or not expiration_date or not option_type or contracts <= 0 or not premium_paid:
         return False  # entry not fully initialized yet - shouldn't happen for PROTECTION_CONFIRMED_ACTIVE, fail closed
 
+    pending_id = str(entry.get("option_exit_client_order_id") or "")
+    if pending_id:
+        # A previous tick already sent the sell. Poll that order. Do not
+        # place another one while it is still working.
+        return _settle_option_exit_order(
+            user_id, creds, account_id, ticker, entry,
+            sell_client_order_id=pending_id,
+            close_reason=str(entry.get("option_exit_reason") or "option_exit"),
+            contracts=contracts, premium_paid=premium_paid, option_symbol=option_symbol,
+            strike=strike, expiration_date=expiration_date, option_type=option_type,
+        )
+
     try:
         snapshot_rows = webull_api.get_option_snapshot(creds["app_key"], creds["app_secret"], [option_symbol])
     except Exception:  # noqa: BLE001 - transient data fetch failure, try again next tick
@@ -7600,7 +7926,7 @@ def _check_and_execute_option_exit(
 
     autonomy_settings = get_autonomy_status(user_id)
     target_gain_pct = float(autonomy_settings.get("option_target_gain_percent") or 50.0) / 100.0
-    stop_loss_pct = float(autonomy_settings.get("option_stop_loss_percent") or 50.0) / 100.0
+    stop_loss_pct = float(autonomy_settings.get("option_stop_loss_percent") or 20.0) / 100.0
     close_days_before_expiration = int(autonomy_settings.get("option_close_days_before_expiration") or 3)
 
     target_value = premium_paid * (1 + target_gain_pct)
@@ -7624,7 +7950,12 @@ def _check_and_execute_option_exit(
 
     next_attempt = int(entry.get("exit_attempt") or 0) + 1
     entry["exit_attempt"] = next_attempt
+    entry["option_exit_reason"] = close_reason
     sell_client_order_id = ol.deterministic_client_order_id(user_id, ticker, trading_day, "option_exit", attempt=next_attempt)
+    # Stored before the broker call so a crash or an unfilled sell resumes
+    # on this id instead of placing a second SELL (which Webull rejects as
+    # a reverse position, and which used to stack a new order every tick).
+    entry["option_exit_client_order_id"] = sell_client_order_id
     # A marketable limit slightly below the live bid, mirroring the
     # equity target-exit's own slippage-tolerance approach for making a
     # closing sell reliably fillable rather than resting indefinitely.
@@ -7644,96 +7975,19 @@ def _check_and_execute_option_exit(
             client_order_id=sell_client_order_id,
             opens_position=False,  # option exit reduces risk - never blocked by live dollar caps
         )
-    except Exception as error:  # noqa: BLE001 - placement failed outright; nothing was cancelled first (unlike equity), so no unprotected window to restore - just retry next pass
+    except webull_api.AmbiguousOrderSubmission:
+        return False  # the id is already stored; the next tick polls it
+    except Exception as error:  # noqa: BLE001 - definite failure: nothing is resting, so the next tick may try a new attempt
+        entry["option_exit_client_order_id"] = None
         raise RuntimeError(f"option exit sell order failed for {ticker} ({close_reason}): {error} - will retry next pass")
 
-    filled_this_sell = 0.0
-    average_exit_price: Optional[float] = None
-    for attempt in range(ENTRY_FILL_POLL_ATTEMPTS):
-        if attempt > 0:
-            time.sleep(ENTRY_FILL_POLL_INTERVAL_SECONDS)
-        try:
-            sell_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, sell_client_order_id)
-            sell_fill = ol.summarize_fill(sell_detail)
-        except Exception:  # noqa: BLE001 - transient lookup failure, try again next attempt
-            continue
-        filled_this_sell = sell_fill["filled_quantity"]
-        average_exit_price = sell_fill.get("average_price")
-        if filled_this_sell >= contracts or _entry_fill_is_final(sell_fill["status"]):
-            break
-
-    if filled_this_sell <= 0:
-        raise RuntimeError(
-            f"option exit sell order for {ticker} has not filled yet after {ENTRY_FILL_POLL_ATTEMPTS} checks - will keep checking"
-        )
-
-    trade_id = str(entry.get("entry_client_order_id") or "")
-    pnl_complete = average_exit_price is not None and not entry.get("premium_paid_is_estimated")
-    # Long option P&L: (exit - entry) * contracts * 100 (the standard
-    # per-contract multiplier - see integrations/webull.py's
-    # get_option_contracts, which confirmed "multiplier": "100" live).
-    gross_pnl = (
-        round(filled_this_sell * (average_exit_price - premium_paid) * 100, 2)
-        if pnl_complete else None
+    return _settle_option_exit_order(
+        user_id, creds, account_id, ticker, entry,
+        sell_client_order_id=sell_client_order_id,
+        close_reason=close_reason,
+        contracts=contracts, premium_paid=premium_paid, option_symbol=option_symbol,
+        strike=strike, expiration_date=expiration_date, option_type=option_type,
     )
-    closed_record = {
-        "ticker": ticker,
-        "instrument_type": "OPTION",
-        "side": "BUY",
-        "option_symbol": option_symbol,
-        "strike": strike,
-        "expiration_date": expiration_date,
-        "option_type": option_type,
-        "entry_client_order_id": entry.get("entry_client_order_id"),
-        "exit_client_order_id": sell_client_order_id,
-        "requested_quantity": entry.get("quantity"),
-        "filled_quantity": contracts,
-        "premium_paid_per_contract": premium_paid,
-        "premium_paid_is_estimated": bool(entry.get("premium_paid_is_estimated")),
-        "exit_type": close_reason,
-        "exited_quantity": filled_this_sell,
-        "average_exit_price": average_exit_price,
-        "entry_timestamp": entry.get("logged_at"),
-        "exit_timestamp": _now_utc().isoformat(),
-        "gross_realized_pnl": gross_pnl,
-        "fees": None,
-        "net_realized_pnl": gross_pnl,
-        "pnl_status": "complete" if pnl_complete else "incomplete_missing_fill_price",
-        "strategy": entry.get("strategy"),
-        "close_reason": close_reason,
-        "broker_evidence": {"exited_leg_status": "app_monitored_option_exit"},
-        "reconciled_at": _now_utc().isoformat(),
-    }
-    _apply_broker_fees(creds, account_id, closed_record)
-    record_closed_trade(user_id, trade_id, closed_record)
-    maybe_trigger_real_outcomes_recalibration()
-    ol.transition(entry, ol.CLOSED, closed_trade_id=trade_id, close_reason=close_reason)
-    try:
-        if pnl_complete:
-            add_manual_alert(
-                user_id,
-                {
-                    "type": "position_closed",
-                    "ticker": ticker,
-                    "message": f"{ticker} {option_type} ${strike}: option position closed ({close_reason}, {filled_this_sell:g} contracts). Realized P&L: ${gross_pnl:.2f}.",
-                },
-            )
-        else:
-            add_manual_alert(
-                user_id,
-                {
-                    "type": "position_closed_pnl_incomplete",
-                    "ticker": ticker,
-                    "message": (
-                        f"{ticker} {option_type} ${strike}: option position closed ({close_reason}, {filled_this_sell:g} contracts), "
-                        "but realized P&L could not be computed - the entry premium was estimated and/or the exit fill price wasn't "
-                        "reported. Review this trade's actual fill prices manually."
-                    ),
-                },
-            )
-    except Exception:  # noqa: BLE001
-        pass
-    return True
 
 
 def _parse_trusted_past_timestamp(raw: object, *, now: datetime, default: datetime) -> datetime:
@@ -11069,7 +11323,7 @@ def api_event_trace(correlation_id: str):
 def _option_exit_settings(risk_settings: Dict[str, object]) -> Dict[str, object]:
     """The option exit rule exactly as _check_and_execute_option_exit applies it."""
     return {
-        "stop_loss_percent": float(risk_settings.get("option_stop_loss_percent") or 50.0),
+        "stop_loss_percent": float(risk_settings.get("option_stop_loss_percent") or 20.0),
         "target_gain_percent": float(risk_settings.get("option_target_gain_percent") or 50.0),
         "close_days_before_expiration": int(risk_settings.get("option_close_days_before_expiration") or 3),
     }
@@ -11394,7 +11648,11 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
     # not options. Found while investigating the OOM crashes that
     # repeatedly line up with this exact scan trigger's own GitHub Actions
     # run timestamps (see the Autonomous scan scheduler 502 failures).
-    context = _build_page_context(include_reversal=True, include_trend=True, include_options=False)
+    # Reversal/trend rows are not read anywhere in this scan, and building
+    # them pulls yfinance (analytics.py). The live decision path is the
+    # Alpaca-backed strategy/chart/extended-hours brains. Dashboard pages
+    # that display reversal and trend still request them.
+    context = _build_page_context(include_reversal=False, include_trend=False, include_options=False)
     opportunities = context.get("upcoming_opportunities", [])
 
     today_key = _trading_day_key()
@@ -13227,6 +13485,18 @@ def api_tradingview_webhook():
     # identifying information, so it has to double as both auth and the
     # lookup key for which user this alert belongs to.
     token = request.args.get("token", "")
+    # Render's proxy appends the connecting address LAST; earlier entries can be
+    # supplied by the client, so they are not trusted for throttling.
+    client_address = (request.headers.get("X-Forwarded-For") or request.remote_addr or "").split(",")[-1].strip()
+    import webhook_throttle
+    wait = webhook_throttle.retry_after(token, client_address)
+    if wait:
+        return _api_failure(
+            f"Too many webhook requests. Try again in {wait} seconds.",
+            status_code=429,
+            error_code="webhook_rate_limited",
+            ok=False,
+        )
     owner = find_user_by_webhook_token(token)
     if not owner or not verify_tradingview_token(owner["id"], token):
         return _api_failure(

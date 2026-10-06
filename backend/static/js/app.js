@@ -419,6 +419,7 @@ const bindScannerPage = () => {
             <td>${escapeHtml(row.relative_volume)}x</td>
             <td>${escapeHtml(row.volume)}</td>
             <td>${escapeHtml(row.scanner_score)}</td>
+            <td>${escapeHtml(row.qualification_reason || "—")}</td>
             <td>${escapeHtml(row.last_updated)}</td>
             <td>${row.on_watchlist ? "Tracked" : "Not tracked"}</td>
           </tr>`
@@ -429,6 +430,11 @@ const bindScannerPage = () => {
       const errors = document.getElementById("scannerErrors");
       if (errors instanceof HTMLElement) {
         errors.innerHTML = payload.errors?.length ? `<p class="error">${payload.errors.join(" | ")}</p>` : "";
+      }
+      const summary = payload.summary || {};
+      const summaryNode = document.getElementById("scannerSummary");
+      if (summaryNode && summary.universe_count) {
+        summaryNode.textContent = `Scanned ${summary.universe_count} symbols (${summary.universe_source || "list"}). ${summary.liquid_count || 0} passed the liquidity screen. Showing the top ${summary.shown_count || (payload.rows || []).length}. Strategy and charting still deep-analyze up to 6 of these per cycle (watchlist first, then this rank).`;
       }
       const liveBadge = document.getElementById("scannerLiveBadge");
       if (liveBadge) liveBadge.textContent = `Live updates every ${frequencySeconds}s · ${new Date().toLocaleTimeString()}`;
