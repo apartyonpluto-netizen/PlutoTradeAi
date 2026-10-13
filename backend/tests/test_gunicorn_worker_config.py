@@ -63,3 +63,13 @@ def test_procfile_and_render_yaml_start_commands_match():
         "Procfile and render.yaml's startCommand have drifted apart - "
         f"Procfile={commands['Procfile']!r} render.yaml={commands['render.yaml']!r}"
     )
+
+
+def test_deploys_are_gated_during_market_hours_and_shut_down_gracefully():
+    render_yaml_text = (REPO_ROOT / "render.yaml").read_text(encoding="utf-8")
+    assert "preDeployCommand: python backend/scripts/market_hours_deploy_gate.py" in render_yaml_text
+    assert "maxShutdownDelaySeconds: 90" in render_yaml_text
+    for command in _start_commands().values():
+        assert "--graceful-timeout 30" in command
+        assert "healthCheckPath" not in command
+    assert "healthCheckPath: /healthz" in render_yaml_text

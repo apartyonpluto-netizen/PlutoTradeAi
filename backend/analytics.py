@@ -4,7 +4,11 @@ from datetime import datetime, timezone
 from typing import Dict, List, Sequence, Tuple
 
 import pandas as pd
-import yfinance as yf
+
+try:
+    from .integrations import alpaca_data
+except ImportError:
+    from integrations import alpaca_data
 
 
 def _safe_price(value: float) -> float:
@@ -67,7 +71,7 @@ def _candle_reversal_signal(history: pd.DataFrame, support: float, resistance: f
 
 
 def fetch_price_history(ticker: str, period: str = "3mo", interval: str = "1d") -> pd.DataFrame:
-    history = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=False)
+    history = alpaca_data.get_bars_single(ticker, period=period, interval=interval)
     return history[["Open", "High", "Low", "Close", "Volume"]].dropna(how="all") if not history.empty else history
 
 

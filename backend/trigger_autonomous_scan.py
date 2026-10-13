@@ -59,6 +59,7 @@ Required environment variables:
 
 import os
 import sys
+import time
 
 import requests
 
@@ -66,24 +67,38 @@ from observability import cron_checkin, init_sentry
 
 CRON_SCHEDULE = "*/5 13-21 * * 1-5"  # keep identical to the schedule in render.yaml
 REQUEST_TIMEOUT_SECONDS = 120.0  # cron-trigger processes every registered user sequentially - generous on purpose
+# Connection errors and 502/503/504 are what a disk-backed deploy looks like
+# to this cron. A couple of waits cover a short restart; a real outage still
+# fails the job. Auth failures are not retried.
+_DEPLOY_GAP_SLEEPS = (2, 4)
 
 
 def _post(label: str, url: str, secret: str) -> bool:
     """POSTs to one endpoint and returns whether it succeeded (HTTP 200),
     printing enough for Render's own log viewer to diagnose a failure
     without needing to reproduce it."""
-    try:
-        response = requests.post(url, headers={"X-Cron-Secret": secret}, timeout=REQUEST_TIMEOUT_SECONDS)
-    except requests.exceptions.RequestException as error:
-        print(f"{label}: request failed: {error}", file=sys.stderr)
-        return False
-
-    print(f"{label}: HTTP status {response.status_code}")
-    print(response.text[:2000])
-    if response.status_code != 200:
-        print(f"{label}: failed with status {response.status_code}", file=sys.stderr)
-        return False
-    return True
+    attempts = len(_DEPLOY_GAP_SLEEPS) + 1
+    for attempt in range(attempts):
+        try:
+            response = requests.post(url, headers={"X-Cron-Secret": secret}, timeout=REQUEST_TIMEOUT_SECONDS)
+        except requests.exceptions.RequestException as error:
+            if attempt < attempts - 1:
+                print(f"{label}: request failed ({error}); retrying", file=sys.stderr)
+                time.sleep(_DEPLOY_GAP_SLEEPS[attempt])
+                continue
+            print(f"{label}: request failed: {error}", file=sys.stderr)
+            return False
+        if response.status_code in (502, 503, 504) and attempt < attempts - 1:
+            print(f"{label}: HTTP status {response.status_code}; retrying", file=sys.stderr)
+            time.sleep(_DEPLOY_GAP_SLEEPS[attempt])
+            continue
+        print(f"{label}: HTTP status {response.status_code}")
+        print(response.text[:2000])
+        if response.status_code != 200:
+            print(f"{label}: failed with status {response.status_code}", file=sys.stderr)
+            return False
+        return True
+    return False
 
 
 def main() -> int:

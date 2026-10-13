@@ -2,11 +2,11 @@
 
 What this protects against: a corrupted or wrongly rewritten file, a bad
 deploy, an accidental deletion - anything that damages records while the
-disk itself survives. What it does NOT protect against: loss of the disk.
-For that an admin downloads a snapshot (Admin -> Backups) and keeps it
-elsewhere; off-site storage would need infrastructure the owner has not
-authorized. Restores are manual and documented in docs/RUNBOOK_BACKUP_RESTORE.md
-- there is deliberately no endpoint that overwrites live records.
+disk itself survives. Loss of the disk is a separate path: when
+PLUTO_BACKUP_S3_* is set, offsite_backup.py uploads each snapshot this
+module creates. Restores are manual and documented in
+docs/RUNBOOK_BACKUP_RESTORE.md and docs/DURABLE_STORAGE.md - there is
+deliberately no endpoint that overwrites live records.
 
 Snapshots contain credentials only in their encrypted form (see
 docs/SECURITY.md); treat downloaded files as sensitive anyway."""

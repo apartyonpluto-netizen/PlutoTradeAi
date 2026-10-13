@@ -648,12 +648,6 @@ def _log_response(response):
     return response
 
 
-@app.route("/service-worker.js")
-def service_worker():
-    # Served from the root (not /static/) so its default scope covers the
-    # whole app - a service worker's scope is limited to the directory it's
-    # served from unless explicitly widened.
-    return send_from_directory(app.static_folder, "service-worker.js", mimetype="application/javascript")
 
 
 _PUBLIC_PATHS = {"/login", "/register", "/logout", "/forgot-password", "/service-worker.js", "/healthz", "/api/autonomy/monitor-health"}
@@ -717,108 +711,14 @@ def _require_login():
     return redirect(url_for("login_page", next=path))
 
 
-@app.route("/login", methods=["GET", "POST"])
-def login_page():
-    if request.method == "GET":
-        if session.get("user_id") and get_user_by_id(session["user_id"]):
-            return redirect(url_for("dashboard_page"))
-        return render_template("login.html", error="", next_path=request.args.get("next", ""))
-
-    username = request.form.get("username", "")
-    password = request.form.get("password", "")
-    next_path = login_throttle.safe_next_path(request.form.get("next", "") or "") or ""
-    # Render's proxy appends the connecting address LAST; earlier entries can be
-    # supplied by the client, so they are not trusted for throttling.
-    client_address = (request.headers.get("X-Forwarded-For") or request.remote_addr or "").split(",")[-1].strip()
-    wait = login_throttle.blocked_for(username, client_address)
-    if wait:
-        return render_template("login.html", error=f"Too many failed sign-in attempts. Try again in {max(1, wait // 60)} minute(s).",
-                               next_path=next_path), 429
-    user = authenticate_user(username, password)
-    if not user:
-        login_throttle.record_failure(username, client_address)
-        return render_template("login.html", error="Incorrect username or password.", next_path=next_path), 401
-    login_throttle.record_success(username)
-    if not user.get("approved", True):
-        return render_template("login.html", error="Your account is still pending admin approval.", next_path=next_path), 403
-    if user.get("suspended", False):
-        return render_template("login.html", error="This account has been suspended.", next_path=next_path), 403
-
-    session["user_id"] = user["id"]
-    session.permanent = True
-    target = next_path or url_for("dashboard_page")
-    return redirect(target)
 
 
-@app.route("/register", methods=["GET", "POST"])
-def register_page():
-    # Registration stays open for the very first account regardless of the
-    # setting (there'd be no admin yet to have configured it, and no admin
-    # to approve anyone in), and only blocks signups after that.
-    registration_open = get_global_settings()["registration_open"] or not list_all_user_ids()
-    if request.method == "GET":
-        if session.get("user_id") and get_user_by_id(session["user_id"]):
-            return redirect(url_for("dashboard_page"))
-        if not registration_open:
-            return render_template("register.html", error="Registration is currently closed."), 403
-        return render_template("register.html", error="")
-
-    if not registration_open:
-        return render_template("register.html", error="Registration is currently closed."), 403
-
-    username = request.form.get("username", "")
-    password = request.form.get("password", "")
-    confirm_password = request.form.get("confirm_password", "")
-    if password != confirm_password:
-        return render_template("register.html", error="Passwords do not match."), 400
-    try:
-        user = register_user(username, password)
-    except ValueError as error:
-        return render_template("register.html", error=str(error)), 400
-
-    if not user.get("approved", True):
-        return render_template(
-            "login.html",
-            error="Account created. An admin needs to approve it before you can sign in.",
-            next_path="",
-        )
-
-    session["user_id"] = user["id"]
-    session.permanent = True
-    return redirect(url_for("dashboard_page"))
 
 
-@app.route("/forgot-password", methods=["GET", "POST"])
-def forgot_password_page():
-    if request.method == "GET":
-        return render_template("forgot_password.html", error="", success="")
-
-    username = request.form.get("username", "")
-    password = request.form.get("password", "")
-    confirm_password = request.form.get("confirm_password", "")
-    if password != confirm_password:
-        return render_template("forgot_password.html", error="Passwords do not match.", success=""), 400
-    try:
-        reset_password(username, password)
-    except ValueError as error:
-        return render_template("forgot_password.html", error=str(error), success=""), 400
-
-    return render_template("forgot_password.html", error="", success="Password updated. You can sign in now.")
 
 
-@app.route("/healthz")
-def healthz():
-    """Unauthenticated liveness check for the hosting platform's health probe -
-    intentionally does nothing but confirm the process is up and can render a
-    response, no auth/DB/broker calls that could make a slow dependency look
-    like a dead app."""
-    return {"status": "ok"}, 200
 
 
-@app.route("/logout", methods=["POST"])
-def logout_page():
-    session.pop("user_id", None)
-    return redirect(url_for("login_page"))
 
 
 def _current_user_id() -> str:
@@ -832,745 +732,58 @@ def _require_admin():
     return None
 
 
-@app.route("/admin")
-def admin_page():
-    if not is_admin(_current_user_id()):
-        return redirect(url_for("dashboard_page"))
-    # include_market_scan=False, include_opportunities=False - admin.html
-    # doesn't render scanner_rows/upcoming_opportunities/mission_queue, so
-    # this page was paying the full market-scan + per-ticker
-    # strategy/chart/options pipeline (confirmed unused by grepping the
-    # template) for nothing. Same pattern as the /daily-digest and
-    # /performance fix.
-    context = _build_page_context(include_market_scan=False, include_opportunities=False)
-    context["pending_users"] = list_pending_users()
-    context["all_users"] = list_all_users()
-    context["current_user_id"] = _current_user_id()
-    context["global_settings"] = get_global_settings()
-    context["calibration"] = get_calibration()
-    pending_ambiguous: List[Dict[str, object]] = []
-    position_absent: List[Dict[str, object]] = []
-    for user in context["all_users"]:
-        target_user_id = user.get("id", "")
-        if not target_user_id:
-            continue
-        # Broker close evidence from the latest read-only reconciliation, by record.
-        close_evidence: Dict[str, List[Dict[str, object]]] = {}
-        latest_sync = broker_reconciliation.load(target_user_id).get("latest") or {}
-        for item in latest_sync.get("items") or []:
-            for record_id in item.get("record_ids") or []:
-                if item.get("broker_close_evidence"):
-                    close_evidence[str(record_id)] = item["broker_close_evidence"]
-        for order in list_overnight_orders(target_user_id):
-            row = {**order, "user_id": target_user_id, "username": user.get("username", ""),
-                   "broker_close_evidence": close_evidence.get(str(order.get("record_id") or order.get("entry_client_order_id") or ""), []),
-                   "broker_checked_at": latest_sync.get("checked_at")}
-            if order.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE:
-                pending_ambiguous.append(row)
-            if order.get("position_absent_unexplained") and order.get("lifecycle_state") in (ol.PROTECTION_FAILED, ol.PROTECTION_CONFIRMED_ACTIVE):
-                position_absent.append(row)
-    context["pending_ambiguous_submissions"] = pending_ambiguous
-    # The UI for _resolve_position_absent_reconciliation, which had only an
-    # API route. Records here block their ticker from new entries
-    # (tickers_with_open_positions) until a human closes them.
-    context["position_absent_entries"] = position_absent
-    return render_template("admin.html", **context)
-
-
-@app.route("/admin/users/<user_id>")
-def admin_user_activity_page(user_id: str):
-    """Read-only view of another user's trading activity - no trade-affecting
-    actions live here, so an admin can help debug a friend's setup without
-    ever being able to place/close a trade on their behalf."""
-    if not is_admin(_current_user_id()):
-        return redirect(url_for("dashboard_page"))
-    target_user = get_user_by_id(user_id)
-    if not target_user:
-        return redirect(url_for("admin_page"))
-    # Base chrome (sidebar/topbar) reflects the admin's own session as usual;
-    # only the page body below shows the target user's data.
-    # include_market_scan=False, include_opportunities=False - same reason
-    # as admin_page: admin_user_activity.html never renders scanner_rows or
-    # opportunities data.
-    context = _build_page_context(include_market_scan=False, include_opportunities=False)
-    context.update(
-        {
-            "target_user": public_user(target_user),
-            "accounts": get_accounts(user_id),
-            "webull_balance": _get_live_webull_balance(user_id, force_refresh=True),
-            "webull_positions": _get_live_webull_positions(user_id, force_refresh=True),
-            "autonomy_status": get_autonomy_status(user_id),
-            "paper_summary": get_paper_trade_summary(user_id),
-        }
-    )
-    return render_template("admin_user_activity.html", **context)
-
-
-@app.route("/api/admin/readiness")
-def api_admin_readiness():
-    """Admin-only "is this safe to run?" report - see readiness.py. Read-only: it never arms live
-    trading and never places an order. The market-data probe makes one small Alpaca request."""
-    guard = _require_admin()
-    if guard:
-        return guard
-    user_id = _current_user_id()
-    try:
-        creds = get_webull_credentials(user_id)
-        webull_connected = bool(creds and creds.get("app_key") and creds.get("app_secret"))
-    except Exception:  # noqa: BLE001 - unreadable credentials just means "not connected" here
-        webull_connected = False
-    report = build_readiness_report(
-        fast_monitor=_fast_monitor_health_status(),
-        full_scan=_full_scan_health_status(),
-        continuous_monitor=_continuous_monitor_health_status(),
-        data_probe=alpaca_data.probe_latest_trade,
-        emergency_stop_enabled=bool(get_autonomy_status(user_id).get("emergency_stop_enabled")),
-        webull_connected=webull_connected,
-        sentry_active=observability_active(),
-    )
-    return _api_success(report)
-
-
-@app.route("/api/admin/setups/validation", methods=["GET", "POST"])
-def api_admin_setup_validation():
-    """GET: status of the historical setup validation. POST: start a run over
-    the scan universe (background, read-only market data)."""
-    guard = _require_admin()
-    if guard:
-        return guard
-    if request.method == "POST":
-        return _api_success({"run": setups_service.start_validation(list(CORE_SCAN_UNIVERSE), reason=f"manual ({_current_user_id()})"),
-                             "status": setups_service.validation_status()})
-    return _api_success({"status": setups_service.validation_status()})
-
-
-@app.route("/api/admin/backups", methods=["GET", "POST"])
-def api_admin_backups():
-    """GET: snapshots on disk. POST: take one now. Restores are manual (see
-    docs/RUNBOOK_BACKUP_RESTORE.md) - nothing here overwrites records."""
-    guard = _require_admin()
-    if guard:
-        return guard
-    created = backups.create(f"manual ({_current_user_id()})") if request.method == "POST" else None
-    return _api_success({"created": created, "backups": backups.list_backups(), "keep": backups.KEEP})
-
-
-@app.route("/api/admin/backups/<name>/verify", methods=["GET"])
-def api_admin_backup_verify(name: str):
-    guard = _require_admin()
-    if guard:
-        return guard
-    return _api_success(backups.verify(name))
-
-
-@app.route("/api/admin/backups/<name>/download", methods=["GET"])
-def api_admin_backup_download(name: str):
-    guard = _require_admin()
-    if guard:
-        return guard
-    path = backups.path_for(name)
-    if path is None:
-        return _api_failure("No such backup.", status_code=404, error_code="not_found", ok=False)
-    return send_file(path, as_attachment=True, download_name=path.name, mimetype="application/gzip")
-
-
-@app.route("/api/admin/approve-user", methods=["POST"])
-def api_admin_approve_user():
-    guard = _require_admin()
-    if guard:
-        return guard
-    payload = request.get_json(silent=True) or {}
-    try:
-        approve_user(payload.get("user_id", ""))
-    except ValueError as error:
-        return _api_failure(str(error), status_code=400, error_code="not_found", ok=False)
-    return _api_success({}, ok=True)
-
-
-@app.route("/api/admin/reject-user", methods=["POST"])
-def api_admin_reject_user():
-    guard = _require_admin()
-    if guard:
-        return guard
-    payload = request.get_json(silent=True) or {}
-    try:
-        reject_user(payload.get("user_id", ""))
-    except ValueError as error:
-        return _api_failure(str(error), status_code=400, error_code="not_found", ok=False)
-    return _api_success({}, ok=True)
-
-
-@app.route("/api/admin/set-role", methods=["POST"])
-def api_admin_set_role():
-    guard = _require_admin()
-    if guard:
-        return guard
-    payload = request.get_json(silent=True) or {}
-    try:
-        user = set_user_role(payload.get("user_id", ""), payload.get("role", ""))
-    except ValueError as error:
-        return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
-    return _api_success(public_user(user), ok=True)
-
-
-@app.route("/api/admin/set-suspended", methods=["POST"])
-def api_admin_set_suspended():
-    guard = _require_admin()
-    if guard:
-        return guard
-    payload = request.get_json(silent=True) or {}
-    try:
-        user = set_user_suspended(payload.get("user_id", ""), bool(payload.get("suspended", False)))
-    except ValueError as error:
-        return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
-    return _api_success(public_user(user), ok=True)
-
-
-@app.route("/api/admin/delete-user", methods=["POST"])
-def api_admin_delete_user():
-    guard = _require_admin()
-    if guard:
-        return guard
-    payload = request.get_json(silent=True) or {}
-    try:
-        delete_user_account(payload.get("user_id", ""))
-    except ValueError as error:
-        return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
-    return _api_success({}, ok=True)
-
-
-@app.route("/api/admin/reset-user-password", methods=["POST"])
-def api_admin_reset_user_password():
-    guard = _require_admin()
-    if guard:
-        return guard
-    payload = request.get_json(silent=True) or {}
-    try:
-        admin_reset_user_password(payload.get("user_id", ""), payload.get("new_password", ""))
-    except ValueError as error:
-        return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
-    return _api_success({}, ok=True)
-
-
-@app.route("/api/admin/recalibrate-strategies", methods=["POST"])
-def api_admin_recalibrate_strategies():
-    """Runs the walk-forward backtest across the scan universe in a
-    background thread and measures each named strategy's real historical
-    win rate, so strategy_brain's confidence scores can be nudged by
-    evidence instead of trusting the hand-tuned formulas blindly. Can take
-    several minutes - the route returns immediately, the UI polls
-    /api/admin/calibration-status for progress.
-
-    Also refreshes the real-outcomes multiplier (this deployment's own
-    closed trades - see calibration.recalibrate_from_real_outcomes) inline,
-    synchronously - unlike the backtest above, that's a fast local-JSON
-    aggregation with no network calls, so it doesn't need the same
-    background-thread treatment. This is "the existing manual admin
-    trigger" the real-outcomes plan calls for keeping, now refreshing both
-    sources with the one button rather than needing a second endpoint."""
-    guard = _require_admin()
-    if guard:
-        return guard
-    payload = request.get_json(silent=True) or {}
-    tickers = payload.get("tickers") or CORE_SCAN_UNIVERSE
-    try:
-        result = start_calibration(
-            tickers,
-            lookback_months=int(payload.get("lookback_months", 6)),
-            hold_days=int(payload.get("hold_days", 5)),
-            min_confidence=int(payload.get("min_confidence", 55)),
-        )
-    except ValueError as error:
-        return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
-    try:
-        recalibrate_from_real_outcomes()
-    except Exception:  # noqa: BLE001 - a real-outcomes recompute failure must not block the backtest trigger above
-        pass
-    return _api_success(result, ok=True)
-
-
-@app.route("/api/admin/calibration-status", methods=["GET"])
-def api_admin_calibration_status():
-    guard = _require_admin()
-    if guard:
-        return guard
-    return _api_success(get_calibration(), ok=True)
-
-
-@app.route("/api/admin/global-settings", methods=["GET", "POST"])
-def api_admin_global_settings():
-    guard = _require_admin()
-    if guard:
-        return guard
-    if request.method == "GET":
-        return _api_success(get_global_settings(), ok=True)
-    payload = request.get_json(silent=True) or {}
-    try:
-        settings = update_global_settings(payload)
-    except ValueError as error:
-        return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
-    return _api_success(settings, ok=True)
-
-
-@app.route("/api/admin/ambiguous-submissions", methods=["GET"])
-def api_admin_list_ambiguous_submissions():
-    """Every entry, across every user, currently stuck in
-    UNKNOWN_SUBMISSION_STATE - the admin-facing view of exactly what's
-    freezing autonomous entries for each affected account, and the only
-    entry point to _resolve_ambiguous_submission."""
-    guard = _require_admin()
-    if guard:
-        return guard
-    pending: List[Dict[str, object]] = []
-    for user in list_all_users():
-        target_user_id = user.get("id", "")
-        if not target_user_id:
-            continue
-        for order in list_overnight_orders(target_user_id):
-            if order.get("lifecycle_state") == ol.UNKNOWN_SUBMISSION_STATE:
-                pending.append({**order, "user_id": target_user_id, "username": user.get("username", "")})
-    return _api_success({"pending": pending}, ok=True, pending=pending)
-
-
-@app.route("/api/admin/stuck-monitor-entries", methods=["GET"])
-def api_admin_list_stuck_monitor_entries():
-    """Every entry, across every user, that the fast/continuous monitor has
-    made no forward progress on since monitor_first_failure_at was first
-    stamped (see _record_monitor_attempt) - includes entries that haven't
-    yet crossed MONITOR_STUCK_FREEZE_SECONDS as useful early-warning
-    context, each flagged via is_causing_freeze for whether it's actually
-    the reason _has_stuck_transitional_orders_locally is currently blocking
-    new autonomous entries for that account.
-
-    Found live 2026-08-31: _alert_if_entry_newly_stuck's own alert is
-    DELIBERATELY a fixed, no-detail message (ticker + entry id only, no
-    error text) so add_manual_alert's content-hash dedup keeps it one-shot
-    per entry rather than re-firing (and spamming) every ~10s tick with a
-    possibly-different error string - see that function's own docstring.
-    That left no admin-visible way to see monitor_last_error, the actual
-    reason recovery couldn't be confirmed - the exact same opacity gap
-    _resolve_ambiguous_submission's evidence errors already had until they
-    were fixed to surface the real per-check error text (see that
-    endpoint's own history). This read-only endpoint closes the same gap
-    for this different freeze - it does not resolve or unfreeze anything;
-    recovery is still only genuine forward progress on the entry itself, or
-    direct manual intervention, per _alert_if_entry_newly_stuck's contract."""
-    guard = _require_admin()
-    if guard:
-        return guard
-    now = _now_utc()
-    stuck: List[Dict[str, object]] = []
-    for user in list_all_users():
-        target_user_id = user.get("id", "")
-        if not target_user_id:
-            continue
-        for order in list_overnight_orders(target_user_id):
-            # Same fix as _has_stuck_transitional_orders_locally (found
-            # live 2026-09-01, same day) - monitor_first_failure_at is
-            # never cleared by resolving an entry through a different path
-            # (e.g. CLOSED via _resolve_position_absent_reconciliation), so
-            # without this an entry stays listed here forever after it's
-            # actually fully resolved.
-            if not ol.is_transitional(order):
-                continue
-            stuck_since_raw = order.get("monitor_first_failure_at")
-            if not stuck_since_raw:
-                continue
-            stuck_since = _parse_trusted_past_timestamp(stuck_since_raw, now=now, default=now)
-            stuck_seconds = (now - stuck_since).total_seconds()
-            stuck.append(
-                {
-                    "user_id": target_user_id,
-                    "username": user.get("username", ""),
-                    "ticker": order.get("ticker", ""),
-                    "entry_client_order_id": order.get("entry_client_order_id", ""),
-                    "lifecycle_state": order.get("lifecycle_state", ""),
-                    "monitor_first_failure_at": stuck_since_raw,
-                    "stuck_seconds": stuck_seconds,
-                    "is_causing_freeze": stuck_seconds >= MONITOR_STUCK_FREEZE_SECONDS,
-                    "monitor_attempt_count": order.get("monitor_attempt_count", 0),
-                    "monitor_last_error": order.get("monitor_last_error"),
-                    "monitor_last_attempt_at": order.get("monitor_last_attempt_at"),
-                    # order["error"] is a DIFFERENT field than monitor_last_error -
-                    # stamped by ol.transition itself (see e.g.
-                    # _confirm_and_finalize_protection's own PROTECTION_FAILED
-                    # transition), which can fail silently from
-                    # monitor_last_error's perspective (no exception raised,
-                    # just an internal poll that never confirmed) while still
-                    # leaving a real, useful description here.
-                    "lifecycle_error": order.get("error"),
-                    "stop_client_order_id": order.get("stop_client_order_id"),
-                    "stop_leg_quantity": order.get("stop_leg_quantity"),
-                    "filled_quantity": order.get("filled_quantity"),
-                }
-            )
-    return _api_success({"stuck": stuck}, ok=True, stuck=stuck)
-
-
-@app.route("/api/admin/diagnostic/sandbox-accounts", methods=["GET"])
-def api_admin_diagnostic_sandbox_accounts():
-    """Read-only: the RAW list of every Webull sandbox account these API
-    credentials expose, not just the single INDIVIDUAL_CASH one
-    find_individual_cash_account picks out for every real trading code
-    path in this app. Built to answer a real question live (2026-09-01):
-    the entire autonomous PUT/short-entry path is blocked by
-    OPENAPI_GENERATE_NEW_SHORT_POSITION because that one account's
-    account_class is INDIVIDUAL_CASH - but that says nothing about
-    whether these SAME credentials also expose a second, margin-class
-    sandbox account this app has simply never looked at (every call site
-    filters straight to the cash one). Small and permanent, matching
-    order-detail's own precedent, rather than a one-off temporary
-    diagnostic - "what accounts do these credentials actually have" is a
-    reasonable thing to want to check again later."""
-    guard = _require_admin()
-    if guard:
-        return guard
-    target_user_id = str(request.args.get("user_id", "") or _current_user_id())
-    creds = get_webull_credentials(target_user_id)
-    try:
-        accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
-    except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than crash
-        return _api_failure(f"get_paper_accounts failed: {error}", status_code=502, error_code="broker_error", ok=False)
-    # Best-effort balance per account - a single account's balance lookup
-    # failing (e.g. a FUTURES/CRYPTO account this app's get_account_balance
-    # was never written to parse) must not hide the other accounts' real
-    # answers, so each failure is captured inline rather than aborting the
-    # whole response.
-    for account in accounts:
-        account_id = account.get("account_id")
-        if not account_id:
-            continue
-        try:
-            account["balance"] = webull_api.get_account_balance(creds["app_key"], creds["app_secret"], account_id)
-        except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than hide
-            account["balance_error"] = str(error)
-    return _api_success({"accounts": accounts, "count": len(accounts)}, ok=True)
-
-
-@app.route("/api/admin/diagnostic/preview-short-sell", methods=["POST"])
-def api_admin_diagnostic_preview_short_sell():
-    """TEMPORARY - remove once real short selling on the INDIVIDUAL_MARGIN
-    sandbox account is either verified and adopted for real, or ruled
-    out (same removal condition as the earlier combo-order diagnostic,
-    d5c3c1a/38a0c8b).
-
-    Found live 2026-09-01: these sandbox credentials expose a second,
-    INDIVIDUAL_MARGIN account (see /api/admin/diagnostic/sandbox-accounts,
-    3bcb336/40f9fe7) with real (paper) buying power, alongside the
-    INDIVIDUAL_CASH one every real trading code path uses today - the one
-    whose account_class rejected a short-generating order outright with
-    OPENAPI_GENERATE_NEW_SHORT_POSITION. Before building the real
-    entry/stop/target/monitor/P&L machinery a genuine PUT/short feature
-    needs, this answers ONE narrow question with real broker evidence
-    instead of an assumption: does Webull's own preview_order endpoint
-    (validates the exact request shape and returns accept/reject like a
-    real placement would, but never executes an order or touches
-    capital - same mechanism already used once this session to rule out
-    combo/bracket orders) accept a SELL order for a ticker with no
-    existing long position, against the MARGIN account specifically.
-
-    Body: {"symbol": "AAPL", "quantity": 1, "limit_price": 100.0}
-    (all optional - sane small defaults below) and optional
-    "account_id"/"user_id" overrides for testing against a specific
-    account/user other than the live margin account discovered above."""
-    guard = _require_admin()
-    if guard:
-        return guard
-    payload = request.get_json(silent=True) or {}
-    target_user_id = str(payload.get("user_id", "") or _current_user_id())
-    creds = get_webull_credentials(target_user_id)
-    account_id = str(payload.get("account_id", "") or "")
-    if not account_id:
-        try:
-            accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
-        except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than crash
-            return _api_failure(f"get_paper_accounts failed: {error}", status_code=502, error_code="broker_error", ok=False)
-        margin_account = next((a for a in accounts if a.get("account_class") == "INDIVIDUAL_MARGIN"), None)
-        if not margin_account:
-            return _api_failure("No INDIVIDUAL_MARGIN account found on this user's sandbox credentials.", status_code=404, error_code="not_found", ok=False)
-        account_id = margin_account["account_id"]
-
-    symbol = str(payload.get("symbol", "AAPL") or "AAPL")
-    quantity = float(payload.get("quantity", 1) or 1)
-    limit_price = float(payload.get("limit_price", 100.0) or 100.0)
-    try:
-        result = webull_api.preview_stock_order(
-            creds["app_key"], creds["app_secret"], account_id,
-            symbol=symbol, side="SELL", quantity=quantity, limit_price=limit_price,
-        )
-    except Exception as error:  # noqa: BLE001 - diagnostic-only, the whole point is seeing what the broker actually said
-        return _api_success({"classification": "rejected_or_errored", "detail": str(error), "account_id": account_id}, ok=True)
-    return _api_success({"classification": "accepted", "raw": result, "account_id": account_id}, ok=True)
-
-
-@app.route("/api/admin/diagnostic/preview-raw-order", methods=["POST"])
-def api_admin_diagnostic_preview_raw_order():
-    """TEMPORARY - same removal condition as preview-short-sell above.
-    Verifies order SHAPES this app has never empirically confirmed before
-    wiring them into real placement code for the short-selling feature -
-    specifically a BUY-side STOP_LOSS (a "buy-stop", used to cover a
-    short position on a rise - place_stop_loss_order today only ever
-    places SELL-side) and a BUY-side LIMIT (the eventual short target-
-    exit cover). Genuinely a dry-run preview (webull_api.preview_raw_order -
-    same preview_order endpoint, never executes an order or touches
-    capital) against an arbitrary, caller-constructed order dict, so it
-    isn't limited to preview_stock_order's fixed LIMIT-only shape.
-
-    Body: {"order": {...}} - the raw order dict to preview (account_id/
-    user_id resolve the margin account the same way preview-short-sell
-    does, unless "account_id" is also given directly)."""
-    guard = _require_admin()
-    if guard:
-        return guard
-    payload = request.get_json(silent=True) or {}
-    order = payload.get("order")
-    if not isinstance(order, dict) or not order:
-        return _api_failure("order (a non-empty object) is required.", status_code=400, error_code="invalid_request", ok=False)
-    target_user_id = str(payload.get("user_id", "") or _current_user_id())
-    creds = get_webull_credentials(target_user_id)
-    account_id = str(payload.get("account_id", "") or "")
-    if not account_id:
-        try:
-            accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
-        except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than crash
-            return _api_failure(f"get_paper_accounts failed: {error}", status_code=502, error_code="broker_error", ok=False)
-        margin_account = next((a for a in accounts if a.get("account_class") == "INDIVIDUAL_MARGIN"), None)
-        if not margin_account:
-            return _api_failure("No INDIVIDUAL_MARGIN account found on this user's sandbox credentials.", status_code=404, error_code="not_found", ok=False)
-        account_id = margin_account["account_id"]
-
-    try:
-        result = webull_api.preview_raw_order(creds["app_key"], creds["app_secret"], account_id, order)
-    except Exception as error:  # noqa: BLE001 - diagnostic-only, the whole point is seeing what the broker actually said
-        return _api_success({"classification": "rejected_or_errored", "detail": str(error), "account_id": account_id}, ok=True)
-    return _api_success({"classification": "accepted", "raw": result, "account_id": account_id}, ok=True)
-
-
-@app.route("/api/admin/diagnostic/option-contracts", methods=["GET"])
-def api_admin_diagnostic_option_contracts():
-    """Read-only, permanent (same precedent as sandbox-accounts above -
-    "what option contracts does the broker actually list for this ticker"
-    is a reasonable thing to want to check again later, not a one-off).
-    Built 2026-09-03 as the first empirical step of real options trading:
-    confirms the REAL response shape of Webull's own option chain
-    (DataClient.instrument.get_option_contracts) against the sandbox before
-    any contract-selection logic is written to assume particular field
-    names exist.
-
-    Query params: ticker (required), option_type (CALL/PUT, optional),
-    days_out (expiration window upper bound, default 21), user_id
-    (optional, defaults to the caller)."""
-    guard = _require_admin()
-    if guard:
-        return guard
-    ticker = str(request.args.get("ticker", "") or "").strip().upper()
-    if not ticker:
-        return _api_failure("ticker is required.", status_code=400, error_code="invalid_request", ok=False)
-    option_type = str(request.args.get("option_type", "") or "").strip().upper() or None
-    try:
-        days_out = int(request.args.get("days_out", 21))
-    except (TypeError, ValueError):
-        days_out = 21
-    target_user_id = str(request.args.get("user_id", "") or _current_user_id())
-    creds = get_webull_credentials(target_user_id)
-    start_date = _now_utc().date().isoformat()
-    end_date = (_now_utc().date() + timedelta(days=days_out)).isoformat()
-    try:
-        contracts = webull_api.get_option_contracts(
-            creds["app_key"], creds["app_secret"], ticker,
-            option_type=option_type, start_date=start_date, end_date=end_date,
-        )
-    except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than crash
-        return _api_failure(f"get_option_contracts failed: {error}", status_code=502, error_code="broker_error", ok=False)
-    return _api_success({"ticker": ticker, "start_date": start_date, "end_date": end_date, "contracts": contracts, "count": len(contracts)}, ok=True)
-
-
-@app.route("/api/admin/diagnostic/option-snapshot", methods=["GET"])
-def api_admin_diagnostic_option_snapshot():
-    """Read-only, permanent (same precedent as option-contracts above).
-    Confirms the real DataClient.option_market_data.get_option_snapshot
-    response shape (bid/ask/last field names) against the sandbox before
-    autonomy/options_selector.py's liquidity check or any premium-based
-    limit pricing assumes a particular key exists.
-
-    Query params: symbols (comma-separated option contract symbols,
-    required, e.g. ADBE260918C00420000), user_id (optional)."""
-    guard = _require_admin()
-    if guard:
-        return guard
-    symbols_raw = str(request.args.get("symbols", "") or "").strip()
-    if not symbols_raw:
-        return _api_failure("symbols is required.", status_code=400, error_code="invalid_request", ok=False)
-    symbols = [s.strip() for s in symbols_raw.split(",") if s.strip()]
-    target_user_id = str(request.args.get("user_id", "") or _current_user_id())
-    creds = get_webull_credentials(target_user_id)
-    try:
-        snapshot = webull_api.get_option_snapshot(creds["app_key"], creds["app_secret"], symbols)
-    except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than crash
-        return _api_failure(f"get_option_snapshot failed: {error}", status_code=502, error_code="broker_error", ok=False)
-    return _api_success({"symbols": symbols, "snapshot": snapshot}, ok=True)
-
-
-@app.route("/api/admin/diagnostic/preview-raw-option-order", methods=["POST"])
-def api_admin_diagnostic_preview_raw_option_order():
-    """TEMPORARY - remove once every order shape real options trading
-    needs (BUY_TO_OPEN a call, BUY_TO_OPEN a put, SELL_TO_CLOSE either) has
-    been verified and adopted into real placement code, or ruled out - same
-    removal condition and same dry-run-only guarantee as
-    preview-raw-order above, calling webull_api.preview_raw_option_order
-    (order_v2.preview_option) instead of preview_order.
-
-    Body: {"order": {...}} - the raw order dict (including its own "legs")
-    to preview. account_id/user_id resolve the margin account the same way
-    preview-raw-order does, unless "account_id" is given directly - the
-    margin account is the one carrying option_buying_power (confirmed live
-    via /api/admin/diagnostic/sandbox-accounts)."""
-    guard = _require_admin()
-    if guard:
-        return guard
-    payload = request.get_json(silent=True) or {}
-    order = payload.get("order")
-    if not isinstance(order, dict) or not order:
-        return _api_failure("order (a non-empty object) is required.", status_code=400, error_code="invalid_request", ok=False)
-    target_user_id = str(payload.get("user_id", "") or _current_user_id())
-    creds = get_webull_credentials(target_user_id)
-    account_id = str(payload.get("account_id", "") or "")
-    if not account_id:
-        try:
-            accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
-        except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than crash
-            return _api_failure(f"get_paper_accounts failed: {error}", status_code=502, error_code="broker_error", ok=False)
-        margin_account = next((a for a in accounts if a.get("account_class") == "INDIVIDUAL_MARGIN"), None)
-        if not margin_account:
-            return _api_failure("No INDIVIDUAL_MARGIN account found on this user's sandbox credentials.", status_code=404, error_code="not_found", ok=False)
-        account_id = margin_account["account_id"]
-
-    try:
-        result = webull_api.preview_raw_option_order(creds["app_key"], creds["app_secret"], account_id, order)
-    except Exception as error:  # noqa: BLE001 - diagnostic-only, the whole point is seeing what the broker actually said
-        return _api_success({"classification": "rejected_or_errored", "detail": str(error), "account_id": account_id}, ok=True)
-    return _api_success({"classification": "accepted", "raw": result, "account_id": account_id}, ok=True)
-
-
-@app.route("/api/admin/diagnostic/capital-snapshot", methods=["GET"])
-def api_admin_diagnostic_capital_snapshot():
-    """Read-only: the three individual broker calls _build_capital_snapshot
-    combines (get_account_balance, get_account_positions, get_open_orders)
-    for one account, each reported separately with its own success/error -
-    not the combined, already-collapsed-to-None result the real scan sees
-    when any ONE of them fails. Built live 2026-09-03: the scan's own
-    reason text ("available buying power could not be determined -
-    refusing to size a trade against stale or missing account data")
-    correctly fails closed, but _build_capital_snapshot's own except
-    block only ever logs a server-side warning - there was no way to see
-    WHICH of the three calls was actually failing, or why, without live
-    server/log access this session doesn't have. Permanent, matching
-    order-detail's own precedent, not a one-off - "is the broker
-    currently answering these three calls cleanly" is a reasonable thing
-    to want to check again later."""
-    guard = _require_admin()
-    if guard:
-        return guard
-    target_user_id = str(request.args.get("user_id", "") or _current_user_id())
-    account_id_param = str(request.args.get("account_id", "") or "")
-    creds = get_webull_credentials(target_user_id)
-    account_id = account_id_param
-    if not account_id:
-        try:
-            sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
-        except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than crash
-            return _api_failure(f"get_paper_accounts failed: {error}", status_code=502, error_code="broker_error", ok=False)
-        cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
-        if not cash_account:
-            return _api_failure("No Webull sandbox account found for these credentials.", status_code=404, error_code="not_found", ok=False)
-        account_id = cash_account["account_id"]
-
-    def _try(label: str, call):
-        try:
-            return {label: {"ok": True, "result": call()}}
-        except Exception as error:  # noqa: BLE001 - the whole point is seeing what actually failed
-            return {label: {"ok": False, "error": str(error), "error_type": type(error).__name__}}
-
-    result: Dict[str, object] = {"account_id": account_id}
-    result.update(_try("balance", lambda: webull_api.get_account_balance(creds["app_key"], creds["app_secret"], account_id)))
-    result.update(_try("positions", lambda: webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)))
-    result.update(_try("open_orders", lambda: webull_api.get_open_orders(creds["app_key"], creds["app_secret"], account_id)))
-    if not result["open_orders"]["ok"]:
-        # TEMPORARY (see get_open_orders_raw_first_page's own docstring) -
-        # only fetched when the validated call above already failed, to
-        # see the actual malformed row without validation getting in the
-        # way.
-        result.update(_try("open_orders_raw_first_page", lambda: webull_api.get_open_orders_raw_first_page(creds["app_key"], creds["app_secret"], account_id)))
-    return _api_success(result, ok=True)
-
-
-@app.route("/api/admin/diagnostic/order-detail", methods=["GET"])
-def api_admin_diagnostic_order_detail():
-    """Read-only: the broker's own CURRENT, LIVE answer for one specific
-    order (any client_order_id - entry, stop, target, or a target-exit
-    sell), for one specific account. Small and permanent, not a
-    remove-when-done diagnostic - "what does Webull actually say about
-    order X right now" is a question that has come up repeatedly this
-    session (the SLB take-profit rejection, the OPENAPI_PARAM_ERR
-    "Order not present" classification, and now a stop leg that won't
-    confirm as active) and always required either live shell access this
-    session doesn't have, or a fresh temporary diagnostic + deploy cycle
-    each time. This makes that a standing admin tool instead."""
-    guard = _require_admin()
-    if guard:
-        return guard
-    target_user_id = str(request.args.get("user_id", "") or _current_user_id())
-    client_order_id = str(request.args.get("client_order_id", "") or "").strip()
-    if not client_order_id:
-        return _api_failure("client_order_id is required.", status_code=400, error_code="invalid_request", ok=False)
-
-    creds = get_webull_credentials(target_user_id)
-    if request.args.get("account_id"):
-        account_id = str(request.args["account_id"])
-    else:
-        try:
-            sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
-            account_id = webull_api.find_individual_cash_account(sandbox_accounts)["account_id"]
-        except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than crash
-            return _api_failure(f"Could not resolve the sandbox account: {error}", status_code=502, error_code="broker_error", ok=False)
-
-    try:
-        detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, client_order_id)
-    except webull_api.DefiniteOrderRejection as error:
-        return _api_success({"classification": "definite_rejection", "detail": str(error)}, ok=True)
-    except Exception as error:  # noqa: BLE001 - diagnostic-only, report rather than crash
-        return _api_failure(f"get_order_detail failed: {error}", status_code=502, error_code="broker_error", ok=False)
-    try:
-        summary = ol.summarize_fill(detail)
-    except Exception as error:  # noqa: BLE001
-        summary = {"summarize_fill_error": str(error)}
-    return _api_success({"classification": "ok", "summary": summary, "raw": detail}, ok=True)
-
-
-@app.route("/api/admin/ambiguous-submissions/resolve", methods=["POST"])
-def api_admin_resolve_ambiguous_submission():
-    """The only route that can move an entry out of UNKNOWN_SUBMISSION_STATE
-    by manual admin action - see _resolve_ambiguous_submission for the
-    mandatory-fresh-evidence, audit-everything logic this delegates to.
-    Never trusts the admin's own claim about what they checked - the fresh
-    checks happen server-side, right here, regardless of what the request
-    body does or doesn't say about evidence."""
-    guard = _require_admin()
-    if guard:
-        return guard
-    payload = request.get_json(silent=True) or {}
-    try:
-        result = _resolve_ambiguous_submission(
-            target_user_id=str(payload.get("user_id", "")),
-            admin_user_id=_current_user_id(),
-            entry_client_order_id=str(payload.get("entry_client_order_id", "")),
-            action=str(payload.get("action", "")),
-            reason=str(payload.get("reason", "")),
-            confirmation=str(payload.get("confirmation", "")),
-        )
-    except ValidationError as error:
-        return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
-    return _api_success({"entry": result["entry"]}, ok=True, entry=result["entry"])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def _now_utc() -> datetime:
@@ -2687,78 +1900,49 @@ def inject_current_user():
     return {"current_user": public_user(user) if user else None}
 
 
-@app.route("/")
-def mission_briefing_page() -> str:
-    context = _build_page_context(
-        include_suggestions=True,
-        include_reversal=True,
-        include_trend=True,
-        include_news=True,
-        include_trusted_accounts=True,
-    )
-    if not context.get("mission_brief_should_show") and request.args.get("show_brief") != "1":
-        context["macro_ticker_rows"] = get_macro_ticker_tape()
-        context["webull_balance"] = _get_live_webull_balance(_current_user_id())
-        return render_template("dashboard.html", **context)
-    return render_template("mission_briefing.html", **context)
+@app.context_processor
+def inject_loss_cap():
+    """Home meter. Same inputs as the scan halt: broker day P/L (cash plus
+    margin when that balance was readable) and the sizing equity already on
+    the balance payload. Runs only while rendering a page, not during a scan."""
+    user_id = session.get("user_id")
+    if not user_id:
+        return {}
+    try:
+        import daily_loss
+        payload = _get_live_webull_balance(user_id)
+        balance = (payload or {}).get("balance") or None
+        if not isinstance(balance, dict) or balance.get("day_pnl") is None:
+            return {"loss_cap": {"available": False}}
+        status = get_autonomy_status(user_id)
+        state = daily_loss.evaluate(
+            float(balance["day_pnl"]),
+            float(balance["net_liquidation_value"]),
+            float(status.get("daily_loss_limit_percent") or 0),
+        )
+        state["available"] = True
+        return {"loss_cap": state}
+    except Exception:
+        return {"loss_cap": {"available": False}}
 
 
-@app.route("/mission-brief")
-def mission_brief_manual_page() -> str:
-    context = _build_page_context(include_suggestions=True, include_reversal=True, include_trend=True, include_news=True)
-    return render_template("mission_briefing.html", **context)
 
 
-@app.route("/dashboard")
-@app.route("/mission-control")
-def dashboard_page() -> str:
-    context = _build_page_context(
-        include_suggestions=True,
-        include_reversal=True,
-        include_trend=True,
-        include_news=True,
-        include_trusted_accounts=True,
-    )
-    context["macro_ticker_rows"] = get_macro_ticker_tape()
-    context["accounts"] = get_accounts(_current_user_id())
-    context["webull_balance"] = _get_live_webull_balance(_current_user_id())
-    return render_template("dashboard.html", **context)
 
 
-@app.route("/watchlist")
-def watchlist_page() -> str:
-    return render_template("watchlist.html", **_build_page_context(include_suggestions=True))
 
 
-@app.route("/market-scanner")
-@app.route("/scanner")
-def scanner_page() -> str:
-    return render_template("scanner.html", **_build_page_context())
 
 
-@app.route("/reversal-map")
-@app.route("/support-resistance")
-def reversal_map_page() -> str:
-    focus_ticker = request.args.get("ticker", "").strip().upper()
-    context = _build_page_context(focus_ticker=focus_ticker)
-    context["analysis_section"] = "support_resistance"
-    return render_template("reversal_map.html", **context)
 
 
-@app.route("/trend-detection")
-@app.route("/volume-scanner")
-def trend_detection_page() -> str:
-    focus_ticker = request.args.get("ticker", "").strip().upper()
-    context = _build_page_context(focus_ticker=focus_ticker)
-    context["analysis_section"] = "volume_intelligence"
-    return render_template("trend_detection.html", **context)
+
+
 
 
 def _build_price_chart(ticker: str) -> Dict[str, object]:
-    import yfinance as yf
-
     try:
-        history = yf.Ticker(ticker).history(period="3mo", interval="1d", auto_adjust=False)
+        history = alpaca_data.get_bars_single(ticker, period="3mo", interval="1d")
     except Exception:
         return {"available": False}
 
@@ -2790,151 +1974,22 @@ def _build_price_chart(ticker: str) -> Dict[str, object]:
     }
 
 
-@app.route("/lookup")
-@app.route("/lookup/<ticker>")
-def ticker_lookup_page(ticker: str = "") -> str:
-    symbol = (ticker or request.args.get("ticker", "")).strip().upper()
-    context = _build_page_context(focus_ticker=symbol)
-    context["searched_ticker"] = symbol
-    if not symbol:
-        return render_template("ticker_lookup.html", **context)
-
-    quote_rows, quote_errors, _ = scan_market(tickers=[symbol])
-    extended_hours = build_extended_hours_intelligence(symbol)
-    strategy = get_strategy_data_for_ticker(symbol, extended_hours=extended_hours)
-    chart_levels = get_chart_levels_for_ticker(symbol, extended_hours=extended_hours)
-
-    try:
-        options_payload = get_options_data_for_ticker(symbol)
-    except ValueError:
-        options_payload = None
-
-    watchlist_tickers = get_watchlist_tickers(_current_user_id())
-
-    context.update(
-        {
-            "quote": quote_rows[0] if quote_rows else None,
-            "quote_errors": quote_errors,
-            "strategy": strategy,
-            "chart_levels": chart_levels,
-            "chart": _build_price_chart(symbol),
-            "options_payload": options_payload,
-            "already_on_watchlist": symbol in {t.upper() for t in watchlist_tickers},
-        }
-    )
-    return render_template("ticker_lookup.html", **context)
 
 
-@app.route("/options")
-def options_page() -> str:
-    searched_ticker = request.args.get("ticker", "").strip().upper()
-    context = _build_page_context(focus_ticker=searched_ticker)
-    if searched_ticker:
-        context["searched_ticker"] = searched_ticker
-    return render_template("options.html", **context)
 
 
 CHAIN_CACHE: Dict[str, Dict[str, object]] = {}
 CHAIN_CACHE_SECONDS = 20
 
 
-@app.route("/api/options/chain", methods=["GET"])
-@api_guard
-def api_options_chain():
-    ticker = request.args.get("ticker", "").strip().upper()
-    expiration = request.args.get("expiration", "").strip()
-    if not ticker:
-        raise ValidationError("Ticker is required.")
-
-    cache_key = f"{ticker}:{expiration}"
-    cached = CHAIN_CACHE.get(cache_key)
-    if isinstance(cached, dict) and isinstance(cached.get("expires_at"), datetime) and cached["expires_at"] > _now_utc():
-        payload = cached["payload"]
-    else:
-        payload = get_full_option_chain(ticker, expiration)
-        CHAIN_CACHE[cache_key] = {"payload": payload, "expires_at": _now_utc() + timedelta(seconds=CHAIN_CACHE_SECONDS)}
-
-    return _api_success(payload, **payload)
 
 
-@app.route("/news-intelligence")
-def news_intelligence_page() -> str:
-    return render_template("news_intelligence.html", **_build_page_context(include_news=True))
 
 
-@app.route("/settings")
-def settings_page() -> str:
-    # include_market_scan=False, include_opportunities=False - settings.html
-    # never renders scanner_rows/opportunities data (confirmed by grepping
-    # the template); this page was paying the full market-scan pipeline for
-    # nothing every time someone opened Settings.
-    return render_template(
-        "settings.html",
-        **_build_page_context(include_trusted_accounts=True, include_market_scan=False, include_opportunities=False),
-    )
 
 
-@app.route("/account-hub")
-def account_hub_page() -> str:
-    # include_market_scan=False, include_opportunities=False - Account Hub
-    # is entirely account/order data (accounts, scan runs, test orders,
-    # Stage 3, mode selector); it never renders scanner_rows or
-    # opportunities data (confirmed by grepping the template). Almost
-    # certainly the most-visited page in the app, so this was the biggest
-    # real-world instance of the same unnecessary market-scan tax fixed on
-    # /daily-digest and /performance.
-    context = _build_page_context(include_market_scan=False, include_opportunities=False)
-    user_id = _current_user_id()
-    context["accounts"] = get_accounts(user_id)
-    context["webull_configured"] = is_webull_configured(user_id)
-    context["anthropic_configured"] = is_anthropic_configured(user_id)
-    context["webull_balance"] = _get_live_webull_balance(user_id)
-    # Durable per-tick record of whether THIS account was actually
-    # scanned/reconciled by the cron-trigger scheduler - see
-    # autonomy/scan_run_log.py's module docstring for why "the cron job
-    # returned HTTP 200" doesn't by itself answer that question.
-    context["scan_runs"] = list_scan_runs(user_id, limit=50)
-    # Manual Test Order panel - see api_webull_place_test_order's own
-    # docstring for what this tool is and its safety rails.
-    context["manual_test_orders"] = [
-        order for order in list_overnight_orders(user_id) if order.get("source") == "manual_test_order"
-    ]
-    # Stage 3 panel - see api_webull_place_stage3_order's own docstring for
-    # what this tool is. display_status mirrors the Trade Journal's own
-    # Overnight Orders table (_overnight_order_display_status) so a Stage 3
-    # entry shows its real live lifecycle state, not a stale "placed" label.
-    stage3_orders = [order for order in list_overnight_orders(user_id) if order.get("source") == "stage3_test_order"]
-    for order in stage3_orders:
-        order["display_status"] = _overnight_order_display_status(order)
-        # Whether "Close Position" should be offered - any state with real
-        # shares filled and not yet CLOSED. A stale button (the position
-        # already closed by some other path) just fails safely with
-        # api_close_webull_position's own clear "no open position" error -
-        # simpler and more consistent with this app's other best-effort UI
-        # than re-fetching live broker positions just for this check.
-        order["stage3_closeable"] = order.get("lifecycle_state") in {
-            ol.ENTRY_FILLED,
-            ol.PROTECTION_PENDING,
-            ol.PROTECTION_CONFIRMED_ACTIVE,
-            ol.PROTECTION_FAILED,
-        }
-    context["stage3_orders"] = stage3_orders
-    return render_template("account_hub.html", **context)
 
 
-@app.route("/notifications")
-def notifications_page() -> str:
-    # notifications.html only renders `alerts` (always computed regardless
-    # of these flags) - it never reads suggestions or news_rows, so both of
-    # those True flags were dead weight, and the market-scan/opportunities
-    # pipeline (on by default) was pure unused cost on top of that. alerts
-    # itself is ephemeral per-request (not persisted/accumulated - see
-    # get_alerts_snapshot), so skipping scanner-derived alert types here
-    # only affects this one page's badge count, not what mission-control
-    # (which still computes the full pipeline) shows.
-    return render_template(
-        "notifications.html", **_build_page_context(include_market_scan=False, include_opportunities=False)
-    )
 
 
 # The Overnight Orders table used to render order["status"] directly - a
@@ -2987,70 +2042,8 @@ def _overnight_order_display_status(order: Dict[str, object]) -> str:
     return str(order.get("status") or "unknown")
 
 
-@app.route("/trade-journal")
-def trade_journal_page() -> str:
-    # trade_journal.html never renders reversal_rows/trend_rows/
-    # scanner_rows/opportunities data (confirmed by grepping the template) -
-    # this page's own content is entirely paper_trades/overnight_orders/
-    # closed_trades/webull_positions, all fetched below. Almost certainly
-    # one of the most-visited pages in the app, so include_reversal/
-    # include_trend here were pure unused cost, on top of the
-    # market-scan/opportunities pipeline that's on by default.
-    context = _build_page_context(include_market_scan=False, include_opportunities=False)
-    user_id = _current_user_id()
-    context["paper_trades"] = list_paper_trades(user_id)
-    context["paper_trade_summary"] = get_paper_trade_summary(user_id)
-    overnight_orders = list_overnight_orders(user_id)
-    for order in overnight_orders:
-        order["display_status"] = _overnight_order_display_status(order)
-    context["overnight_orders"] = overnight_orders
-    # Durably closed autonomous trades - realized P&L and exit details as
-    # recorded by _reconcile_position_exit once CLOSED, not derived from
-    # overnight_orders/webull_positions here. See autonomy/closed_trades.py.
-    context["closed_trades"] = list_closed_trades(user_id)
-    webull_positions = _get_live_webull_positions(user_id)
-    if webull_positions.get("connected") and not webull_positions.get("error"):
-        webull_positions = {
-            **webull_positions,
-            "positions": annotate_positions_with_exit_signal(webull_positions["positions"], overnight_orders),
-        }
-    context["webull_positions"] = webull_positions
-    context["webull_balance"] = _get_live_webull_balance(user_id)
-
-    today_key = _trading_day_key()
-
-    def _order_trading_day(order: Dict[str, object]) -> str:
-        try:
-            return _trading_day_key(datetime.fromisoformat(str(order.get("logged_at", ""))))
-        except ValueError:
-            return ""
-
-    todays_orders = [order for order in overnight_orders if order.get("status") == "placed" and _order_trading_day(order) == today_key]
-    context["webull_today_summary"] = {
-        "entries_today": sum(1 for order in todays_orders if order.get("side") == "BUY"),
-        "closed_today": sum(1 for order in todays_orders if order.get("side") == "SELL"),
-        "open_count": len(webull_positions.get("positions", [])) if webull_positions.get("connected") else 0,
-    }
-    return render_template("trade_journal.html", **context)
 
 
-@app.route("/performance")
-def performance_page() -> str:
-    """Tier 1 of the "make autonomy learn" roadmap - human-readable
-    performance reporting only (see autonomy/performance_report.py's own
-    module docstring for why this is deliberately NOT automated behavior
-    change). include_opportunities=False since this page never needs
-    candidate/scan data, only the account's own closed-trade history.
-    include_market_scan=False too - the CORE_SCAN_UNIVERSE fetch inside
-    get_market_data was still running unconditionally even with every
-    other include_* flag off, up to its own 20s hard deadline, entirely
-    for scanner_rows this page never reads. Only the shared top-nav
-    status widget is derived from it, which already degrades safely to
-    "Monitoring"/"Healthy" on an empty scanner_rows list - the same state
-    a real rate-limited scan already produces today."""
-    context = _build_page_context(include_opportunities=False, include_market_scan=False)
-    context["performance_report"] = build_performance_report(_current_user_id())
-    return render_template("performance.html", **context)
 
 
 # How many of the most recent research_log records to show/sample on the
@@ -3222,191 +2215,20 @@ def _build_agent_map_data(user_id: str, context: Dict[str, object]) -> Dict[str,
     }
 
 
-@app.route("/agent-map")
-def agent_map_page() -> str:
-    """The in-app, LIVE counterpart to docs/AGENT_ARCHITECTURE.md and the
-    published Agent Map artifact - answers "is the memory layer actually
-    being fed" with this account's own real data, not a static diagram.
-    Built 2026-09-11 directly in response to being asked to see the map
-    "within the application" so the memory/real-outcomes work (see
-    research_log.py's signal_snapshot, calibration.py's real-outcomes
-    path, outcomes_analysis.py, and the validated_brains gate) is
-    continuously checkable, not just documented once and trusted.
-
-    include_opportunities=False/include_market_scan=False for the same
-    reason performance_page/daily_digest_page use them - this page only
-    reads this account's own recorded history, never live market data."""
-    user_id = _current_user_id()
-    context = _build_page_context(include_opportunities=False, include_market_scan=False)
-    context["agent_map"] = _build_agent_map_data(user_id, context)
-    return render_template("agent_map.html", **context)
 
 
-@app.route("/agent-map/3d")
-def agent_map_3d_page() -> str:
-    """Same real data as /agent-map, rendered as an interactive 3D scene that refreshes itself
-    from /api/agent-map. Reporting only: nothing on it changes a decision."""
-    context = _build_page_context(include_opportunities=False, include_market_scan=False)
-    return render_template("agent_map_3d.html", **context)
 
 
-@app.route("/observatory")
-def observatory_page() -> str:
-    """3D view of recorded trade events (event_journal): structural paths vs
-    observed flows, drilling from the whole agent to sectors to one ticker's
-    trade chains. Reporting only."""
-    context = _build_page_context(include_opportunities=False, include_market_scan=False)
-    return render_template("observatory.html", **context)
 
 
-@app.route("/api/observatory")
-@api_guard
-def api_observatory():
-    return _api_success(observatory.build(
-        _current_user_id(),
-        level=request.args.get("level") or "agent",
-        window_hours=request.args.get("window_hours", default=24, type=float),
-        sector=request.args.get("sector") or None,
-        ticker=(request.args.get("ticker") or "").strip()[:12] or None,
-    ))
 
 
-@app.route("/api/agent-map")
-def api_agent_map():
-    user_id = _current_user_id()
-    context = _build_page_context(include_opportunities=False, include_market_scan=False)
-    data = _build_agent_map_data(user_id, context)
-    lifecycle = data.get("lifecycle") or {}
-    return jsonify({
-        "success": True,
-        "generated_at": _now_utc().isoformat(),
-        "data": {
-            "nodes": [{k: node[k] for k in ("id", "label", "icon", "category", "detail", "active")} for node in data["pulse_nodes"]],
-            "feed": data["pulse_feed"],
-            "scan_is_active": data["scan_is_active"],
-            "most_recent_logged_at": data["most_recent_logged_at"],
-            "memory_feed_total": data["memory_feed_total"],
-            "memory_feed_populated": data["memory_feed_populated"],
-            "calibration_status": data["calibration_status"],
-            "closed_trades_since_last_real_recalibration": data["closed_trades_since_last_real_recalibration"],
-            "real_outcomes_recalibration_interval": data["real_outcomes_recalibration_interval"],
-            "activity_window_minutes": AGENT_MAP_ACTIVITY_WINDOW_MINUTES,
-            "calibration_window_hours": AGENT_MAP_CALIBRATION_WINDOW_HOURS,
-            "readiness": {key: lifecycle.get(key) for key in ("since_fixes_clean_count", "readiness_target_clean_trades", "total_closed_trades")},
-        },
-    })
 
 
-@app.route("/daily-digest")
-def daily_digest_page() -> str:
-    """A single "what happened, what needs me" summary - the legitimate
-    version of a "Chief of Staff" triage layer: read-only, pulled from data
-    this app already records (scan_run_log.py, overnight_orders.py,
-    closed_trades.py). See autonomy/daily_digest.py's own module docstring.
-    include_opportunities=False for the same reason performance_page uses
-    it - this page never needs candidate/scan data, only the account's own
-    recorded history. include_market_scan=False for the same reason it was
-    just added to performance_page: get_market_data ran unconditionally
-    regardless of include_opportunities, paying up to its own 20s hard
-    deadline for scanner_rows this page never reads - confirmed live, a
-    real request to this page took ~21s for exactly that reason before
-    this fix."""
-    context = _build_page_context(include_opportunities=False, include_market_scan=False)
-    context["daily_digest"] = build_daily_digest(_current_user_id(), monitor_heartbeat=_monitor_heartbeat_snapshot_for_scan_run())
-    return render_template("daily_digest.html", **context)
 
 
-@app.route("/api/trade-journal/refresh-positions", methods=["POST"])
-@api_guard
-def api_refresh_webull_positions():
-    payload = _get_live_webull_positions(_current_user_id(), force_refresh=True)
-    return _api_success(payload, **payload)
 
 
-@app.route("/api/trade-journal/close-position", methods=["POST"])
-@api_guard
-def api_close_webull_position():
-    """Sells a full open Webull sandbox position at its current last price
-    (a marketable limit order) - the counterpart to the Take Profit/Stop
-    Loss badges, which were previously just a static label with no action
-    behind them."""
-    payload = request.get_json(silent=True) or {}
-    ticker = str(payload.get("ticker", "")).strip().upper()
-    if not ticker:
-        raise ValidationError("Ticker is required.")
-
-    user_id = _current_user_id()
-    accounts = get_accounts(user_id)
-    webull_account = next((a for a in accounts if a.get("platform") == "webull"), None)
-    if not webull_account or webull_account.get("status") != "Connected":
-        raise ValidationError("Connect Webull in Account Hub before closing a position.")
-
-    creds = get_webull_credentials(user_id)
-    if not is_webull_configured(user_id):
-        raise ValidationError("Enter your Webull App Key and App Secret in Account Hub first.")
-
-    sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
-    cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
-    if not cash_account:
-        raise ValidationError("No Webull sandbox account found for these credentials.")
-    account_id = cash_account["account_id"]
-
-    positions = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
-    position = next((p for p in positions if str(p.get("symbol", "")).upper() == ticker), None)
-    if not position:
-        raise ValidationError(f"No open position found for {ticker}.")
-
-    quantity = float(position.get("quantity", 0) or 0)
-    limit_price = float(position.get("last_price", 0) or 0)
-    if quantity <= 0 or limit_price <= 0:
-        raise ValidationError(f"Invalid quantity/price for {ticker}, cannot close.")
-
-    # Cancel any resting protective stop-loss and/or take-profit order(s) for
-    # this ticker before selling manually - otherwise a stale leg could later
-    # fire against shares that no longer exist, which risks an accidental
-    # short position.
-    cancelled_exit_order_ids = []
-    for exit_order in pop_exit_orders(user_id, ticker):
-        try:
-            webull_api.cancel_order(creds["app_key"], creds["app_secret"], account_id, exit_order["id"])
-            cancelled_exit_order_ids.append(exit_order["id"])
-        except Exception:  # noqa: BLE001 - likely already filled/expired, don't block the manual close over it
-            pass
-
-    entry = {
-        "ticker": ticker,
-        "side": "SELL",
-        "quantity": quantity,
-        "limit_price": limit_price,
-        "cancelled_exit_order_ids": cancelled_exit_order_ids,
-        "reason": "Manual close from Trade Journal",
-        "account_id": account_id,
-        "status": "pending",
-    }
-    try:
-        result = webull_api.place_stock_order(
-            app_key=creds["app_key"],
-            app_secret=creds["app_secret"],
-            account_id=account_id,
-            symbol=ticker,
-            side="SELL",
-            quantity=quantity,
-            limit_price=limit_price,
-            trading_session=_current_webull_trading_session(),
-            opens_position=False,  # manual close reduces risk - never blocked by live dollar caps
-        )
-        entry["status"] = "placed"
-        entry["webull_response"] = result
-    except Exception as error:  # noqa: BLE001 - surface the failure, don't crash the request
-        entry["status"] = "failed"
-        entry["error"] = str(error)
-        record_overnight_order(user_id, entry)
-        raise ValidationError(f"Failed to close {ticker}: {error}") from error
-
-    record_overnight_order(user_id, entry)
-    POSITIONS_CACHE.pop(user_id, None)
-    BALANCE_CACHE.pop(user_id, None)
-    return _api_success(entry, **entry)
 
 
 # Built for staged sandbox validation ("Stage 2: one tiny entry and
@@ -3419,159 +2241,8 @@ MANUAL_TEST_ORDER_MAX_QUANTITY = 5
 MANUAL_TEST_ORDER_MIN_DISCOUNT_FROM_MARKET = 0.20
 
 
-@app.route("/api/webull/place-test-order", methods=["POST"])
-@api_guard
-def api_webull_place_test_order():
-    """Places ONE small, manually-triggered BUY limit order against the
-    caller's own real Webull sandbox account.
-
-    Deliberately narrow and safety-railed, not a general "place any
-    order" capability:
-      - hardcoded side=BUY (this app is long/CALL-only everywhere else
-        too - see brains/strategy_brain.py);
-      - quantity capped at MANUAL_TEST_ORDER_MAX_QUANTITY;
-      - limit_price is REJECTED server-side (never just trusted from the
-        client) unless it's at least MANUAL_TEST_ORDER_MIN_DISCOUNT_FROM_MARKET
-        below the CURRENT live market price - this is what makes
-        "cannot plausibly fill" a structural guarantee of using this
-        endpoint, not merely an instruction to whoever calls it;
-      - never places a stop/target/bracket - entry only. Protection is a
-        separate, later concern, not this tool's job;
-      - durably recorded via record_overnight_order with
-        source="manual_test_order", visible in the existing Trade
-        Journal Overnight Orders table like everything else, and so
-        api_webull_cancel_test_order below can verify a given
-        client_order_id actually came from THIS tool before touching it."""
-    payload = request.get_json(silent=True) or {}
-    ticker = str(payload.get("ticker", "")).strip().upper()
-    quantity = payload.get("quantity")
-    limit_price = payload.get("limit_price")
-
-    if not ticker:
-        raise ValidationError("Ticker is required.")
-    try:
-        quantity = int(quantity)
-    except (TypeError, ValueError):
-        raise ValidationError("Quantity must be a whole number.")
-    if not (0 < quantity <= MANUAL_TEST_ORDER_MAX_QUANTITY):
-        raise ValidationError(f"Quantity must be between 1 and {MANUAL_TEST_ORDER_MAX_QUANTITY} shares for a manual test order.")
-    try:
-        limit_price = float(limit_price)
-    except (TypeError, ValueError):
-        raise ValidationError("Limit price must be a number.")
-    if limit_price <= 0:
-        raise ValidationError("Limit price must be positive.")
-
-    user_id = _current_user_id()
-    creds = get_webull_credentials(user_id)
-    if not is_webull_configured(user_id):
-        raise ValidationError("Enter your Webull App Key and App Secret in Account Hub first.")
-
-    quote_rows, _quote_errors, _last_updated = scan_market(tickers=[ticker])
-    quote_row = quote_rows[0] if quote_rows else None
-    if not quote_row or not quote_row.get("price"):
-        raise ValidationError(
-            f"Could not fetch a current market price for {ticker} - refusing to place a test order without one "
-            f"to validate the limit price against."
-        )
-    market_price = float(quote_row["price"])
-    max_allowed_limit_price = round(market_price * (1 - MANUAL_TEST_ORDER_MIN_DISCOUNT_FROM_MARKET), 2)
-    if limit_price > max_allowed_limit_price:
-        raise ValidationError(
-            f"Limit price ${limit_price:,.2f} is too close to the current market price (${market_price:,.2f}) for "
-            f"a manual test order - must be at least {int(MANUAL_TEST_ORDER_MIN_DISCOUNT_FROM_MARKET * 100)}% below "
-            f"market (${max_allowed_limit_price:,.2f} or lower) so it cannot plausibly fill."
-        )
-
-    sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
-    cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
-    if not cash_account:
-        raise ValidationError("No Webull sandbox account found for these credentials.")
-    account_id = cash_account["account_id"]
-
-    client_order_id = f"manualtest{uuid.uuid4().hex[:24]}"
-    entry = {
-        "ticker": ticker,
-        "side": "BUY",
-        "quantity": quantity,
-        "limit_price": limit_price,
-        "market_price_at_placement": market_price,
-        "account_id": account_id,
-        "status": "pending",
-        "source": "manual_test_order",
-        "entry_client_order_id": client_order_id,
-    }
-    try:
-        result = webull_api.place_stock_order(
-            app_key=creds["app_key"],
-            app_secret=creds["app_secret"],
-            account_id=account_id,
-            symbol=ticker,
-            side="BUY",
-            quantity=quantity,
-            limit_price=limit_price,
-            trading_session=_current_webull_trading_session(),
-            client_order_id=client_order_id,
-        )
-        entry["status"] = "placed"
-        entry["webull_response"] = result
-    except Exception as error:  # noqa: BLE001 - surface the failure, don't crash the request
-        entry["status"] = "failed"
-        entry["error"] = str(error)
-        record_overnight_order(user_id, entry)
-        raise ValidationError(f"Failed to place test order for {ticker}: {error}") from error
-
-    record_overnight_order(user_id, entry)
-    return _api_success(entry, **entry)
 
 
-@app.route("/api/webull/cancel-test-order", methods=["POST"])
-@api_guard
-def api_webull_cancel_test_order():
-    """Cancels a resting order previously placed by
-    api_webull_place_test_order above, and confirms via a FRESH broker
-    read that it actually ended with zero shares filled - "zero-fill
-    cancellation" verified, not assumed. Refuses to touch any order this
-    endpoint didn't itself create (source != "manual_test_order") - this
-    is deliberately NOT a general-purpose "cancel any order" capability."""
-    payload = request.get_json(silent=True) or {}
-    client_order_id = str(payload.get("client_order_id", "")).strip()
-    if not client_order_id:
-        raise ValidationError("client_order_id is required.")
-
-    user_id = _current_user_id()
-    orders = list_overnight_orders(user_id)
-    record = next((o for o in orders if o.get("entry_client_order_id") == client_order_id), None)
-    if not record or record.get("source") != "manual_test_order":
-        raise ValidationError("No manual test order found with that client_order_id for this account.")
-
-    creds = get_webull_credentials(user_id)
-    if not is_webull_configured(user_id):
-        raise ValidationError("Enter your Webull App Key and App Secret in Account Hub first.")
-    account_id = record.get("account_id")
-    if not account_id:
-        raise ValidationError("This test order has no recorded account_id - cannot look it up at the broker.")
-
-    try:
-        webull_api.cancel_order(creds["app_key"], creds["app_secret"], account_id, client_order_id)
-    except Exception as error:  # noqa: BLE001 - surface the failure, don't crash the request
-        raise ValidationError(f"Failed to cancel test order {client_order_id}: {error}") from error
-
-    order_detail = webull_api.get_order_detail(creds["app_key"], creds["app_secret"], account_id, client_order_id)
-    fill = ol.summarize_fill(order_detail)
-
-    record["status"] = "cancelled"
-    record["cancel_confirmed_status"] = fill["status"]
-    record["cancel_confirmed_filled_quantity"] = fill["filled_quantity"]
-    replace_overnight_orders(user_id, orders)
-
-    result = {
-        "client_order_id": client_order_id,
-        "broker_status": fill["status"],
-        "filled_quantity": fill["filled_quantity"],
-        "zero_fill_confirmed": fill["filled_quantity"] == 0,
-    }
-    return _api_success(result, **result)
 
 
 # Stage 3 of the staged sandbox validation plan (see conversation history):
@@ -3588,771 +2259,94 @@ STAGE3_ENTRY_QUANTITY = 1
 STAGE3_MARKETABLE_PREMIUM_ABOVE_MARKET = 0.005
 
 
-@app.route("/api/webull/place-stage3-order", methods=["POST"])
-@api_guard
-def api_webull_place_stage3_order():
-    """Places STAGE3_ENTRY_QUANTITY (1) real, genuinely fillable BUY share
-    against the caller's own real Webull sandbox account, then drives it
-    through real stop-loss/take-profit placement and confirmation.
-
-    Deliberately narrow, same spirit as api_webull_place_test_order (Stage
-    2) above:
-      - hardcoded side=BUY, hardcoded quantity=STAGE3_ENTRY_QUANTITY -
-        "one real share", literally, no caller override;
-      - the entry limit price is computed server-side from a fresh market
-        quote, STAGE3_MARKETABLE_PREMIUM_ABOVE_MARKET above the current
-        price so it's genuinely marketable - the opposite of Stage 2's
-        deliberate below-market discount - never trusted from the client;
-      - stop_price/target_price are supplied by the caller and required:
-        this is a CONTROLLED test of whether the mechanism correctly
-        protects whatever levels are given, not a strategy/sizing test,
-        so unlike Stage 2 (entry only, no protection at all) both legs are
-        mandatory here. Validated server-side for sane long-position
-        ordering (stop < entry < target);
-      - restricted to CORE trading hours for the same reason
-        _new_entries_allowed gates the autonomous scan: place_stop_loss_order
-        only accepts CORE, and this whole tool exists to prove real
-        protection lands, so running it when a real stop can't even be
-        placed would test the wrong thing;
-      - held under the same per-user scan lock (scan_lock.py) as the
-        autonomous scan, so this can't race a concurrent autonomous entry
-        or a double-click of this same button - ScanAlreadyRunningError
-        surfaces as a clean 409 via api_guard, same as the manual "Run
-        Scan" button;
-      - reuses _submit_and_protect_entry unmodified - the exact same
-        placement, fill-polling, protection-sizing, and
-        protection-confirmation path production trading uses;
-      - recorded via record_overnight_order with source="stage3_test_order"
-        (distinct from Stage 2's "manual_test_order"), visible in Account
-        Hub's own Stage 3 panel and the regular Trade Journal;
-      - "controlled exit" deliberately reuses the EXISTING, already-generic
-        api_close_webull_position endpoint above rather than a new one -
-        it already looks up the real broker position by ticker, cancels
-        resting protective legs via pop_exit_orders (which
-        _reconcile_protective_leg_quantity already records both legs into
-        via record_exit_order), and sells at the current price. No new
-        exit code path needed, and no risk of it silently diverging from
-        the exit path every other position in this app already uses."""
-    payload = request.get_json(silent=True) or {}
-    ticker = str(payload.get("ticker", "")).strip().upper()
-    if not ticker:
-        raise ValidationError("Ticker is required.")
-    try:
-        stop_price = float(payload.get("stop_price"))
-    except (TypeError, ValueError):
-        raise ValidationError("Stop price must be a number.")
-    try:
-        target_price = float(payload.get("target_price"))
-    except (TypeError, ValueError):
-        raise ValidationError("Target price must be a number.")
-    if stop_price <= 0 or target_price <= 0:
-        raise ValidationError(
-            "Stop price and target price must both be positive - Stage 3 proves REAL protection, so both legs "
-            "are required, unlike Stage 2's entry-only test."
-        )
-
-    if not _new_entries_allowed(_current_webull_trading_session()):
-        raise ValidationError(
-            "Stage 3 requires CORE trading hours - place_stop_loss_order only accepts CORE, and this tool exists "
-            "to prove real protection actually lands, so it refuses to run when that couldn't happen anyway."
-        )
-
-    user_id = _current_user_id()
-    creds = get_webull_credentials(user_id)
-    if not is_webull_configured(user_id):
-        raise ValidationError("Enter your Webull App Key and App Secret in Account Hub first.")
-
-    quote_rows, _quote_errors, _last_updated = scan_market(tickers=[ticker])
-    quote_row = quote_rows[0] if quote_rows else None
-    if not quote_row or not quote_row.get("price"):
-        raise ValidationError(
-            f"Could not fetch a current market price for {ticker} - refusing to place a Stage 3 order without one."
-        )
-    market_price = float(quote_row["price"])
-    limit_price = round(market_price * (1 + STAGE3_MARKETABLE_PREMIUM_ABOVE_MARKET), 2)
-
-    if not (stop_price < limit_price < target_price):
-        raise ValidationError(
-            f"Stop price (${stop_price:,.2f}) must be below the entry price (${limit_price:,.2f}, computed "
-            f"{STAGE3_MARKETABLE_PREMIUM_ABOVE_MARKET * 100:g}% above the current market price of "
-            f"${market_price:,.2f}), which must be below the target price (${target_price:,.2f})."
-        )
-
-    sandbox_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
-    cash_account = webull_api.find_individual_cash_account(sandbox_accounts)
-    if not cash_account:
-        raise ValidationError("No Webull sandbox account found for these credentials.")
-    account_id = cash_account["account_id"]
-
-    trading_day = _trading_day_key()
-    entry: Dict[str, object] = {
-        "ticker": ticker,
-        "side": "BUY",
-        "quantity": STAGE3_ENTRY_QUANTITY,
-        "limit_price": limit_price,
-        "stop": stop_price,
-        "target": target_price,
-        "market_price_at_placement": market_price,
-        "account_id": account_id,
-        "status": "pending",
-        "source": "stage3_test_order",
-        "trading_day": trading_day,
-    }
-
-    with user_scan_lock(user_id):
-        _submit_and_protect_entry(
-            user_id=user_id,
-            creds=creds,
-            account_id=account_id,
-            ticker=ticker,
-            requested_quantity=STAGE3_ENTRY_QUANTITY,
-            limit_price=limit_price,
-            stop_price=stop_price,
-            target_price=target_price,
-            trading_day=trading_day,
-            entry=entry,
-        )
-
-    # Same three-way status derivation _run_autonomous_trade_scan_locked
-    # uses after calling _submit_and_protect_entry - see its own comment
-    # for why UNKNOWN_SUBMISSION_STATE is a deliberately distinct outcome
-    # from both "placed" and "failed".
-    lifecycle_state = entry.get("lifecycle_state")
-    if lifecycle_state == ol.UNKNOWN_SUBMISSION_STATE:
-        entry["status"] = "unknown_submission_state"
-        entry["error"] = entry.get("error", "order submission result could not be confirmed (ambiguous broker response)")
-    else:
-        entry["status"] = "failed" if lifecycle_state == ol.ENTRY_FAILED else "placed"
-        if entry["status"] == "failed":
-            entry["error"] = entry.get("error", "entry order failed")
-
-    record_overnight_order(user_id, entry)
-    POSITIONS_CACHE.pop(user_id, None)
-    BALANCE_CACHE.pop(user_id, None)
-
-    if entry["status"] == "failed":
-        raise ValidationError(f"Stage 3 entry for {ticker} failed: {entry.get('error')}")
-
-    entry["display_status"] = _overnight_order_display_status(entry)
-    return _api_success(entry, **entry)
 
 
-@app.route("/candle-brain")
-def candle_brain_page() -> str:
-    focus_ticker = request.args.get("ticker", "").strip().upper()
-    # include_market_scan=False, include_opportunities=False - candle_brain.html
-    # renders no server-side candle_rows/pattern_rows/scanner_rows/
-    # opportunities data at all (it's fetched client-side by ticker); this
-    # page was paying the full market-scan pipeline for nothing.
-    context = _build_page_context(focus_ticker=focus_ticker, include_market_scan=False, include_opportunities=False)
-    context["analysis_section"] = "candle_brain"
-    return render_template("candle_brain.html", **context)
 
 
-@app.route("/pattern-brain")
-def pattern_brain_page() -> str:
-    focus_ticker = request.args.get("ticker", "").strip().upper()
-    # include_market_scan=False, include_opportunities=False - same reason
-    # as candle_brain_page: this page renders no server-side scanner/
-    # opportunities data.
-    context = _build_page_context(focus_ticker=focus_ticker, include_market_scan=False, include_opportunities=False)
-    context["analysis_section"] = "pattern_brain"
-    return render_template("pattern_brain.html", **context)
 
 
-@app.route("/neural-engine")
-def neural_engine_page() -> str:
-    # neural_engine.html only reads status_summary (always computed
-    # regardless of these flags, and already degrades safely to
-    # "Monitoring"/"Healthy" on empty scanner data) - it never renders
-    # scanner_rows/opportunities directly.
-    return render_template(
-        "neural_engine.html", **_build_page_context(include_market_scan=False, include_opportunities=False)
-    )
 
 
-@app.route("/backtest")
-def backtest_page() -> str:
-    # backtest.html is fully client-side/JS-driven - it renders no
-    # server-side scanner/opportunities context at all.
-    return render_template("backtest.html", **_build_page_context(include_market_scan=False, include_opportunities=False))
 
 
-@app.route("/api/backtest/run", methods=["POST"])
-@api_guard
-def api_backtest_run():
-    payload = request.get_json(silent=True) or {}
-    tickers = payload.get("tickers") or []
-    if isinstance(tickers, str):
-        tickers = [part.strip() for part in tickers.split(",")]
-    try:
-        result = run_backtest(
-            tickers=tickers,
-            lookback_months=payload.get("lookback_months", 6),
-            hold_days=payload.get("hold_days", 5),
-            min_confidence=payload.get("min_confidence", 55),
-        )
-    except ValueError as error:
-        raise ValidationError(str(error)) from error
-    return _api_success(result, **result, ok=True)
 
 
-@app.route("/api/watchlist", methods=["GET"])
-@api_guard
-def api_watchlist():
-    rows = get_watchlist(_current_user_id())
-    try:
-        rows = search_watchlist(
-            rows=rows,
-            query=request.args.get("q", ""),
-            category=request.args.get("category", ""),
-            status=request.args.get("status", ""),
-            min_score=request.args.get("min_score", ""),
-            max_score=request.args.get("max_score", ""),
-        )
-        rows = sort_watchlist(
-            rows=rows,
-            sort_by=request.args.get("sort_by", "ticker"),
-            direction=request.args.get("direction", "asc"),
-        )
-    except ValueError as error:
-        raise ValidationError(str(error)) from error
-    return _api_success({"watchlist": rows, "count": len(rows)}, watchlist=rows, count=len(rows), ok=True)
 
 
-@app.route("/api/watchlist/add", methods=["POST"])
-def api_watchlist_add():
-    payload = request.get_json(silent=True) or {}
-    try:
-        row = add_stock(_current_user_id(), payload)
-    except ValueError as error:
-        return jsonify({"ok": False, "error": str(error)}), 400
-    return jsonify({"ok": True, "item": row})
 
 
-@app.route("/api/watchlist/dismiss-suggestion", methods=["POST"])
-def api_watchlist_dismiss_suggestion():
-    payload = request.get_json(silent=True) or {}
-    try:
-        dismiss_suggestion(_current_user_id(), payload.get("ticker", ""))
-    except ValueError as error:
-        return jsonify({"ok": False, "error": str(error)}), 400
-    return jsonify({"ok": True})
 
 
-@app.route("/api/watchlist/update", methods=["POST"])
-def api_watchlist_update():
-    payload = request.get_json(silent=True) or {}
-    ticker = payload.get("ticker", "")
-    try:
-        row = update_stock(_current_user_id(), ticker=ticker, payload=payload)
-    except ValueError as error:
-        return jsonify({"ok": False, "error": str(error)}), 400
-    return jsonify({"ok": True, "item": row})
 
 
-@app.route("/api/watchlist/delete", methods=["POST"])
-def api_watchlist_delete():
-    payload = request.get_json(silent=True) or {}
-    ticker = payload.get("ticker", "")
-    try:
-        delete_stock(_current_user_id(), ticker=ticker)
-    except ValueError as error:
-        return jsonify({"ok": False, "error": str(error)}), 400
-    return jsonify({"ok": True})
 
 
-@app.route("/api/paper-trade/list", methods=["GET"])
-@api_guard
-def api_paper_trade_list():
-    user_id = _current_user_id()
-    trades = list_paper_trades(user_id)
-    summary = get_paper_trade_summary(user_id)
-    return _api_success({"trades": trades, "summary": summary}, trades=trades, summary=summary, ok=True)
 
 
-@app.route("/api/paper-trade/execute", methods=["POST"])
-@api_guard
-def api_paper_trade_execute():
-    payload = request.get_json(silent=True) or {}
-    if not get_settings(_current_user_id()).get("paper_trading_enabled", True):
-        raise ValidationError("Paper trading is disabled in Settings. Enable it to execute a paper trade.")
-    try:
-        trade = open_paper_trade(
-            user_id=_current_user_id(),
-            ticker=payload.get("ticker", ""),
-            direction=payload.get("direction", ""),
-            quantity=payload.get("quantity", 1),
-            reason=payload.get("reason", ""),
-            confidence=payload.get("confidence"),
-            entry_price=payload.get("entry_price") or None,
-            order_type=payload.get("order_type") or None,
-        )
-    except ValueError as error:
-        raise ValidationError(str(error)) from error
-    return _api_success({"trade": trade}, trade=trade, ok=True)
 
 
-@app.route("/api/paper-trade/close", methods=["POST"])
-@api_guard
-def api_paper_trade_close():
-    payload = request.get_json(silent=True) or {}
-    try:
-        trade = close_paper_trade(_current_user_id(), payload.get("trade_id", ""), payload.get("exit_price") or None)
-    except ValueError as error:
-        raise ValidationError(str(error)) from error
-    return _api_success({"trade": trade}, trade=trade, ok=True)
 
 
 TICKER_SEARCH_CACHE: Dict[str, Dict[str, object]] = {}
 TICKER_SEARCH_CACHE_SECONDS = 300
 
 
-@app.route("/api/ticker-search", methods=["GET"])
-@api_guard
-def api_ticker_search():
-    query = request.args.get("q", "").strip()
-    if len(query) < 1:
-        return _api_success({"results": []}, results=[], ok=True)
-
-    cache_key = query.lower()
-    cached = TICKER_SEARCH_CACHE.get(cache_key)
-    if cached and cached.get("expires_at") and cached["expires_at"] > _now_utc():
-        return _api_success({"results": cached["results"]}, results=cached["results"], ok=True)
-
-    import yfinance as yf
-
-    quotes: List[Dict[str, object]] = []
-    for attempt in range(2):
-        try:
-            search = yf.Search(query, max_results=8)
-            quotes = search.quotes or []
-        except Exception as error:
-            logger.warning("Ticker search failed for %r (attempt %d): %s", query, attempt, error)
-            quotes = []
-        if quotes:
-            break
-
-    results = [
-        {
-            "symbol": quote.get("symbol", ""),
-            "name": quote.get("shortname") or quote.get("longname") or quote.get("symbol", ""),
-            "exchange": quote.get("exchDisp", ""),
-            "type": quote.get("quoteType", ""),
-        }
-        for quote in quotes
-        if quote.get("symbol") and quote.get("quoteType") in {"EQUITY", "ETF", "INDEX"}
-    ]
-    if results:
-        TICKER_SEARCH_CACHE[cache_key] = {
-            "results": results,
-            "expires_at": _now_utc() + timedelta(seconds=TICKER_SEARCH_CACHE_SECONDS),
-        }
-    return _api_success({"results": results}, results=results, ok=True)
 
 
-@app.route("/api/suggestions", methods=["GET"])
-def api_suggestions():
-    context = _build_page_context(include_suggestions=True)
-    return jsonify({"suggestions": context["suggestions"], "scanner_errors": context["scanner_errors"]})
 
 
-@app.route("/api/news/x", methods=["GET"])
-def api_news_x():
-    context = _build_page_context(include_news=True, include_trusted_accounts=True)
-    return jsonify(
-        {
-            "news": context["news_rows"],
-            "errors": context["news_errors"],
-            "trusted_accounts": context["trusted_accounts"],
-            "never_auto_trade": True,
-            "guardrail": "X data can support context but cannot be used as a standalone auto-trade trigger.",
-        }
-    )
 
 
-@app.route("/api/alerts", methods=["GET", "POST"])
-@api_guard
-def api_alerts():
-    context = _build_page_context(include_suggestions=True, include_news=True, include_reversal=True, include_trend=True)
-    alerts = context["alerts"]
-    if request.method == "POST":
-        payload = request.get_json(silent=True) or {}
-        action = payload.get("action", "add")
-        if action == "dismiss":
-            try:
-                dismiss_alert(_current_user_id(), payload.get("id", ""))
-            except ValueError as error:
-                raise ValidationError(str(error)) from error
-            context = _build_page_context(include_suggestions=True, include_news=True)
-            return _api_success(
-                {"alerts": context["alerts"], "unread_count": context["unread_alert_count"]},
-                alerts=context["alerts"],
-                unread_count=context["unread_alert_count"],
-                ok=True,
-            )
-        if action == "mark_read":
-            try:
-                mark_alert_read(_current_user_id(), payload.get("id", ""))
-            except ValueError as error:
-                raise ValidationError(str(error)) from error
-            context = _build_page_context(include_suggestions=True, include_news=True)
-            return _api_success(
-                {"alerts": context["alerts"], "unread_count": context["unread_alert_count"]},
-                alerts=context["alerts"],
-                unread_count=context["unread_alert_count"],
-                ok=True,
-            )
-        if action == "mark_all_read":
-            mark_all_read(_current_user_id(), alerts)
-            context = _build_page_context(include_suggestions=True, include_news=True)
-            return _api_success(
-                {"alerts": context["alerts"], "unread_count": context["unread_alert_count"]},
-                alerts=context["alerts"],
-                unread_count=context["unread_alert_count"],
-                ok=True,
-            )
-        try:
-            alert = add_manual_alert(_current_user_id(), payload)
-        except ValueError as error:
-            raise ValidationError(str(error)) from error
-        context = _build_page_context(include_suggestions=True, include_news=True)
-        return _api_success(
-            {"alert": alert, "alerts": context["alerts"], "unread_count": context["unread_alert_count"]},
-            alert=alert,
-            alerts=context["alerts"],
-            unread_count=context["unread_alert_count"],
-            ok=True,
-        )
-    return _api_success(
-        {"alerts": alerts, "unread_count": context["unread_alert_count"]},
-        alerts=alerts,
-        unread_count=context["unread_alert_count"],
-        ok=True,
-    )
 
 
-@app.route("/api/scanner", methods=["GET"])
-@api_guard
-def api_scanner():
-    force_refresh = request.args.get("refresh", "false").lower() == "true"
-    scanner_rows, scanner_errors, last_updated = get_market_data(force_refresh=force_refresh)
-    summary = MARKET_CACHE.get("summary") or {}
-    return _api_success(
-        {"rows": scanner_rows, "errors": scanner_errors, "last_updated": last_updated, "summary": summary},
-        rows=scanner_rows,
-        errors=scanner_errors,
-        last_updated=last_updated,
-        summary=summary,
-        ok=True,
-    )
 
 
-@app.route("/api/analysis/<section>/tickers", methods=["GET"])
-@api_guard
-def api_analysis_section_get(section: str):
-    focus_ticker = request.args.get("focus", "").strip().upper()
-    payload = _build_section_payload(_current_user_id(), section, focus_ticker=focus_ticker)
-    return _api_success(payload, **payload, ok=True)
 
 
-@app.route("/api/analysis/<section>/tickers", methods=["POST"])
-@api_guard
-def api_analysis_section_add(section: str):
-    body = request.get_json(silent=True) or {}
-    ticker = str(body.get("ticker", "")).strip().upper()
-    if not ticker:
-        raise ValidationError("Ticker is required.")
-    user_id = _current_user_id()
-    try:
-        add_section_ticker(user_id, section, ticker, _default_analysis_section_tickers(user_id))
-    except ValueError as error:
-        raise ValidationError(str(error)) from error
-    payload = _build_section_payload(user_id, section)
-    return _api_success(payload, **payload, ok=True)
 
 
-@app.route("/api/analysis/<section>/tickers/<ticker>", methods=["DELETE"])
-@api_guard
-def api_analysis_section_remove(section: str, ticker: str):
-    user_id = _current_user_id()
-    try:
-        remove_section_ticker(user_id, section, ticker, _default_analysis_section_tickers(user_id))
-    except ValueError as error:
-        raise ValidationError(str(error)) from error
-    payload = _build_section_payload(user_id, section)
-    return _api_success(payload, **payload, ok=True)
 
 
-@app.route("/api/live-data-status", methods=["GET"])
-@api_guard
-def api_live_data_status():
-    force_refresh = request.args.get("refresh", "false").lower() == "true"
-    scanner_rows, scanner_errors, last_updated = get_market_data(force_refresh=force_refresh)
-    connected = bool(scanner_rows)
-    payload = {
-        "provider": "Yahoo Finance",
-        "connection_status": "🟢 Connected" if connected else "🔴 Offline",
-        "last_update_time": last_updated or "Never",
-        "symbols_loaded": len(scanner_rows),
-        "market_session": _market_session(),
-        "errors": scanner_errors,
-    }
-    return _api_success(
-        payload,
-        provider=payload["provider"],
-        connection_status=payload["connection_status"],
-        last_update_time=payload["last_update_time"],
-        symbols_loaded=payload["symbols_loaded"],
-        market_session=payload["market_session"],
-        errors=payload["errors"],
-        ok=True,
-    )
 
 
-@app.route("/api/options/<ticker>", methods=["GET"])
-@api_guard
-def api_options_ticker(ticker: str):
-    force_refresh = request.args.get("refresh", "false").lower() == "true"
-    try:
-        research_payload = get_options_data_for_ticker(ticker=ticker, force_refresh=force_refresh)
-    except ValueError as error:
-        raise ValidationError(str(error)) from error
-    legacy_payload = to_legacy_options_payload(research_payload)
-    return _api_success(
-        research_payload,
-        options=legacy_payload,
-        strategy_intelligence=get_strategy_data_for_ticker(ticker=ticker, force_refresh=force_refresh),
-        chart_levels=get_chart_levels_for_ticker(ticker=ticker, force_refresh=force_refresh),
-        ok=True,
-    )
 
 
-@app.route("/api/strategy/<ticker>", methods=["GET"])
-@api_guard
-def api_strategy_ticker(ticker: str):
-    force_refresh = request.args.get("refresh", "false").lower() == "true"
-    payload = get_strategy_data_for_ticker(ticker=ticker, force_refresh=force_refresh)
-    return _api_success(payload, strategy=payload, ok=True)
 
 
-@app.route("/api/chart-levels/watchlist", methods=["GET"])
-@api_guard
-def api_chart_levels_watchlist():
-    force_refresh = request.args.get("refresh", "false").lower() == "true"
-    query_tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
-    tickers = query_tickers or get_watchlist_tickers(_current_user_id()) or [row["ticker"] for row in get_market_data(force_refresh=False)[0][:6]]
-    rows = [get_chart_levels_for_ticker(ticker=ticker, force_refresh=force_refresh) for ticker in tickers]
-    return _api_success({"rows": rows, "count": len(rows)}, rows=rows, count=len(rows), ok=True)
 
 
-@app.route("/api/chart-levels/<ticker>", methods=["GET"])
-@api_guard
-def api_chart_levels_ticker(ticker: str):
-    force_refresh = request.args.get("refresh", "false").lower() == "true"
-    payload = get_chart_levels_for_ticker(ticker=ticker, force_refresh=force_refresh)
-    return _api_success(payload, chart_levels=payload, ok=True)
 
 
-@app.route("/api/chart-history/<ticker>", methods=["GET"])
-@api_guard
-def api_chart_history_ticker(ticker: str):
-    """Raw OHLC candles for the real dashboard chart (2026-09-04) - paired
-    with /api/chart-levels/<ticker> above by the frontend (candles here,
-    computed support/resistance/EMA/VWAP there), kept as two separate
-    single-responsibility endpoints rather than one combined payload.
-
-    ?interval= (added 2026-09-04, then refined same-day from a coarser
-    "range" concept to real per-candle granularity per direct feedback -
-    "from 1min to daily... the hourly, 15min, 30min, 10min and even the
-    5min one") selects one of CHART_INTERVAL_TO_PERIOD's keys
-    (1m/5m/10m/15m/30m/1h/1d) - defaults to 1d (daily bars, this
-    endpoint's original, only behavior before any selector existed) for
-    any caller that doesn't pass it."""
-    force_refresh = request.args.get("refresh", "false").lower() == "true"
-    chart_interval = request.args.get("interval", DEFAULT_CHART_INTERVAL)
-    payload = get_chart_history_for_ticker(ticker=ticker, chart_interval=chart_interval, force_refresh=force_refresh)
-    return _api_success(payload, chart_history=payload, ok=True)
 
 
-@app.route("/api/reversal-map", methods=["GET"])
-def api_reversal_map():
-    # Only reads reversal_rows/trend_errors below - include_opportunities=False
-    # skips the entire strategy+chart+options pipeline this route was
-    # previously paying for on every poll without ever touching its output.
-    context = _build_page_context(include_reversal=True, include_trend=True, include_opportunities=False)
-    return jsonify({"rows": context["reversal_rows"], "errors": context["trend_errors"]})
 
 
-@app.route("/api/trend-detection", methods=["GET"])
-def api_trend_detection():
-    # Same reasoning as api_reversal_map just above - only reads
-    # trend_rows/trend_errors, never upcoming_opportunities.
-    context = _build_page_context(include_reversal=True, include_trend=True, include_opportunities=False)
-    return jsonify({"rows": context["trend_rows"], "errors": context["trend_errors"]})
 
 
-@app.route("/api/patterns", methods=["GET"])
-def api_patterns():
-    context = _build_page_context(include_patterns=True)
-    return jsonify({"candles": context["candle_rows"], "patterns": context["pattern_rows"], "errors": context["pattern_errors"]})
 
 
-@app.route("/api/trusted-accounts", methods=["GET", "POST", "DELETE"])
-def api_trusted_accounts():
-    user_id = _current_user_id()
-    if request.method == "GET":
-        return jsonify({"accounts": get_trusted_accounts(user_id)})
-
-    payload = request.get_json(silent=True) or {}
-    username = payload.get("username", "")
-    try:
-        if request.method == "POST":
-            account = add_trusted_account(user_id=user_id, username=username)
-            return jsonify({"ok": True, "account": account})
-        remove_trusted_account(user_id=user_id, username=username)
-        return jsonify({"ok": True})
-    except ValueError as error:
-        return jsonify({"ok": False, "error": str(error)}), 400
 
 
-@app.route("/api/trusted-accounts/verify", methods=["POST"])
-def api_trusted_accounts_verify():
-    payload = request.get_json(silent=True) or {}
-    result = lookup_x_user(payload.get("username", ""))
-    return jsonify(result)
 
 
-@app.route("/api/settings", methods=["GET", "POST"])
-def api_settings():
-    if request.method == "GET":
-        return jsonify(
-            {"settings": get_settings(_current_user_id()), "themes": available_themes(), "news_roadmap": get_future_news_roadmap()}
-        )
-    payload = request.get_json(silent=True) or {}
-    try:
-        settings = update_settings(_current_user_id(), payload)
-    except (TypeError, ValueError) as error:
-        return jsonify({"ok": False, "error": str(error)}), 400
-    return jsonify({"ok": True, "settings": settings})
 
 
-@app.route("/api/mission-brief/status", methods=["GET"])
-@api_guard
-def api_mission_brief_status():
-    settings = get_settings(_current_user_id())
-    data = {
-        "should_show": _mission_brief_should_show(settings),
-        "last_viewed_date": settings.get("mission_brief_last_viewed_date", ""),
-        "trading_day": _trading_day_key(),
-    }
-    return _api_success(data, ok=True, **data)
 
 
-@app.route("/api/mission-brief/dismiss", methods=["POST"])
-@api_guard
-def api_mission_brief_dismiss():
-    settings = _dismiss_mission_brief()
-    data = {
-        "ok": True,
-        "dismissed": True,
-        "last_viewed_date": settings.get("mission_brief_last_viewed_date", ""),
-    }
-    return _api_success(data, **data)
 
 
-@app.route("/api/mission-brief/reset", methods=["POST"])
-@api_guard
-def api_mission_brief_reset():
-    settings = _reset_mission_brief()
-    data = {
-        "ok": True,
-        "show_mission_brief_again": settings.get("show_mission_brief_again", False),
-    }
-    return _api_success(data, **data)
 
 
-@app.route("/api/autonomy/status", methods=["GET"])
-@api_guard
-def api_autonomy_status():
-    payload = get_autonomy_status(_current_user_id())
-    return _api_success(payload, autonomy=payload, ok=True)
 
 
-@app.route("/api/autonomy/set-mode", methods=["POST"])
-@api_guard
-def api_autonomy_set_mode():
-    payload = request.get_json(silent=True) or {}
-    mode = str(payload.get("mode", "OFF"))
-    reason = str(payload.get("mode_change_reason", ""))
-    result = set_mode(_current_user_id(), mode=mode, reason=reason)
-    return _api_success(result, autonomy=result, ok=True)
 
 
-@app.route("/api/autonomy/emergency-stop", methods=["POST"])
-@api_guard
-def api_autonomy_emergency_stop():
-    payload = request.get_json(silent=True) or {}
-    result = emergency_stop(_current_user_id(), reason=str(payload.get("mode_change_reason", "")))
-    return _api_success(result, autonomy=result, ok=True)
 
 
-@app.route("/api/safety/close-everything", methods=["POST"])
-@api_guard
-def api_close_everything():
-    """Confirmed flatten. The phrase must match or nothing is sent to the broker."""
-    import flatten_account
-    import phone_alerts
-
-    payload = request.get_json(silent=True) or {}
-    if not flatten_account.confirmed(str(payload.get("confirm") or "")):
-        return _api_failure(
-            "Type CLOSE EVERYTHING to confirm. Nothing was cancelled or closed.",
-            status_code=400,
-            error_code="confirmation_required",
-            ok=False,
-        )
-    user_id = _current_user_id()
-    emergency_stop(user_id, reason="Close everything confirmed from the stop button.")
-    try:
-        result = flatten_account.run_for_user(user_id)
-    except Exception as error:  # noqa: BLE001 - the stop is already on; report the failure
-        phone_alerts.notify("error", "Close everything failed", str(error)[:500])
-        raise
-    phone_alerts.notify("halt", "Close everything", "Open orders were cancelled and positions were flattened.")
-    return _api_success(result, ok=bool(result.get("ok")), **result)
 
 
-@app.route("/api/autonomy/reset-stop", methods=["POST"])
-@api_guard
-def api_autonomy_reset_stop():
-    payload = request.get_json(silent=True) or {}
-    result = reset_emergency_stop(_current_user_id(), reason=str(payload.get("mode_change_reason", "")))
-    return _api_success(result, autonomy=result, ok=True)
 
 
-@app.route("/api/autonomy/risk-settings", methods=["POST"])
-@api_guard
-def api_autonomy_risk_settings():
-    payload = request.get_json(silent=True) or {}
-    try:
-        result = update_risk_settings(
-            _current_user_id(),
-            daily_loss_limit_percent=payload.get("daily_loss_limit_percent"),
-            risk_percent_of_balance=payload.get("risk_percent_of_balance"),
-            max_positions=payload.get("max_positions"),
-            option_stop_loss_percent=payload.get("option_stop_loss_percent"),
-            option_target_gain_percent=payload.get("option_target_gain_percent"),
-            option_close_days_before_expiration=payload.get("option_close_days_before_expiration"),
-            max_position_exposure_percent=payload.get("max_position_exposure_percent"),
-            max_total_exposure_percent=payload.get("max_total_exposure_percent"),
-            max_sector_exposure_percent=payload.get("max_sector_exposure_percent"),
-            max_drawdown_percent=payload.get("max_drawdown_percent"),
-            losing_streak_limit=payload.get("losing_streak_limit"),
-        )
-    except (ValueError, TypeError) as error:
-        raise ValidationError(str(error)) from error
-    return _api_success(result, autonomy=result, ok=True)
 
 
 OVERNIGHT_MIN_CONFIDENCE = 55  # matches the confidence floor the dashboard itself uses to call something a real opportunity vs WAIT
@@ -4440,6 +2434,16 @@ def _get_live_webull_balance(user_id: str, force_refresh: bool = False) -> Dict[
             cost_basis = market_value - unrealized_pnl
             unrealized_pnl_percent = (unrealized_pnl / cost_basis * 100) if cost_basis else 0.0
             day_pnl = float(balance.get("total_day_profit_loss", 0) or 0)
+            margin_account = webull_api.find_individual_margin_account(sandbox_accounts)
+            if margin_account and margin_account.get("account_id") and margin_account.get("account_id") != cash_account.get("account_id"):
+                try:
+                    import daily_loss
+                    margin_balance = webull_api.get_account_balance(
+                        creds["app_key"], creds["app_secret"], margin_account["account_id"],
+                    )
+                    day_pnl = daily_loss.combined_day_pnl(balance, margin_balance)
+                except Exception as margin_error:  # noqa: BLE001 - cash day P/L still shown; the scan does the same when margin balance fails
+                    logger.warning("Margin day P/L was not included in the loss cap: %s", margin_error)
             real_net_liquidation_value = float(balance.get("total_net_liquidation_value", 0) or 0)
             virtual_net_account_value = get_virtual_net_account_value(user_id, real_net_liquidation_value)
             payload = {
@@ -4519,11 +2523,6 @@ def _current_webull_trading_session() -> str:
     return "ALL"
 
 
-@app.route("/api/autonomy/overnight-orders", methods=["GET"])
-@api_guard
-def api_autonomy_overnight_orders():
-    orders = list_overnight_orders(_current_user_id())
-    return _api_success({"orders": orders}, orders=orders, ok=True)
 
 
 def _reconcile_closed_ticker_exit_orders(user_id: str, creds: Dict[str, str], account_id: str, ticker: str) -> None:
@@ -4787,15 +2786,12 @@ def _new_entry_halt_reason(user_id: str, day_pnl: float, current_balance: float,
     import kill_switch
     from autonomy.closed_trades import list_closed_trades
 
+    import daily_loss
     daily_loss_limit_percent = float(risk_settings.get("daily_loss_limit_percent", 0) or 0)
-    if _is_daily_loss_limit_hit(day_pnl, current_balance, daily_loss_limit_percent):
-        daily_loss_limit = current_balance * (daily_loss_limit_percent / 100)
-        reason = (
-            f"Daily loss limit reached (today's P/L ${day_pnl:.2f} vs -${daily_loss_limit:.2f} limit, "
-            f"{daily_loss_limit_percent:.1f}% of ${current_balance:,.2f} balance). No new trades until tomorrow."
-        )
-        kill_switch.note_halt(user_id, reason)
-        return reason
+    state = daily_loss.evaluate(day_pnl, current_balance, daily_loss_limit_percent)
+    if state["halted"]:
+        kill_switch.note_halt(user_id, state["message"])
+        return state["message"]
     streak_limit = int(risk_settings.get("losing_streak_limit", 3) or 0)
     reason = kill_switch.streak_block_reason(list_closed_trades(user_id), streak_limit)
     if reason:
@@ -4806,11 +2802,11 @@ def _new_entry_halt_reason(user_id: str, day_pnl: float, current_balance: float,
 
 
 def _is_daily_loss_limit_hit(day_pnl: float, current_balance: float, daily_loss_limit_percent: float) -> bool:
-    """daily_loss_limit_percent <= 0 means the limit is disabled - never blocks."""
-    if daily_loss_limit_percent <= 0:
-        return False
-    daily_loss_limit = current_balance * (daily_loss_limit_percent / 100)
-    return day_pnl <= -daily_loss_limit
+    """daily_loss_limit_percent <= 0 means the limit is disabled - never blocks.
+
+    Same formula as the home loss-cap meter (daily_loss.evaluate)."""
+    import daily_loss
+    return bool(daily_loss.evaluate(day_pnl, current_balance, daily_loss_limit_percent)["halted"])
 
 
 def _available_position_slots(max_positions: int, open_position_count: int, default_max_orders: int) -> int:
@@ -9845,34 +7841,6 @@ def _call_holding_user_scan_lock(user_id: str, fn, wait_seconds: float = 20.0):
             time.sleep(0.5)
 
 
-@app.route("/api/admin/reconcile-position-absent", methods=["POST"])
-def api_admin_reconcile_position_absent():
-    """The admin-facing route for _resolve_position_absent_reconciliation -
-    see its own docstring for the full discipline this delegates to."""
-    guard = _require_admin()
-    if guard:
-        return guard
-    payload = request.get_json(silent=True) or {}
-    target_user_id = str(payload.get("user_id", ""))
-    try:
-        # Under the user's scan lock: the continuous monitor reads the order
-        # list, makes broker calls, then writes it back, so a close landing
-        # between its read and write would be silently reverted.
-        result = _call_holding_user_scan_lock(
-            target_user_id,
-            lambda: _resolve_position_absent_reconciliation(
-                target_user_id=target_user_id,
-                admin_user_id=_current_user_id(),
-                entry_client_order_id=str(payload.get("entry_client_order_id", "")),
-                reason=str(payload.get("reason", "")),
-                confirmation=str(payload.get("confirmation", "")),
-            ),
-        )
-    except ScanAlreadyRunningError:
-        return _api_failure("A scan or monitor pass is running for this account - try again in a few seconds.", status_code=409, error_code="busy", ok=False)
-    except ValidationError as error:
-        return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
-    return _api_success({"entry": result["entry"]}, ok=True, entry=result["entry"])
 
 
 def _monitor_transitional_orders(user_id: str, creds: Dict[str, str], account_id: str, include_unstamped: bool = True) -> bool:
@@ -11078,120 +9046,17 @@ def _ticket_for_api(ticket: Dict[str, object]) -> Dict[str, object]:
     return {key: value for key, value in ticket.items() if key not in ("llm_reasoning",)} | {"llm_reasoning": ticket.get("llm_reasoning")}
 
 
-@app.route("/api/trade-tickets", methods=["GET"])
-@api_guard
-def api_trade_tickets_list():
-    user_id = _current_user_id()
-    tickets = trade_tickets.list_tickets(user_id)
-    status = get_autonomy_status(user_id)
-    limit = max(1, min(request.args.get("limit", default=30, type=int), 200))
-    return _api_success({
-        "approval_mode": bool(status.get("approval_required_status")),
-        "current_mode": status.get("current_mode"),
-        "tickets": [_ticket_for_api(t) for t in tickets[:limit]],
-        "awaiting_count": sum(1 for t in tickets if t.get("status") == trade_tickets.AWAITING_APPROVAL),
-    })
 
 
-@app.route("/api/trade-tickets/<ticket_id>/approve", methods=["POST"])
-@api_guard
-def api_trade_ticket_approve(ticket_id: str):
-    """Approve one ticket. The approval must carry the ticket version the
-    user saw; the ticket is claimed atomically, re-checked against the
-    broker and the market under the account's scan lock, and only then
-    submitted through the scan's own submission path."""
-    user_id = _current_user_id()
-    payload = request.get_json(silent=True) or {}
-    version = str(payload.get("version") or "")
-    creds = get_webull_credentials(user_id)
-    if not is_webull_configured(user_id):
-        return _api_failure("Connect Webull in Account Hub before approving a trade.", status_code=400, error_code="not_configured", ok=False)
-    try:
-        ticket = trade_tickets.claim_for_approval(user_id, ticket_id, version, approved_by=user_id)
-    except trade_tickets.TicketConflict as error:
-        return _api_failure(str(error), status_code=409, error_code="ticket_conflict", ok=False)
-
-    def _recheck_and_submit():
-        recheck = _recheck_ticket_before_submission(user_id, creds, ticket)
-        if not recheck["ok"]:
-            def _fail(t):
-                t["status"] = trade_tickets.RECHECK_FAILED
-                t["recheck"] = recheck
-            return trade_tickets.update_ticket(user_id, ticket_id, _fail), None
-        entry = _execute_approved_ticket(user_id, creds, ticket)
-
-        def _done(t):
-            t["status"] = trade_tickets.SUBMITTED
-            t["recheck"] = recheck
-            t["submission"] = {
-                "status": entry.get("status"), "entry_client_order_id": entry.get("entry_client_order_id"),
-                "lifecycle_state": entry.get("lifecycle_state"), "error": entry.get("error"), "record_id": entry.get("record_id"),
-                "submitted_at": _now_utc().isoformat(),
-            }
-        return trade_tickets.update_ticket(user_id, ticket_id, _done), entry
-
-    try:
-        updated, entry = _call_holding_user_scan_lock(user_id, _recheck_and_submit)
-    except ScanAlreadyRunningError:
-        # Give the ticket back rather than leaving it stuck in APPROVED.
-        def _release(t):
-            t["status"] = trade_tickets.AWAITING_APPROVAL
-            t.pop("approved_at", None)
-        trade_tickets.update_ticket(user_id, ticket_id, _release)
-        return _api_failure("A scan is running for this account - try again in a few seconds.", status_code=409, error_code="busy", ok=False)
-    except Exception as error:  # noqa: BLE001 - never leave a ticket stuck in APPROVED
-        def _errored(t):
-            t["status"] = trade_tickets.RECHECK_FAILED
-            t["recheck"] = {"ok": False, "reasons": [f"unexpected error: {str(error)[:200]}"], "checked_at": _now_utc().isoformat()}
-        trade_tickets.update_ticket(user_id, ticket_id, _errored)
-        logger.exception("Approved ticket %s failed unexpectedly", ticket_id)
-        return _api_failure(f"Approval failed: {error}", status_code=500, error_code="approval_failed", ok=False)
-
-    if updated.get("status") == trade_tickets.RECHECK_FAILED:
-        reasons = (updated.get("recheck") or {}).get("reasons") or []
-        return _api_failure("Not submitted - " + "; ".join(reasons), status_code=409, error_code="recheck_failed", ok=False, ticket=_ticket_for_api(updated))
-    return _api_success({"ticket": _ticket_for_api(updated), "entry": entry}, ok=True)
 
 
-@app.route("/api/trade-tickets/<ticket_id>/decline", methods=["POST"])
-@api_guard
-def api_trade_ticket_decline(ticket_id: str):
-    user_id = _current_user_id()
-    payload = request.get_json(silent=True) or {}
-    try:
-        ticket = trade_tickets.decline_ticket(
-            user_id, ticket_id, str(payload.get("version") or ""), reason=str(payload.get("reason") or ""), declined_by=user_id,
-        )
-    except trade_tickets.TicketConflict as error:
-        return _api_failure(str(error), status_code=409, error_code="ticket_conflict", ok=False)
-    return _api_success({"ticket": _ticket_for_api(ticket)}, ok=True)
 
 
 SETUP_TIMEFRAMES = ("1d", "1h", "30m", "15m", "5m")
 
 
-@app.route("/api/setups/coverage", methods=["GET"])
-@api_guard
-def api_setups_coverage():
-    """Every setup the engine can detect, its rules and its validation
-    status per timeframe - plus named formations it cannot detect yet."""
-    return _api_success(setups_service.coverage())
 
 
-@app.route("/api/setups/scan", methods=["GET"])
-@api_guard
-def api_setups_scan():
-    """Setup discovery for up to 12 symbols (read-only market data)."""
-    symbols = [s.strip().upper() for s in (request.args.get("symbols") or "").split(",") if s.strip()][:12]
-    if not symbols:
-        return _api_failure("Pass symbols=AAPL,MSFT", status_code=400, error_code="missing_symbols", ok=False)
-    timeframes = [t for t in (request.args.get("timeframes") or "1d,5m").split(",") if t in SETUP_TIMEFRAMES] or ["1d"]
-    results = setups_service.analyze(symbols, timeframes)
-    for result in results:
-        for opportunity in result["opportunities"]:
-            opportunity.pop("primary_detection", None)
-    return _api_success({"results": results, "timeframes": timeframes,
-                         "qualifying": [r["trade_candidate"]["symbol"] for r in results if r.get("trade_candidate")]})
 
 
 BROKER_RECONCILIATION_INTERVAL_SECONDS = 15 * 60
@@ -11269,141 +9134,16 @@ def _owner_position_action_guard(user_id: str, record_id: str, confirm_symbol: s
     return record, account_id, position, creds
 
 
-@app.route("/api/broker/positions/<record_id>/protect", methods=["POST"])
-@api_guard
-def api_broker_protect_position(record_id: str):
-    user_id = _current_user_id()
-    payload = request.get_json(silent=True) or {}
-    try:
-        stop_price = float(payload.get("stop_price") or 0)
-        target_price = float(payload.get("target_price") or 0)
-    except (TypeError, ValueError):
-        return _api_failure("Stop and target must be numbers.", status_code=400, error_code="invalid", ok=False)
-
-    def _protect():
-        record, account_id, position, _creds = _owner_position_action_guard(user_id, record_id, str(payload.get("confirm_symbol") or ""))
-        last = float(position.get("last_price") or 0)
-        short = record.get("direction") == "short"
-        if stop_price <= 0:
-            raise ValidationError("Enter a stop price.")
-        if last and ((not short and stop_price >= last) or (short and stop_price <= last)):
-            raise ValidationError(f"A stop at {stop_price:.2f} would trigger immediately (last price {last:.2f}).")
-        if target_price and last and ((not short and target_price <= last) or (short and target_price >= last)):
-            raise ValidationError(f"A target at {target_price:.2f} is already reached (last price {last:.2f}).")
-        orders = list_overnight_orders(user_id)
-        stored = next(o for o in orders if str(o.get("record_id") or o.get("entry_client_order_id")) == record_id)
-        stored["stop"] = round(stop_price, 2)
-        if target_price:
-            stored["target"] = round(target_price, 2)
-        stored["account_id"] = stored.get("account_id") or account_id
-        stored["owner_protection_set_at"] = _now_utc().isoformat()
-        stored["owner_protection_set_by"] = user_id
-        replace_overnight_orders(user_id, orders)
-        event_journal.emit(user_id, "protection.owner_stop_set", correlation_id=event_journal.correlation_id_for(stored),
-                           ticker=stored.get("ticker"), account_id=account_id, source="owner",
-                           data={"stop": stored["stop"], "target": stored.get("target"), "broker_quantity": position.get("quantity"), "last_price": last})
-        return stored
-
-    try:
-        stored = _call_holding_user_scan_lock(user_id, _protect)
-    except ValidationError as error:
-        return _api_failure(str(error), status_code=400, error_code="refused", ok=False)
-    except ScanAlreadyRunningError:
-        return _api_failure("A scan is running for this account - try again in a few seconds.", status_code=409, error_code="busy", ok=False)
-    return _api_success({"record_id": record_id, "stop": stored.get("stop"), "target": stored.get("target"),
-                         "next": "The monitor places and confirms the stop at Webull on its next pass during market hours (9:30-4:00 ET). Broker sync will show it once it is working."})
 
 
-@app.route("/api/broker/positions/<record_id>/close", methods=["POST"])
-@api_guard
-def api_broker_close_position(record_id: str):
-    user_id = _current_user_id()
-    payload = request.get_json(silent=True) or {}
-    if _current_webull_trading_session() != "CORE":
-        return _api_failure("Closing from here needs regular market hours (9:30-4:00 ET) so the order can fill.", status_code=400, error_code="market_closed", ok=False)
-
-    def _close():
-        record, account_id, position, creds = _owner_position_action_guard(user_id, record_id, str(payload.get("confirm_symbol") or ""))
-        symbol = str(record.get("ticker")).upper()
-        quantity = abs(float(position.get("quantity") or 0))
-        last = float(position.get("last_price") or 0)
-        if last <= 0:
-            raise ValidationError("The broker did not report a last price - cannot price a closing order safely.")
-        short = record.get("direction") == "short" or float(position.get("quantity") or 0) < 0
-        side = "BUY" if short else "SELL"
-        limit = round(last * (1 + MANUAL_CLOSE_SLIPPAGE) if short else last * (1 - MANUAL_CLOSE_SLIPPAGE), 2)
-        result = webull_api.place_stock_order(creds["app_key"], creds["app_secret"], account_id, symbol, side, quantity, limit,
-                                              trading_session="CORE", opens_position=False)
-        orders = list_overnight_orders(user_id)
-        stored = next(o for o in orders if str(o.get("record_id") or o.get("entry_client_order_id")) == record_id)
-        stored["owner_close"] = {"client_order_id": result.get("client_order_id"), "side": side, "quantity": quantity,
-                                 "limit_price": limit, "submitted_at": _now_utc().isoformat(), "submitted_by": user_id}
-        replace_overnight_orders(user_id, orders)
-        event_journal.emit(user_id, "exit.owner_close_submitted", correlation_id=event_journal.correlation_id_for(stored),
-                           ticker=symbol, account_id=account_id, source="owner",
-                           data={"side": side, "quantity": quantity, "limit_price": limit, "client_order_id": result.get("client_order_id")})
-        return stored["owner_close"]
-
-    try:
-        submitted = _call_holding_user_scan_lock(user_id, _close)
-    except ValidationError as error:
-        return _api_failure(str(error), status_code=400, error_code="refused", ok=False)
-    except ScanAlreadyRunningError:
-        return _api_failure("A scan is running for this account - try again in a few seconds.", status_code=409, error_code="busy", ok=False)
-    except Exception as error:  # noqa: BLE001 - the broker's own answer, shown as-is
-        return _api_failure(f"Webull did not accept the order: {str(error)[:200]}", status_code=502, error_code="broker_rejected", ok=False)
-    return _api_success({"submitted": submitted,
-                         "next": "Submitted to Webull - not yet a fill. Broker sync will show the position gone once it fills; then close the record in Admin (the sale shows there as evidence)."})
 
 
-@app.route("/api/broker/reconciliation", methods=["GET", "POST"])
-@api_guard
-def api_broker_reconciliation():
-    """GET: the last broker-vs-app comparison. POST: run one now (read-only
-    broker calls; nothing is placed, cancelled or changed)."""
-    user_id = _current_user_id()
-    if request.method == "POST":
-        if not is_webull_configured(user_id):
-            return _api_failure("Connect Webull in Account Hub first.", status_code=400, error_code="not_configured", ok=False)
-        stored = _run_broker_reconciliation(user_id)
-    else:
-        stored = broker_reconciliation.load(user_id)
-    return _api_success({**stored, "environment": broker_env.current()["environment"],
-                         "interval_seconds": BROKER_RECONCILIATION_INTERVAL_SECONDS})
 
 
-@app.route("/api/events", methods=["GET"])
-@api_guard
-def api_events_recent():
-    """The signed-in user's event journal, newest last. Filters: since (ISO,
-    compared to logged_at), type (repeatable), ticker, limit (<= 1000)."""
-    user_id = _current_user_id()
-    limit = max(1, min(request.args.get("limit", default=200, type=int), 1000))
-    events = event_journal.read_events(
-        user_id, since=request.args.get("since") or None, types=request.args.getlist("type") or None,
-        ticker=request.args.get("ticker") or None, limit=limit,
-    )
-    return _api_success({"events": events, "count": len(events), "journal_failures": event_journal.failure_stats()["count"]})
 
 
-@app.route("/api/events/chains", methods=["GET"])
-@api_guard
-def api_event_chains():
-    """Recent trade ideas that got past signal evaluation, newest first."""
-    user_id = _current_user_id()
-    limit = max(1, min(request.args.get("limit", default=30, type=int), 200))
-    return _api_success({"chains": event_journal.recent_chains(user_id, limit=limit, since=request.args.get("since") or None)})
 
 
-@app.route("/api/events/trace/<correlation_id>", methods=["GET"])
-@api_guard
-def api_event_trace(correlation_id: str):
-    """Everything known about one trade idea, signal to exit."""
-    user_id = _current_user_id()
-    trace = event_journal.trace(user_id, correlation_id[:64], records=list_overnight_orders(user_id))
-    if not trace["events"]:
-        return _api_failure("No events for that correlation id.", status_code=404, error_code="not_found", ok=False)
-    return _api_success({"trace": trace})
 
 
 def _option_exit_settings(risk_settings: Dict[str, object]) -> Dict[str, object]:
@@ -11594,7 +9334,20 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
     # guess.
     broker_buying_power = _extract_broker_buying_power(balance)
 
-    day_pnl = float(balance.get("total_day_profit_loss", 0) or 0)
+    # Fetched once and reused for buying power below. combined_day_pnl is the
+    # same figure inject_loss_cap shows on the home meter.
+    margin_balance = None
+    if margin_account_id:
+        try:
+            margin_balance = webull_api.get_account_balance(creds["app_key"], creds["app_secret"], margin_account_id)
+        except Exception as error:  # noqa: BLE001 - shorts fail closed below; day P/L stays cash-only, matching the home meter
+            logger.warning("Margin account balance/snapshot lookup failed, short candidates this scan will fail closed: %s", error)
+
+    import daily_loss
+    # Same account id would be the cash balance counted twice. The home
+    # meter skips that case too.
+    distinct_margin = margin_balance if margin_account_id and margin_account_id != account_id else None
+    day_pnl = daily_loss.combined_day_pnl(balance, distinct_margin)
     halt_reason = _new_entry_halt_reason(user_id, day_pnl, current_balance, risk_settings)
     if halt_reason:
         raise ValidationError(halt_reason)
@@ -11660,9 +9413,8 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
     # margin_broker_buying_power (equity buying power) - see
     # _extract_option_buying_power.
     margin_option_buying_power: Optional[float] = None
-    if margin_account_id:
+    if margin_balance is not None:
         try:
-            margin_balance = webull_api.get_account_balance(creds["app_key"], creds["app_secret"], margin_account_id)
             margin_broker_buying_power = _extract_broker_buying_power(margin_balance)
             margin_option_buying_power = _extract_option_buying_power(margin_balance)
             margin_real_net_liquidation_value = float(margin_balance.get("total_net_liquidation_value", 0) or 0)
@@ -12801,84 +10553,16 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
     }
 
 
-@app.route("/api/autonomy/run-overnight-scan", methods=["POST"])
-@api_guard
-def api_autonomy_run_overnight_scan():
-    summary = _run_autonomous_trade_scan(_current_user_id())
-    return _api_success(summary, **summary)
 
 
-@app.route("/api/autonomy/preview-scan", methods=["POST"])
-@api_guard
-def api_autonomy_preview_scan():
-    """Runs the REAL scan - real market data, real account balance, real
-    risk-based sizing - but with dry_run=True, so nothing is ever submitted
-    to the broker and nothing is persisted (see _run_autonomous_trade_scan_locked's
-    dry_run docstring for the exact guarantee). Built for exactly one
-    purpose: let a user see precisely what the agent's own research and
-    candidate selection would do RIGHT NOW, before ever authorizing a real
-    submission - the agent does the research; the human still decides
-    whether to act on it. Session-authenticated like every other manual
-    autonomy action, not the cron secret."""
-    summary = _run_autonomous_trade_scan(_current_user_id(), dry_run=True)
-    return _api_success(summary, **summary)
 
 
-@app.route("/api/autonomy/activate", methods=["POST"])
-@api_guard
-def api_autonomy_activate():
-    user_id = _current_user_id()
-    autonomy_result = set_mode(user_id, mode="AUTONOMOUS", reason="Activated from the Mission Control planet button.")
-    try:
-        scan_result = _run_autonomous_trade_scan(user_id)
-    except ValidationError as error:
-        scan_result = {"ok": False, "error": str(error), "placed_count": 0, "skipped_count": 0}
-    payload = {"ok": True, "autonomy": autonomy_result, "scan": scan_result}
-    return _api_success(payload, **payload)
 
 
-@app.route("/api/autonomy/deactivate", methods=["POST"])
-@api_guard
-def api_autonomy_deactivate():
-    user_id = _current_user_id()
-    autonomy_result = set_mode(user_id, mode="OFF", reason="Deactivated from the Mission Control planet button.")
-    payload = {"ok": True, "autonomy": autonomy_result}
-    return _api_success(payload, **payload)
 
 
-@app.route("/api/autonomy/scan-runs", methods=["GET"])
-@api_guard
-def api_autonomy_scan_runs():
-    """Authenticated, per-session (NOT the cron secret) - the durable,
-    newest-first record of every cron-trigger tick this account was
-    included in, per autonomy/scan_run_log.py. Exists so a user can
-    answer "was my account actually scanned" directly, instead of relying
-    on the external scheduler's own HTTP 200 (which proves the cron
-    fired, not that any given account was processed - see that module's
-    docstring). Also rendered server-side on the Account Hub page; this
-    endpoint is the same data for programmatic/refresh use."""
-    user_id = _current_user_id()
-    limit = request.args.get("limit", default=50, type=int)
-    limit = max(1, min(limit, 200))
-    runs = list_scan_runs(user_id, limit=limit)
-    return _api_success({"scan_runs": runs}, ok=True, scan_runs=runs)
 
 
-@app.route("/api/autonomy/efficiency-report", methods=["GET"])
-@api_guard
-def api_autonomy_efficiency_report():
-    """Authenticated, per-session, same conventions as
-    /api/autonomy/scan-runs just above. Wraps
-    autonomy/efficiency_report.py's build_efficiency_report - the
-    conversion-funnel (found -> qualifying -> placed), ranked skip-reason
-    breakdown, and options attempted-vs-found stats behind the "Trading
-    Efficiency" dashboard panel. See that module's own docstring for why
-    this is reporting-only and never feeds back into the live scan."""
-    user_id = _current_user_id()
-    days = request.args.get("days", default=7, type=int)
-    days = max(1, min(days, 90))
-    report = build_efficiency_report(user_id, days=days)
-    return _api_success(report, ok=True, efficiency_report=report)
 
 
 def _webull_secret_values_for_redaction(user_id: str) -> List[str]:
@@ -13018,708 +10702,12 @@ def _summarize_scan_result_for_run_log(scan_result: Dict[str, object]) -> Dict[s
     }
 
 
-@app.route("/api/autonomy/cron-trigger", methods=["POST"])
-def api_autonomy_cron_trigger():
-    """Called on a timer by a Render Cron Job (or, currently, a GitHub
-    Actions schedule - see .github/workflows/autonomous-scan-scheduler.yml),
-    not by a logged-in browser - authenticated by a shared secret instead
-    of a session cookie.
-
-    Processes EVERY registered user on EVERY tick, regardless of mode -
-    this is the fix for a real gap: previously, any user NOT in
-    AUTONOMOUS mode was skipped entirely, which meant their EXISTING
-    positions/pending orders were never reconciled by this scheduler
-    either (only new-entry scanning is supposed to be mode-gated -
-    position management must stay independent of mode, so switching
-    autonomy OFF stops new entries but must not stop protecting whatever
-    is already open). Now:
-      - AUTONOMOUS-mode users get the full scan (position management +
-        new-candidate evaluation + entries), exactly as before;
-      - every OTHER Webull-configured user gets ONLY the lightweight
-        reconciliation pass (_run_fast_order_monitor - no opportunity
-        scan, no LLM calls, no new entries), so pending orders and open
-        positions stay managed either way;
-      - a user with no Webull configured has nothing to reconcile and is
-        recorded as such.
-
-    Every user gets a DURABLE, per-tick record via
-    autonomy/scan_run_log.py (record_scan_run) - "the cron job returned
-    HTTP 200" does not prove any given account was actually scanned, since
-    this endpoint can (and does) skip or fail individual users while
-    still returning 200 overall. See that module's docstring and
-    /api/autonomy/scan-runs (the authenticated endpoint that surfaces
-    these in the dashboard) for why this exists.
-
-    Also does one LOCAL-ONLY (no broker calls) check per tick - not per
-    user - of the fast monitor's own heartbeat, alerting every admin
-    account if it's gone stale/was never configured (see
-    _alert_admins_fast_monitor_unhealthy_if_needed). This full 5-minute
-    scan is the one cron job that's already required regardless of
-    whether the faster optional monitor's own separate cron job was ever
-    set up, which is what makes it the right place to detect and surface
-    that the faster one is missing or stalled. Records its OWN heartbeat
-    (full_scan_heartbeat.py) around the whole per-user loop, which the
-    FASTER monitor's own endpoint cross-checks in the other direction -
-    see _alert_admins_full_scan_unhealthy_if_needed."""
-    expected_secret = os.environ.get("CRON_SECRET", "").strip()
-    provided_secret = request.headers.get("X-Cron-Secret", "").strip()
-    if not expected_secret or not hmac.compare_digest(expected_secret, provided_secret):
-        return _api_failure("Invalid or missing cron secret.", status_code=401, error_code="unauthorized", ok=False)
-
-    _alert_admins_fast_monitor_unhealthy_if_needed()
-    _alert_admins_continuous_monitor_unhealthy_if_needed()
-    run_id = record_full_scan_run_started()
-    tick_started_at = _now_utc()
-    scheduled_start_time = _nearest_scheduled_slot(tick_started_at)
-    heartbeat_snapshot = _monitor_heartbeat_snapshot_for_scan_run()
-
-    results = []
-    for user_id in list_all_user_ids():
-        status = get_autonomy_status(user_id)
-        current_mode = str(status.get("current_mode", status.get("mode", "OFF"))).upper()
-        user_actual_start = _now_utc()
-        base_record = {
-            "trigger_source": "cron-trigger",
-            "run_id": run_id,
-            "scheduled_start_time": scheduled_start_time.isoformat(),
-            "actual_start_time": user_actual_start.isoformat(),
-            "account_mode": current_mode,
-            "monitor_heartbeat": heartbeat_snapshot,
-        }
-
-        if current_mode not in ("AUTONOMOUS", "APPROVAL"):
-            # Existing-position monitoring stays independent of mode - see
-            # the docstring above. Only a lightweight reconciliation pass
-            # here, never the opportunity-scanning/new-entry work, which
-            # is AUTONOMOUS-only.
-            if not is_webull_configured(user_id):
-                record_scan_run(user_id, {
-                    **base_record, "status": "skipped",
-                    "reason": f"autonomy mode is {current_mode}, not AUTONOMOUS or APPROVAL, and Webull is not configured for this account - nothing to reconcile",
-                    "candidates_found": None, "candidates_qualifying": None,
-                    "orders_attempted": None, "orders_outcomes": None, "error": None,
-                    "completion_time": _now_utc().isoformat(),
-                })
-                results.append({"user_id": user_id, "ok": True, "skipped": "not_autonomous_mode_no_webull"})
-                continue
-            with app.test_request_context():
-                session["user_id"] = user_id
-                try:
-                    monitor_result = _run_fast_order_monitor(user_id)
-                    record_scan_run(user_id, {
-                        **base_record, "status": "skipped",
-                        "reason": (
-                            f"autonomy mode is {current_mode}, not AUTONOMOUS or APPROVAL - no new-entry scan this tick; "
-                            f"existing positions/orders were still reconciled "
-                            f"({monitor_result.get('entries_checked', 0)} transitional entries checked, "
-                            f"{monitor_result.get('still_transitional_count', 0)} still open afterward)"
-                        ),
-                        "candidates_found": None, "candidates_qualifying": None,
-                        "orders_attempted": None, "orders_outcomes": None, "error": None,
-                        "completion_time": _now_utc().isoformat(),
-                    })
-                    results.append({"user_id": user_id, "ok": True, "reconciled_only": True, **monitor_result})
-                except ScanAlreadyRunningError:
-                    record_scan_run(user_id, {
-                        **base_record, "status": "skipped",
-                        "reason": "a concurrent scan/monitor tick was already running for this account - skipped; existing positions remain protected by that concurrent pass",
-                        "candidates_found": None, "candidates_qualifying": None,
-                        "orders_attempted": None, "orders_outcomes": None, "error": None,
-                        "completion_time": _now_utc().isoformat(),
-                    })
-                    results.append({"user_id": user_id, "ok": True, "skipped": "scan_already_running"})
-                except Exception as error:  # noqa: BLE001 - one user's failure shouldn't block others
-                    record_scan_run(user_id, {
-                        **base_record, "status": "failed",
-                        "reason": f"reconciliation of existing positions failed while in {current_mode} mode",
-                        "candidates_found": None, "candidates_qualifying": None,
-                        "orders_attempted": None, "orders_outcomes": None, "error": str(error),
-                        "completion_time": _now_utc().isoformat(),
-                    }, extra_redact_secrets=_webull_secret_values_for_redaction(user_id))
-                    results.append({"user_id": user_id, "ok": False, "error": str(error)})
-            continue
-
-        with app.test_request_context():
-            session["user_id"] = user_id
-            try:
-                scan_result = _run_autonomous_trade_scan_waiting_for_lock(user_id)
-                results.append({"user_id": user_id, "ok": True, **scan_result})
-                summary = _summarize_scan_result_for_run_log(scan_result)
-                record_scan_run(user_id, {
-                    **base_record, "status": "processed", "error": None,
-                    "completion_time": _now_utc().isoformat(),
-                    **summary,
-                })
-            except ScanAlreadyRunningError:
-                # Benign, expected overlap (a retry, a double-fire, a manual
-                # click mid-tick) - the lock did its job by refusing this
-                # call outright, so this is not a real failure worth
-                # surfacing the same way as an actual error.
-                results.append({"user_id": user_id, "ok": True, "skipped": "scan_already_running"})
-                record_scan_run(user_id, {
-                    **base_record, "status": "skipped",
-                    "reason": "a concurrent scan was already running for this account - skipped",
-                    "candidates_found": None, "candidates_qualifying": None,
-                    "orders_attempted": None, "orders_outcomes": None, "error": None,
-                    "completion_time": _now_utc().isoformat(),
-                })
-            except Exception as error:  # noqa: BLE001 - one user's failure shouldn't block others
-                results.append({"user_id": user_id, "ok": False, "error": str(error)})
-                record_scan_run(user_id, {
-                    **base_record, "status": "failed",
-                    "reason": "the autonomous scan raised an unhandled error",
-                    "candidates_found": None, "candidates_qualifying": None,
-                    "orders_attempted": None, "orders_outcomes": None, "error": str(error),
-                    "completion_time": _now_utc().isoformat(),
-                }, extra_redact_secrets=_webull_secret_values_for_redaction(user_id))
-
-    record_full_scan_run_completed(
-        run_id,
-        ran_for_users=len(results),
-        failures_by_account={r["user_id"]: r["error"] for r in results if not r.get("ok")},
-    )
-
-    # Setup-detector evidence is refreshed weekly, after the close, on this
-    # same timer (read-only market data; runs in the background).
-    setup_validation = None
-    data_backup = None
-    try:
-        if _now_utc().hour >= 20 and backups.due():
-            data_backup = backups.create("daily (cron)")
-    except Exception as error:  # noqa: BLE001 - a backup failure must never affect trading
-        logger.warning("data backup failed: %s", error)
-    setup_forward = None
-    try:
-        if setups_service.forward_tracking_due():
-            setup_forward = setups_service.run_forward_tracking(list(CORE_SCAN_UNIVERSE))
-    except Exception as error:  # noqa: BLE001 - research must never affect trading
-        logger.warning("setup forward tracking failed: %s", error)
-    try:
-        if _now_utc().hour >= 20 and setups_service.validation_is_stale():
-            setup_validation = setups_service.start_validation(list(CORE_SCAN_UNIVERSE), reason="weekly refresh (cron)")
-    except Exception as error:  # noqa: BLE001 - research refresh must never affect trading
-        logger.warning("setup validation refresh not started: %s", error)
-    return _api_success({"ran_for_users": len(results), "results": results, "setup_validation": setup_validation,
-                         "data_backup": data_backup, "setup_forward": setup_forward},
-                        ok=True, ran_for_users=len(results))
-
-
-@app.route("/api/autonomy/fast-monitor-trigger", methods=["POST"])
-def api_autonomy_fast_monitor_trigger():
-    """Called on a SHORT timer by a SEPARATE, more-frequent Render Cron Job
-    than the one hitting /api/autonomy/cron-trigger above (that one runs
-    the full 5-minute scan). Runs ONLY _run_fast_order_monitor for each
-    user _user_needs_fast_monitor_pass says has something to check -
-    reconciliation/resumption passes, never the market-scan/new-candidate-
-    sizing work the full scan does - see that function's docstring for
-    exactly why that narrow scope is what makes this safe to run this
-    often.
-
-    CADENCE CORRECTION (confirmed against Render's own docs this session,
-    since this had previously been described as "30-60 seconds" without
-    verification): Render Cron Jobs use standard cron expression syntax,
-    whose minimum resolution is ONE MINUTE - there is no native way to
-    schedule a Render Cron Job more often than once per minute. The
-    realistic cadence for this endpoint via a native Render Cron Job is
-    therefore ~60 seconds, not 30-60. A Render Cron Job also does not
-    natively call an HTTP endpoint - it runs an arbitrary shell command in
-    a container on each firing, so the actual cron job configuration must
-    literally be a curl command, e.g.:
-        curl -X POST -H "X-Cron-Secret: $CRON_SECRET" https://<this-app>/api/autonomy/fast-monitor-trigger
-    with CRON_SECRET set as an environment variable on THAT Cron Job
-    service (Render env vars are per-service, not shared automatically
-    with the main web service).
-
-    Deliberately NOT filtered by autonomy mode (unlike the cron-trigger
-    endpoint above, whose _run_autonomous_trade_scan call legitimately
-    IS AUTONOMOUS-only, since THAT work includes placing new entries) -
-    see _user_needs_fast_monitor_pass: "safety monitoring must continue
-    when autonomy is switched OFF - OFF prevents new entries only". A
-    user who turned autonomy off is still fully covered here as long as
-    they have anything transitional, tracked, or unresolved.
-
-    This endpoint existing does NOT, on its own, make the fast monitor
-    active - the Render Cron Job described above still needs to be set up
-    separately (outside this repo). Until then, _run_autonomous_trade_scan_locked's
-    own direct call to _monitor_transitional_orders is the only thing
-    resuming ordinary transitional orders, at the slower 5-minute cadence -
-    and that call is STILL gated by AUTONOMOUS mode today, since it only
-    runs as part of the full scan the cron-trigger endpoint already
-    restricts that way.
-
-    Records a heartbeat (fast_monitor_heartbeat.py) around the ENTIRE
-    sweep - a "started" stamp before the per-user loop, a "completed"
-    stamp (with aggregate entries-checked/still-transitional counts and a
-    per-account failure map) after it - regardless of how many users had
-    anything to do. "Adding an endpoint is insufficient" without a way to
-    tell whether its scheduler is actually calling it: see
-    _fast_monitor_health_status, which the full 5-minute scan and the
-    admin-wide banner both surface a "monitor unhealthy" signal from if
-    this heartbeat goes stale.
-
-    Also does the CROSS-CHECK in the other direction - checks the FULL
-    scan's own heartbeat (_alert_admins_full_scan_unhealthy_if_needed) and
-    alerts if IT has gone stale. Neither scheduler can detect its own
-    silence; each can only detect the OTHER'S. See that function's
-    docstring for the residual gap this still leaves (both stopping at
-    once) and api_autonomy_monitor_health, the external, unauthenticated
-    endpoint that exists specifically to close it via a third-party uptime
-    monitor."""
-    expected_secret = os.environ.get("CRON_SECRET", "").strip()
-    provided_secret = request.headers.get("X-Cron-Secret", "").strip()
-    if not expected_secret or not hmac.compare_digest(expected_secret, provided_secret):
-        return _api_failure("Invalid or missing cron secret.", status_code=401, error_code="unauthorized", ok=False)
-
-    _alert_admins_full_scan_unhealthy_if_needed()
-    run_id = record_fast_monitor_run_started()
-    results = []
-    failures_by_account: Dict[str, str] = {}
-    total_entries_checked = 0
-    total_still_transitional = 0
-    for user_id in list_all_user_ids():
-        # _user_needs_fast_monitor_pass alone would skip a user with ZERO
-        # local records - but that is EXACTLY the orphan-discovery case
-        # (see _discover_orphaned_broker_entries, now called from inside
-        # _run_fast_order_monitor): local state can't identify a missing
-        # local write, so a Webull-configured user must still get a pass
-        # even with nothing locally transitional. is_webull_configured is
-        # a cheap, local-only check; _run_fast_order_monitor's own setup
-        # still validates the account is actually connected and raises
-        # ValidationError (caught below, same as any other per-user
-        # failure) if not.
-        if not (_user_needs_fast_monitor_pass(user_id) or is_webull_configured(user_id)):
-            continue
-        with app.test_request_context():
-            session["user_id"] = user_id
-            try:
-                monitor_result = _run_fast_order_monitor(user_id)
-                results.append({"user_id": user_id, "ok": True, **monitor_result})
-                total_entries_checked += int(monitor_result.get("entries_checked") or 0)
-                total_still_transitional += int(monitor_result.get("still_transitional_count") or 0)
-            except ScanAlreadyRunningError:
-                # Benign, expected overlap with a concurrent full scan (or
-                # another fast tick) for the same user - skip, the next
-                # tick will try again shortly.
-                results.append({"user_id": user_id, "ok": True, "skipped": "scan_already_running"})
-            except Exception as error:  # noqa: BLE001 - one user's failure shouldn't block others
-                results.append({"user_id": user_id, "ok": False, "error": str(error)})
-                failures_by_account[user_id] = str(error)
-            try:
-                _maybe_run_broker_reconciliation(user_id)
-            except Exception as error:  # noqa: BLE001 - a read-only report must never affect monitoring
-                logger.warning("broker reconciliation failed for a user: %s", error)
-
-    record_fast_monitor_run_completed(
-        run_id,
-        entries_checked=total_entries_checked,
-        still_transitional=total_still_transitional,
-        failures_by_account=failures_by_account,
-    )
-
-    return _api_success({"ran_for_users": len(results), "results": results}, ok=True, ran_for_users=len(results))
-
-
-@app.route("/api/autonomy/continuous-monitor-tick", methods=["POST"])
-def api_autonomy_continuous_monitor_tick():
-    """Option A (per explicit reviewer decision): the endpoint a SEPARATE,
-    independently-deployed worker process (a Render Background Worker -
-    see continuous_monitor_worker.py, NOT part of this web service) calls
-    on a tight loop (default CONTINUOUS_MONITOR_DEFAULT_INTERVAL_SECONDS,
-    10s) to reconcile active orders far faster than the ~60s fast-monitor
-    cron or the 5-minute full scan can. The worker itself has NO disk
-    access and NO Webull credentials - it is a supervised scheduler only;
-    THIS endpoint, which already owns the persistent disk and every
-    user's encrypted credentials, is what actually performs reconciliation,
-    by calling _run_fast_order_monitor per user - the exact same,
-    already-tested, never-scans-never-places-entries function the
-    ~60s cron-triggered fast-monitor-trigger endpoint calls (see
-    test_fast_monitor_never_scans_scores_or_places_a_new_entry, which
-    covers this call path too).
-
-    AUTHENTICATION - a DEDICATED secret (MONITOR_WORKER_SECRET), NOT
-    CRON_SECRET: this endpoint is meant to be called far more frequently,
-    from a differently-deployed process, and rotating/revoking its
-    credential should never require also rotating the slower cron jobs'
-    shared secret. Same constant-time comparison (hmac.compare_digest)
-    already used for CRON_SECRET elsewhere in this file - never a plain
-    `==`, which would leak timing information about how many leading
-    characters matched.
-
-    NEVER scans for candidates or places entry orders - structurally
-    true, not merely documented: this calls _run_fast_order_monitor,
-    which only ever calls _discover_orphaned_broker_entries,
-    _reconcile_exit_orders, _reconcile_unknown_submissions,
-    _recover_incomplete_manual_resolutions, and _monitor_transitional_orders -
-    none of which touch get_market_data/build_strategy_intelligence/
-    _submit_and_protect_entry/webull_api.place_stock_order.
-
-    Includes every user with unfinished orders REGARDLESS of autonomy
-    mode - same _user_needs_fast_monitor_pass(user_id) or
-    is_webull_configured(user_id) gate as the fast-monitor-trigger
-    endpoint (see that endpoint's own comment for why the OR is
-    necessary: local state alone can't identify a user needing orphan
-    discovery).
-
-    NO OVERLAPPING REQUESTS, enforced at two independent layers:
-      - the WORKER itself must never fire the next request before the
-        previous one returns or times out (see continuous_monitor_worker.py -
-        a strictly sequential loop, not a fire-and-forget interval timer);
-      - belt-and-suspenders on THIS side: continuous_monitor_tick_lock()
-        is a GLOBAL, non-blocking lock - if a previous tick's per-user
-        loop is somehow still running when a new request arrives (a
-        worker bug, a duplicate deploy, a retried request racing the
-        original), this one returns 409 immediately rather than doing
-        redundant/racy work. Existing PER-ACCOUNT locks
-        (scan_lock.user_scan_lock, held inside _run_fast_order_monitor)
-        remain the actual authoritative data-race protection regardless -
-        this global lock only prevents wasted duplicate WORK, since any
-        real per-user conflict was already impossible before this lock
-        existed.
-
-    Records TWO heartbeat signals (continuous_monitor_heartbeat.py) -
-    "worker reached us" (stamped before the lock, so recorded even on a
-    409-skip) and "reconciliation completed" (stamped after the per-user
-    loop) - see that module's docstring for why both are needed
-    independently."""
-    expected_secret = os.environ.get("MONITOR_WORKER_SECRET", "").strip()
-    provided_secret = request.headers.get("X-Monitor-Worker-Secret", "").strip()
-    if not expected_secret or not hmac.compare_digest(expected_secret, provided_secret):
-        return _api_failure("Invalid or missing monitor worker secret.", status_code=401, error_code="unauthorized", ok=False)
-
-    run_id = record_continuous_monitor_request_received()
-
-    try:
-        with continuous_monitor_tick_lock():
-            results = []
-            failures_by_account: Dict[str, str] = {}
-            total_entries_checked = 0
-            total_still_transitional = 0
-            for user_id in list_all_user_ids():
-                if not (_user_needs_fast_monitor_pass(user_id) or is_webull_configured(user_id)):
-                    continue
-                with app.test_request_context():
-                    session["user_id"] = user_id
-                    try:
-                        monitor_result = _run_fast_order_monitor(user_id)
-                        results.append({"user_id": user_id, "ok": True, **monitor_result})
-                        total_entries_checked += int(monitor_result.get("entries_checked") or 0)
-                        total_still_transitional += int(monitor_result.get("still_transitional_count") or 0)
-                    except ScanAlreadyRunningError:
-                        # Benign, expected overlap with a concurrent full
-                        # scan (or fast-monitor tick) for the SAME user -
-                        # skip, the next tick will try again shortly.
-                        results.append({"user_id": user_id, "ok": True, "skipped": "scan_already_running"})
-                    except Exception as error:  # noqa: BLE001 - one user's failure shouldn't block others
-                        results.append({"user_id": user_id, "ok": False, "error": str(error)})
-                        failures_by_account[user_id] = str(error)
-
-            record_continuous_monitor_reconciliation_completed(
-                run_id,
-                entries_checked=total_entries_checked,
-                still_transitional=total_still_transitional,
-                failures_by_account=failures_by_account,
-            )
-            # Temporary leak-hunting instrumentation - see the module-level
-            # comment above _MEMORY_PROFILING_ENABLED. This IS the ~10s hot
-            # loop under investigation, so the snapshot is taken from
-            # exactly the code path in question.
-            _maybe_log_memory_profile_snapshot()
-    except ContinuousMonitorTickAlreadyRunningError as error:
-        # Deliberately does NOT call record_continuous_monitor_reconciliation_completed -
-        # no reconciliation actually happened this request. "Worker
-        # reached us" was already recorded above regardless.
-        return _api_failure(str(error), status_code=409, error_code="continuous_monitor_tick_already_running", ok=False)
-
-    return _api_success({"ran_for_users": len(results), "results": results}, ok=True, ran_for_users=len(results))
-
-
-@app.route("/api/autonomy/monitor-health", methods=["GET"])
-def api_autonomy_monitor_health():
-    """DELIBERATELY UNAUTHENTICATED (no CRON_SECRET, no session) and
-    read-only - the residual gap neither in-app scheduler can close on its
-    own: _alert_admins_fast_monitor_unhealthy_if_needed and
-    _alert_admins_full_scan_unhealthy_if_needed each let ONE scheduler
-    detect the OTHER going silent, but if BOTH stop firing at the exact
-    same time (e.g. the whole web service is down, or both Render Cron
-    Jobs were deleted together), neither cross-check ever runs, and
-    nothing inside this app can notice its own total silence. This
-    endpoint exists so an EXTERNAL, independent uptime service (e.g.
-    UptimeRobot, Healthchecks.io, Render's own health checks pointed at a
-    custom path) can poll it on its own schedule and alert through a
-    completely separate channel (email/SMS/PagerDuty) if it ever stops
-    responding at all - closing that gap requires configuring such a
-    service in the operator's own account; this endpoint is the piece
-    this app can provide, not a substitute for actually setting one up.
-
-    MINIMAL response shape, deliberately - reviewer instruction: no
-    per-scheduler breakdown, no reasons, no heartbeat internals, no user
-    IDs, no account details, no error text, no paths, no secrets. Just:
-        {"healthy": bool, "last_completed_age_seconds": number | null}
-    A human-readable "why" (which scheduler, what error) is already
-    available to admins via _build_page_context's fast_monitor_health/
-    full_scan_health fields (session-authenticated, admin-only) - this
-    public, unauthenticated surface exists ONLY so an external uptime
-    service can detect total silence, not to explain it. GET, not POST
-    (no CRON_SECRET to protect it with), and NOT registered in
-    _TOKEN_AUTH_PATHS - see _PUBLIC_PATHS, where this path is listed
-    instead, so the global before_request session-auth gate never blocks
-    an external caller with no session either.
-
-    last_completed_age_seconds is the WORST (largest / most stale) age
-    across every tracked scheduler, rounded to a whole second - "how long
-    since the least-recently-healthy signal last completed" - null only
-    if a scheduler has literally never run even once (age is undefined,
-    not merely large).
-
-    Tracks THREE schedulers as of the continuous-monitor (Option A) work:
-    fast_monitor, full_scan, and continuous_monitor. overall_healthy
-    requires ALL THREE to be healthy - once the continuous-monitor worker
-    is actually deployed, this endpoint will correctly report unhealthy
-    if IT alone goes quiet, even while the two slower schedulers are
-    fine, since it's now the PRIMARY safety mechanism. Before the worker
-    is deployed at all, continuous_monitor's own health check reports
-    unhealthy with age_seconds=None (never called) - deploying this
-    endpoint code before the worker exists will make this report
-    unhealthy; that is an accurate reflection of the architecture this
-    endpoint now describes, not a bug, and is exactly why the worker
-    should be deployed at the same time as - or before - this code."""
-    fast_monitor = _fast_monitor_health_status()
-    full_scan = _full_scan_health_status()
-    continuous_monitor = _continuous_monitor_health_status()
-    overall_healthy = bool(fast_monitor.get("healthy")) and bool(full_scan.get("healthy")) and bool(continuous_monitor.get("healthy"))
-    ages = [a for a in (fast_monitor.get("age_seconds"), full_scan.get("age_seconds"), continuous_monitor.get("age_seconds")) if a is not None]
-    last_completed_age_seconds = round(max(ages)) if ages else None
-    payload = {"healthy": overall_healthy, "last_completed_age_seconds": last_completed_age_seconds}
-    return _api_success(payload, status_code=200 if overall_healthy else 503, **payload)
-
-
-@app.route("/api/accounts", methods=["GET"])
-@api_guard
-def api_accounts():
-    user_id = _current_user_id()
-    accounts = get_accounts(user_id)
-    broker_framework = _broker_framework_status()
-    safety = {
-        "store_passwords": False,
-        "hardcoded_api_keys": False,
-        "credentials_source": "Per-user, entered in Account Hub - never shared across accounts",
-        "live_trading_default_off": True,
-        "etrade_approval_mode_required": True,
-        "webull_default_paper_mode": True,
-        "tradingview_executes_trades": False,
-        "options_execution_disabled": True,
-        "approval_required_by_default": True,
-        "emergency_kill_switch_placeholder": False,
-    }
-    return _api_success(
-        {"accounts": accounts, "safety": safety, "broker_framework": broker_framework, "webull_configured": is_webull_configured(user_id)},
-        accounts=accounts,
-        safety=safety,
-        webull_configured=is_webull_configured(user_id),
-    )
-
-
-@app.route("/api/accounts/connect", methods=["POST"])
-def api_accounts_connect():
-    payload = request.get_json(silent=True) or {}
-    platform = payload.get("platform", "")
-    if not platform:
-        return jsonify({"ok": False, "error": "Platform is required."}), 400
-
-    user_id = _current_user_id()
-    try:
-        if payload.get("action") == "generate_webhook":
-            account = ensure_tradingview_webhook(user_id, platform=platform)
-            return jsonify({"ok": True, "account": account})
-        if "trading_enabled" in payload:
-            account = update_trading_enabled(user_id, platform=platform, trading_enabled=bool(payload.get("trading_enabled")))
-            return jsonify({"ok": True, "account": account})
-        account = connect_account(user_id, platform=platform)
-    except ValueError as error:
-        return jsonify({"ok": False, "error": str(error)}), 400
-    return jsonify({"ok": True, "account": account})
-
-
-@app.route("/api/accounts/disconnect", methods=["POST"])
-def api_accounts_disconnect():
-    payload = request.get_json(silent=True) or {}
-    platform = payload.get("platform", "")
-    if not platform:
-        return jsonify({"ok": False, "error": "Platform is required."}), 400
-    try:
-        account = disconnect_account(_current_user_id(), platform=platform)
-    except ValueError as error:
-        return jsonify({"ok": False, "error": str(error)}), 400
-    return jsonify({"ok": True, "account": account})
-
-
-@app.route("/api/accounts/test", methods=["POST"])
-def api_accounts_test():
-    payload = request.get_json(silent=True) or {}
-    platform = payload.get("platform", "")
-    if not platform:
-        return jsonify({"ok": False, "error": "Platform is required."}), 400
-    try:
-        account = test_account(_current_user_id(), platform=platform)
-    except ValueError as error:
-        return jsonify({"ok": False, "error": str(error)}), 400
-    return jsonify({"ok": True, "account": account})
-
-
-@app.route("/api/accounts/webull-credentials", methods=["POST"])
-def api_accounts_webull_credentials():
-    """Each user brings their own Webull OpenAPI app key/secret - saved here,
-    never a shared server-wide credential, so one user can never connect to
-    or see another user's Webull sandbox account."""
-    payload = request.get_json(silent=True) or {}
-    try:
-        set_webull_credentials(_current_user_id(), payload.get("app_key", ""), payload.get("app_secret", ""))
-    except ValueError as error:
-        return jsonify({"ok": False, "error": str(error)}), 400
-    return jsonify({"ok": True, "configured": True})
-
-
-@app.route("/api/accounts/anthropic-credentials", methods=["POST"])
-def api_accounts_anthropic_credentials():
-    """Each user brings their own Anthropic API key for the LLM reasoning
-    pass on autonomous trade candidates - it's opt-in and billed to whoever
-    configures it, never a shared server-wide key."""
-    payload = request.get_json(silent=True) or {}
-    try:
-        set_anthropic_api_key(_current_user_id(), payload.get("api_key", ""))
-    except ValueError as error:
-        return jsonify({"ok": False, "error": str(error)}), 400
-    return jsonify({"ok": True, "configured": True})
-
-
-@app.route("/api/tradingview/webhook", methods=["POST"])
-@api_guard
-def api_tradingview_webhook():
-    # TradingView has no session/login - the token in the URL is the only
-    # identifying information, so it has to double as both auth and the
-    # lookup key for which user this alert belongs to.
-    token = request.args.get("token", "")
-    # Render's proxy appends the connecting address LAST; earlier entries can be
-    # supplied by the client, so they are not trusted for throttling.
-    client_address = (request.headers.get("X-Forwarded-For") or request.remote_addr or "").split(",")[-1].strip()
-    import webhook_throttle
-    wait = webhook_throttle.retry_after(token, client_address)
-    if wait:
-        return _api_failure(
-            f"Too many webhook requests. Try again in {wait} seconds.",
-            status_code=429,
-            error_code="webhook_rate_limited",
-            ok=False,
-        )
-    owner = find_user_by_webhook_token(token)
-    if not owner or not verify_tradingview_token(owner["id"], token):
-        return _api_failure(
-            "Invalid or missing webhook token.",
-            status_code=401,
-            error_code="invalid_webhook_token",
-            ok=False,
-        )
-    user_id = owner["id"]
-    # TradingView's default alert message is plain text unless the user's alert
-    # is configured to send JSON, and it doesn't always set Content-Type:
-    # application/json even then - so parse defensively instead of trusting
-    # get_json() to succeed. force=True skips the content-type check; if the
-    # body still isn't valid JSON, fall back to capturing it as free text so
-    # the alert isn't silently dropped into an empty payload.
-    payload = request.get_json(silent=True, force=True)
-    if not isinstance(payload, dict):
-        raw_text = request.get_data(as_text=True) or ""
-        try:
-            parsed = json.loads(raw_text) if raw_text else {}
-            payload = parsed if isinstance(parsed, dict) else {"message": raw_text}
-        except ValueError:
-            payload = {"message": raw_text} if raw_text else {}
-    stored_alert = save_alert(user_id, payload)
-    account_result = record_tradingview_signal(user_id, payload=payload)
-    result = {
-        "signal_received": True,
-        "alert": stored_alert,
-        "account_status": account_result,
-        "never_auto_execute": True,
-    }
-    return _api_success(result, ok=True, **result)
-
-
-@app.route("/api/status", methods=["GET"])
-@api_guard
-def api_status():
-    context = _build_page_context(include_news=True)
-    tradingview = get_tradingview_status(_current_user_id())
-    neural = context["status_summary"]["neural_status"]
-    broker_statuses = _broker_framework_status()
-    data = {
-        "api": {
-            "healthy": True,
-            "version": "foundation-sprint",
-        },
-        "market": {
-            "scanner_status": context["status_summary"]["scanner_status"],
-            "market_status": context["status_summary"]["market_status"],
-            "last_scanner_update": context["scanner_last_updated"],
-        },
-        "brokers": broker_statuses,
-        "tradingview": tradingview,
-        "neural": neural,
-        "intelligence": {
-            "upcoming_opportunities": context.get("upcoming_opportunities", []),
-            "mission_queue": context.get("mission_queue", []),
-            "strategy_map": context.get("strategy_map", {}),
-            "chart_levels_map": context.get("chart_levels_map", {}),
-        },
-        "safety": {
-            "live_trading_enabled": webull_api.is_live_trading_armed(),
-            "options_execution_enabled": False,
-            "approval_required": True,
-            "emergency_kill_switch_placeholder": False,
-        },
-        "autonomy": get_autonomy_status(_current_user_id()),
-    }
-    return _api_success(data)
-
-
-@app.route("/api/news", methods=["GET"])
-@api_guard
-def api_news():
-    tickers = get_watchlist_tickers(_current_user_id()) or CORE_SCAN_UNIVERSE[:4]
-    bundle = fetch_news_bundle(tickers=tickers, limit=30)
-    return _api_success(bundle, news=bundle.get("items", []), errors=bundle.get("errors", []))
-
-
-@app.route("/api/neural/status", methods=["GET"])
-@api_guard
-def api_neural_status():
-    watchlist = get_watchlist(_current_user_id())
-    scanner_rows, _, _ = get_market_data(force_refresh=False)
-    news_bundle = fetch_news_bundle(tickers=[item["ticker"] for item in watchlist], limit=10)
-    option_inputs = [get_options_data_for_ticker(row["ticker"], force_refresh=False) for row in scanner_rows[:3]]
-    neural = build_neural_status(
-        scanner_rows=scanner_rows,
-        watchlist_rows=watchlist,
-        news_items=news_bundle.get("items", []),
-        options_payloads=option_inputs,
-    )
-    top_tickers = _resolve_analysis_tickers([item["ticker"] for item in watchlist], scanner_rows, limit=5)
-    strategy_map = {ticker: get_strategy_data_for_ticker(ticker=ticker, force_refresh=False) for ticker in top_tickers}
-    chart_levels_map = {ticker: get_chart_levels_for_ticker(ticker=ticker, force_refresh=False) for ticker in top_tickers}
-    return _api_success(
-        {
-            **neural,
-            "strategy_map": strategy_map,
-            "chart_levels_map": chart_levels_map,
-        }
-    )
-
-
-@app.route("/api/tradingview/status", methods=["GET"])
-@api_guard
-def api_tradingview_status():
-    return _api_success(get_tradingview_status(_current_user_id()))
-
+# Route functions live in backend/routes. They are executed into this
+# module's globals so endpoint names, url_for(), and helper patches stay
+# the same as when the views were defined here.
+import routes as _pluto_routes
+_pluto_routes.load_into(globals())
+del _pluto_routes
 
 if __name__ == "__main__":
     import os

@@ -7,9 +7,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import yfinance as yf
-
 from paper_costs import regulatory_fees, slip_price
+
+try:
+    from .integrations import alpaca_data
+except ImportError:
+    from integrations import alpaca_data
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
@@ -48,14 +51,10 @@ _VALID_DIRECTIONS = {"CALL", "PUT", "BUY", "SELL"}
 
 
 def _get_live_price(ticker: str) -> float:
-    client = yf.Ticker(ticker)
-    try:
-        price = client.fast_info.get("lastPrice")
-        if price:
-            return float(price)
-    except Exception:
-        pass
-    history = client.history(period="1d")
+    price = alpaca_data.get_latest_trade_price(ticker)
+    if price:
+        return float(price)
+    history = alpaca_data.get_bars_single(ticker, period="5d", interval="1d")
     if history.empty or "Close" not in history.columns:
         raise ValueError(f"No live price available for {ticker}.")
     close_prices = history["Close"].dropna()

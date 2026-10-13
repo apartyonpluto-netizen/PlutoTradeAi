@@ -165,8 +165,41 @@ def test_flatten_plan_cancels_and_closes_without_calling_a_broker():
     assert ("cancel", "oid-1") in calls and ("close", "AAPL") in calls
 
 
-def test_option_missing_contract_fields_is_not_guessed():
-    plan = flatten_account.plan([{"symbol": "NVDA260918C00105000", "quantity": 1, "last_price": 3, "instrument_type": "OPTION"}], [])
+def test_occ_option_is_planned_without_placing_an_order():
+    plan = flatten_account.plan(
+        [{"symbol": "NVDA260918C00105000", "quantity": 1, "last_price": 3, "instrument_type": "OPTION"}],
+        [],
+    )
+    assert plan["errors"] == []
+    close = plan["closes"][0]
+    assert close["underlying"] == "NVDA"
+    assert close["option_type"] == "CALL"
+    assert close["strike_price"] == 105
+    assert close["expiration_date"] == "2026-09-18"
+    assert close["side"] == "SELL"
+
+
+def test_broker_lookup_resolves_an_option_without_closing_it():
+    def lookup(position):
+        assert position["symbol"] == "CUSTOM"
+        return {"underlying_symbol": "AMD", "option_type": "PUT", "strike_price": "90", "expiration_date": "2026-10-16"}
+
+    plan = flatten_account.plan(
+        [{"symbol": "CUSTOM", "quantity": 2, "last_price": 1.5, "instrument_type": "OPTION"}],
+        [],
+        resolve_contract=lookup,
+    )
+    assert plan["errors"] == []
+    assert plan["closes"][0]["underlying"] == "AMD"
+    assert plan["closes"][0]["option_type"] == "PUT"
+    assert plan["closes"][0]["strike_price"] == 90
+
+
+def test_option_that_cannot_be_resolved_is_not_closed():
+    plan = flatten_account.plan(
+        [{"symbol": "not-a-contract", "quantity": 1, "last_price": 3, "instrument_type": "OPTION"}],
+        [],
+    )
     assert plan["closes"] == []
     assert plan["errors"]
 
