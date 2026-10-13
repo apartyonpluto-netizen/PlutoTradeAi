@@ -51,7 +51,7 @@ outcomes — that part hasn't changed.
 | `brains/extended_hours_brain.py` | intraday+daily OHLCV | **Yes, indirectly** — computed first, passed *into* `strategy_brain`'s gap/extended signals; also shown on the opportunity card | Alpaca |
 | `brains/llm_reasoning.py` | the opportunity dict + up to 3 recent news headlines (`fetch_news_bundle`) | **Yes** — only if the user has their own Anthropic key; can veto or adjust confidence ±20, after sizing, before submission | Claude (Sonnet 5) + news/x_news.py |
 | `autonomy/options_selector.py` | `current_price`, Webull's live option chain + snapshot | **Yes** — the only path that ever calls the broker for a *real* option order | Webull |
-| `market_scanner.py` (`scan_market`) | a fixed 9-ticker universe + watchlist | **Yes, indirectly** — its output (`scanner_rows`) decides *which* tickers get the deep (strategy/chart/extended-hours) treatment at all, via `_resolve_analysis_tickers` | Alpaca |
+| `market_scanner.py` (`scan_market`) | Nasdaq-listed universe (snapshot screen, then bar score; top `PLUTO_SCANNER_TOP_N`, default 48). An explicit ticker list still uses the original bar fetch. | **Yes, indirectly** — its output (`scanner_rows`) decides *which* tickers get the deep (strategy/chart/extended-hours) treatment at all, via `_resolve_analysis_tickers` (still capped at 6: watchlist first, then scanner rank) | Alpaca |
 | `candle_brain.py` | daily OHLCV | **No** — computed only when `include_patterns=True`, which the autonomous scan never passes | ⚠ yfinance |
 | `pattern_brain.py` | daily OHLCV | **No** — same as candle_brain | ⚠ yfinance |
 | `analytics.py` (reversal/trend) | daily OHLCV | **No** — see "computed but discarded" in Gaps below | ⚠ yfinance |
@@ -65,7 +65,7 @@ outcomes — that part hasn't changed.
 
 `_run_autonomous_trade_scan_locked` (app.py):
 1. Reconciles existing positions (independent of everything below — runs even when autonomy is OFF).
-2. Calls `_build_page_context(include_reversal=True, include_trend=True, include_options=False)` → gets `upcoming_opportunities` (up to 6 tickers deep-analyzed, each already scored by strategy_brain/charting_brain/extended_hours_brain).
+2. Calls `_build_page_context(include_reversal=False, include_trend=False, include_options=False)` → gets `upcoming_opportunities` (up to 6 tickers deep-analyzed, each already scored by strategy_brain/charting_brain/extended_hours_brain). The scanner rows those 6 are chosen from are the top Nasdaq qualifiers, not a fixed list.
 3. Filters to `qualifying`: recommendation is CALL/PUT, confidence ≥ threshold, not already placed today, and not already holding an open (non-terminal-lifecycle) position in that ticker from ANY earlier day — added 2026-09-12 after finding the prior check only covered same-day placements, which would have let a multi-day swing hold get a second, independent entry pyramided into it.
 4. Per candidate, in order: reject if no usable stop/target (`c532f6c`) → margin-account check for shorts → **try a real option first** (`options_selector.py`) → fall back to equity sizing → LLM veto (`llm_reasoning.py`, optional) → fresh real-time price drift check (Alpaca) → submit to Webull → confirm protection.
 5. Every outcome (placed or skipped, and why) is durably logged (`research_log`, `overnight_orders`, `scan_run_log`).
@@ -73,9 +73,9 @@ outcomes — that part hasn't changed.
 ## Gaps found while writing this map (2026-09-11, not yet fixed)
 
 - **`candle_brain.py`, `pattern_brain.py`, `analytics.py` still call `yfinance` directly.** Everything on the live-decision path (strategy/chart/extended-hours/scanner) was migrated to Alpaca after the 2026-08-28 Yahoo rate-limit incident (see the `alpaca-market-data-migration` memory); these three were not, because they don't feed live trades. They likely still degrade under the same rate-limiting that motivated the migration — worth a follow-up if the Analysis pages that use them (Candle Brain, Pattern Brain, Reversal Map, Trend Detection) matter to you day-to-day.
-- **The scan computes reversal/trend analytics on every 5-minute tick and never reads the result.** `_run_autonomous_trade_scan_locked` passes `include_reversal=True, include_trend=True` into `_build_page_context`, but nothing in the scan function reads `reversal_rows`/`trend_rows` afterward. That's a real yfinance call burned on every tick for output nobody uses in that path — a candidate for `include_reversal=False, include_trend=False` there specifically (dashboard/page callers that actually display these would keep `True`).
+- **Fixed 2026-10-06: the autonomous scan no longer computes reversal/trend.** Those rows were never read by the scan and the call pulled yfinance. Dashboard and analysis pages that display them still pass `include_reversal=True, include_trend=True`. `candle_brain.py`, `pattern_brain.py`, and `analytics.py` remain on yfinance for those display pages.
 - **Two `options_brain.py` modules exist** — a legacy top-level one and `options/options_brain.py`, which literally imports from the legacy one (`from options_brain import build_options_outlook as legacy_build_options_outlook`). Neither is the real execution path (that's `autonomy/options_selector.py`). Naming collision risk for future work — grep both before touching "options brain" anything.
-- **`get_market_data`'s deadline-fallback error string still says "Scanner timed out - Yahoo Finance is rate limiting"** even though `market_scanner.scan_market` has been Alpaca-backed since the migration. Stale message, not a stale mechanism — cosmetic, but worth fixing so a real timeout doesn't misdirect debugging toward the wrong provider.
+- **Fixed 2026-10-06: the scanner timeout message no longer mentions Yahoo Finance.** A timeout now says the Nasdaq screen did not finish. The scan itself is Alpaca snapshots plus bars.
 
 ## Why nothing here "gets better by running" — precisely stated
 

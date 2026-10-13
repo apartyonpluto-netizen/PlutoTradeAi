@@ -92,6 +92,15 @@ def test_emergency_stop_on_is_flagged(monkeypatch):
     assert report["live_ready"] is False
 
 
+def test_etrade_flag_warns_and_does_not_arm(monkeypatch):
+    kwargs = _all_ok(monkeypatch)
+    monkeypatch.setenv("ETRADE_ENABLED", "true")
+    report = readiness.build_report(**kwargs)
+    assert _by_id(report)["etrade_flag"]["status"] == "warn"
+    assert "never wired" in _by_id(report)["etrade_flag"]["detail"]
+    assert report["live_armed"] is False
+
+
 def test_legacy_flag_warns_but_does_not_arm(monkeypatch):
     kwargs = _all_ok(monkeypatch)
     monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")

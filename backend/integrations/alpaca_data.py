@@ -287,6 +287,79 @@ def get_latest_trade_price(symbol: str) -> Optional[float]:
         return None
 
 
+_SNAPSHOTS_PATH = "/v2/stocks/snapshots"
+SNAPSHOT_BATCH_SIZE = 80
+
+
+def _snapshot_gap_seconds() -> float:
+    try:
+        return max(0.0, float(os.environ.get("PLUTO_SCANNER_SNAPSHOT_GAP_SECONDS", "0.35")))
+    except ValueError:
+        return 0.35
+
+
+def _fetch_snapshot_batch(symbols: Sequence[str], headers: Dict[str, str]) -> Dict[str, Dict[str, object]]:
+    """One snapshots request. HTTP 400 (a bad symbol rejects the whole
+    batch) splits the batch so one name cannot drop the rest. Other
+    errors raise — splitting those would multiply calls while Alpaca
+    is down and blow the 200/minute budget."""
+    if not symbols:
+        return {}
+    response = _call_with_429_retry(
+        "snapshots",
+        lambda: requests.get(
+            _DATA_BASE_URL + _SNAPSHOTS_PATH,
+            headers=headers,
+            params={"symbols": ",".join(symbols), "feed": _feed()},
+            timeout=15,
+        ),
+    )
+    if response.status_code == 400 and len(symbols) > 1:
+        mid = len(symbols) // 2
+        left = _fetch_snapshot_batch(symbols[:mid], headers)
+        right = _fetch_snapshot_batch(symbols[mid:], headers)
+        left.update(right)
+        return left
+    if response.status_code != 200:
+        raise ValueError(f"Alpaca API error (snapshots): HTTP {response.status_code} - {response.text[:300]}")
+    payload = response.json()
+    if isinstance(payload, dict) and isinstance(payload.get("snapshots"), dict):
+        payload = payload["snapshots"]
+    if not isinstance(payload, dict):
+        return {}
+    return {str(symbol): value for symbol, value in payload.items() if isinstance(value, dict)}
+
+
+def get_snapshots(symbols: Sequence[str]) -> Dict[str, Dict[str, object]]:
+    """Latest trade, quote, and daily bars for many symbols in batches.
+
+    Alpaca's multi-symbol snapshots endpoint is one call per batch, not
+    one call per ticker. Batches stay near 80 symbols so the query string
+    stays well under typical URL limits. A short pause between batches
+    keeps a full-Nasdaq screen inside the free tier's 200 calls/minute
+    (see market_scanner.py). Historical bars stay on get_bars; this is
+    only the cheap first pass.
+    """
+    normalized = []
+    seen = set()
+    for symbol in symbols:
+        name = str(symbol or "").strip().upper()
+        if name and name not in seen:
+            seen.add(name)
+            normalized.append(name)
+    if not normalized:
+        return {}
+    headers = _credential_headers()
+    merged: Dict[str, Dict[str, object]] = {}
+    gap = _snapshot_gap_seconds()
+    batch_size = SNAPSHOT_BATCH_SIZE
+    for index in range(0, len(normalized), batch_size):
+        if index and gap:
+            time.sleep(gap)
+        merged.update(_fetch_snapshot_batch(normalized[index:index + batch_size], headers))
+    return merged
+
+
 def probe_latest_trade(symbol: str = "SPY") -> float:
     """Health-check variant of get_latest_trade_price: same request, but a failure raises with the
     reason (missing keys, HTTP 401/403, no price) instead of returning None. Used only by the

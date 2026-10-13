@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import go_live_gate
 import live_limits
 from integrations import webull as webull_api
 
@@ -18,6 +19,8 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("PLUTO_DATA_DIR", str(tmp_path))
     for name in (live_limits.MAX_ORDER_VAR, live_limits.MAX_DAILY_VAR, *LIVE_ENV):
         monkeypatch.delenv(name, raising=False)
+    # These tests isolate the dollar caps. The go-live gate is covered on its own.
+    monkeypatch.setattr(go_live_gate, "refuse_if_not_ready", lambda: None)
 
 
 def _arm(monkeypatch, per_order=None, daily=None):

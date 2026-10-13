@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional
 
 import yfinance as yf
 
+from paper_costs import regulatory_fees, slip_price
+
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
 USER_DATA_ROOT = DATA_DIR / "users"
@@ -33,6 +35,10 @@ FIELDNAMES = [
     "status",
     "reason",
     "confidence",
+    "entry_quote",
+    "exit_quote",
+    "fees",
+    "slippage",
 ]
 
 _VALID_ORDER_TYPES = {"MARKET", "LIMIT"}
@@ -117,8 +123,13 @@ def open_trade(
             raise ValueError("Entry price must be a number.")
         if entry_price <= 0:
             raise ValueError("Entry price must be positive.")
+        quote = entry_price
+        slipped = False
     else:
-        entry_price = _get_live_price(symbol)
+        quote = _get_live_price(symbol)
+        entry_side = "buy" if direction in _LONG_DIRECTIONS else "sell"
+        entry_price = slip_price(quote, entry_side)
+        slipped = True
     row: Dict[str, Any] = {
         "id": uuid.uuid4().hex[:12],
         "opened_at": datetime.now(timezone.utc).isoformat(),
@@ -133,6 +144,10 @@ def open_trade(
         "status": "Open",
         "reason": reason,
         "confidence": confidence if confidence is not None else "",
+        "entry_quote": round(quote, 4),
+        "exit_quote": "",
+        "fees": "",
+        "slippage": round(abs(entry_price - quote) * quantity * (100 if direction in {"CALL", "PUT"} else 1), 4) if slipped else 0,
     }
     rows = _read_all(user_id)
     rows.append(row)
@@ -155,14 +170,30 @@ def close_trade(user_id: str, trade_id: str, exit_price: Optional[float] = None)
             raise ValueError("Exit price must be a number.")
         if exit_price <= 0:
             raise ValueError("Exit price must be positive.")
+        exit_quote = exit_price
     else:
-        exit_price = _get_live_price(target["ticker"])
+        exit_quote = _get_live_price(target["ticker"])
+        exit_side = "sell" if target["direction"] in _LONG_DIRECTIONS else "buy"
+        exit_price = slip_price(exit_quote, exit_side)
     entry_price = float(target["entry_price"])
     quantity = float(target["quantity"])
+    option = target["direction"] in {"CALL", "PUT"}
+    multiplier = 100 if option else 1
     direction_sign = 1 if target["direction"] in _LONG_DIRECTIONS else -1
-    pnl = (exit_price - entry_price) * quantity * direction_sign
+    quote_pnl = (float(exit_quote) - entry_price) * quantity * direction_sign * multiplier
+    slipped_pnl = (exit_price - entry_price) * quantity * direction_sign * multiplier
+    sell_price = entry_price if direction_sign < 0 else exit_price
+    fees = regulatory_fees(
+        abs(sell_price * quantity * multiplier),
+        sell_shares=0 if option else quantity,
+        option_contracts=quantity if option else 0,
+    )
+    pnl = slipped_pnl - fees
 
+    target["exit_quote"] = round(float(exit_quote), 4)
     target["exit_price"] = round(exit_price, 4)
+    target["fees"] = round(fees, 4)
+    target["slippage"] = round(float(target.get("slippage") or 0) + (quote_pnl - slipped_pnl), 4)
     target["pnl"] = round(pnl, 2)
     target["status"] = "Closed"
     target["closed_at"] = datetime.now(timezone.utc).isoformat()

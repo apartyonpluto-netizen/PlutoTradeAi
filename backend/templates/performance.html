@@ -9,7 +9,7 @@
         <span>{{ report.total_closed_trades }} closed trade{{ "s" if report.total_closed_trades != 1 else "" }}</span>
     </div>
     <p class="muted">
-        Real track record only &mdash; this page reports what actually happened, broken down by strategy, AI
+        Real track record only. Sandbox figures with known entry and exit prices include modeled slippage and regulatory fees, so paper P&amp;L is not the raw quote. Live figures use the broker's own fills and fees. Broken down by strategy, AI
         confidence at entry, and the market regime (VIX) at the time. Nothing here changes how the autonomous
         scan sizes, scores, or picks trades; it's meant to help you decide what to adjust yourself. A win rate
         or average P&amp;L is flagged <strong>low sample</strong> below {{ report.min_sample_size_for_rates }}

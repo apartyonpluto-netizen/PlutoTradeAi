@@ -457,6 +457,8 @@ def test_fast_monitor_runs_every_reconciliation_pass(user_id):
     mock_unknown.assert_called_once()
     mock_recover.assert_called_once()
     mock_monitor.assert_called_once()
+    naked = result.pop("naked_positions")
+    assert isinstance(naked, list)
     assert result == {
         "has_unresolved_ambiguous_submission": False,
         "has_incomplete_manual_resolution": False,

@@ -6,6 +6,52 @@
 {% endblock %}
 
 {% block content %}
+{% if go_live %}
+<section class="panel go-live-panel">
+    <div class="panel-head">
+        <h3>Go-live progress</h3>
+        <span>{{ "Ready" if go_live.ready else "Not ready" }}</span>
+    </div>
+    <p class="muted">Live opening orders stay blocked until every line passes. Paper trading is how this record gets built. Exits are never blocked.</p>
+    <ul class="go-live-checks">
+        {% for check in go_live.checks %}
+        <li class="{{ 'is-passed' if check.passed else 'is-open' }}">
+            <b>{{ check.label }}</b>
+            <span>{{ check.detail }}</span>
+            <span class="home-status-meter" aria-hidden="true"><i style="width: {{ check.progress_percent }}%;"></i></span>
+        </li>
+        {% endfor %}
+    </ul>
+</section>
+{% endif %}
+
+{% if savings_goal %}
+<section class="panel savings-goal-panel">
+    <div class="panel-head">
+        <h3>Savings goal</h3>
+        <span>{% if savings_goal.unset %}Not set{% else %}{{ "%.0f"|format(savings_goal.progress_percent or 0) }}%{% endif %}</span>
+    </div>
+    {% if savings_goal.unset %}
+    <p class="muted">Realized live profit toward a goal you name. First goal idea: {{ savings_goal.placeholder }}. Nothing is counted until you set an amount. Paper profit does not fill this meter.</p>
+    {% else %}
+    <p><b>{{ savings_goal.name or savings_goal.placeholder }}</b> · ${{ "%.2f"|format(savings_goal.banked) }} of ${{ "%.2f"|format(savings_goal.amount) }} realized live profit</p>
+    <span class="home-status-meter savings-meter" aria-hidden="true"><i style="width: {{ savings_goal.progress_percent }}%;"></i></span>
+    {% endif %}
+    <form id="savingsGoalForm" class="savings-goal-form">
+        <input type="text" name="savings_goal_name" maxlength="80" placeholder="Goal name (a new MacBook)" value="{{ savings_goal.name }}">
+        <input type="number" name="savings_goal_amount" min="0" step="0.01" placeholder="Amount" value="{{ savings_goal.amount if savings_goal.amount else '' }}">
+        <button type="submit">Save goal</button>
+    </form>
+</section>
+{% endif %}
+
+{% if trade_cards %}
+<section class="panel">
+    <div class="panel-head"><h3>Recent trades</h3><a class="view-link" href="/trade-journal">Journal</a></div>
+    {% include "trade_cards.html" %}
+</section>
+{% endif %}
+
 <section class="glass-panel account-balance-topbar">
     <div class="panel-head"><h3>Account Balance</h3><span>{{ "Webull Sandbox (live)" if webull_balance.connected and webull_balance.balance else "Not Connected" }}</span></div>
     {% if webull_balance.error %}

@@ -113,10 +113,14 @@ def build_report(
             "Reporting to Sentry." if sentry_active else "SENTRY_DSN not set - errors are only in Render logs."))
 
     legacy = os.environ.get("LIVE_TRADING_ENABLED", "").strip().lower()
-    if legacy in {"1", "true", "yes", "on"}:
+    if legacy:
         checks.append(_check(
-            "legacy_flag", "Old LIVE_TRADING_ENABLED flag", "warn",
-            "Set to true, but it does nothing - only the two PLUTO_* variables arm live trading. Remove it to avoid confusion."))
+            "legacy_flag", "Deprecated LIVE_TRADING_ENABLED flag", "warn",
+            "DEPRECATED and ignored. Live trading is armed only by PLUTO_ENABLE_LIVE_TRADING and PLUTO_LIVE_TRADING_CONFIRM both set to true. Remove LIVE_TRADING_ENABLED."))
+    if os.environ.get("ETRADE_ENABLED", "").strip():
+        checks.append(_check(
+            "etrade_flag", "Deprecated ETRADE_ENABLED flag", "warn",
+            "DEPRECATED. ETRADE_ENABLED was never wired to a broker. This app trades through Webull. Remove it."))
 
     fails = [c for c in checks if c["status"] == "fail"]
     warns = [c for c in checks if c["status"] == "warn"]

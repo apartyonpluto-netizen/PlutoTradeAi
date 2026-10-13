@@ -113,6 +113,33 @@ def test_short_direction_is_never_rearmed(user_id):
     mock_detail.assert_not_called()
 
 
+def test_missing_stop_id_with_a_known_stop_price_places_one(user_id):
+    entry = _active_entry("ignored")
+    entry["stop_client_order_id"] = None
+    new_stop_id = ol.deterministic_client_order_id(user_id, TICKER, TRADING_DAY, "stop_rearm", attempt=1)
+    with patch.object(pluto_app.webull_api, "get_order_detail") as mock_detail, \
+         patch.object(pluto_app.webull_api, "get_account_positions", return_value=[{"symbol": TICKER, "quantity": 1}]), \
+         patch.object(pluto_app, "_current_webull_trading_session", return_value="CORE"), \
+         patch.object(pluto_app.webull_api, "place_stop_loss_order", return_value={"client_order_id": new_stop_id}) as mock_place:
+        result = pluto_app._check_and_rearm_dead_stop(user_id, CREDS, ACCOUNT_ID, TICKER, TRADING_DAY, entry)
+    assert result is True
+    mock_detail.assert_not_called()
+    mock_place.assert_called_once()
+    assert mock_place.call_args.kwargs["stop_price"] == 264.88
+    assert entry["stop_client_order_id"] == new_stop_id
+
+
+def test_missing_stop_id_and_no_stop_price_does_nothing(user_id):
+    entry = _active_entry("ignored", stop=0)
+    entry["stop_client_order_id"] = None
+    with patch.object(pluto_app.webull_api, "get_account_positions") as mock_positions, \
+         patch.object(pluto_app.webull_api, "place_stop_loss_order") as mock_place:
+        result = pluto_app._check_and_rearm_dead_stop(user_id, CREDS, ACCOUNT_ID, TICKER, TRADING_DAY, entry)
+    assert result is False
+    mock_positions.assert_not_called()
+    mock_place.assert_not_called()
+
+
 def test_rearm_placement_failure_raises_with_a_clear_unprotected_message(user_id):
     entry = _active_entry("stop-g")
     with patch.object(pluto_app.webull_api, "get_order_detail", return_value=_order_detail("CANCELLED", 1, 0)), \

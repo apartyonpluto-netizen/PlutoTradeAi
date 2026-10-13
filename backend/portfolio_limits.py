@@ -101,6 +101,31 @@ def limits_from_settings(settings: Dict[str, Any]) -> Dict[str, float]:
     }
 
 
+# Used only when live is armed and the account has never saved portfolio
+# limits. Paper stays off until the owner sets them. Small-account defaults:
+# one position 10%, everything held 40%, one sector 25%, pause after a 10% drop.
+LIVE_DEFAULTS: Dict[str, float] = {
+    "max_position_percent": 10.0,
+    "max_total_exposure_percent": 40.0,
+    "max_sector_exposure_percent": 25.0,
+    "max_drawdown_percent": 10.0,
+}
+
+
+def effective_limits(settings: Dict[str, Any], live: bool = False) -> Dict[str, float]:
+    """Stored limits. On live, a limit still at 0 (never saved) takes LIVE_DEFAULTS.
+    Saving any portfolio limit, including Off, sets portfolio_limits_explicit and
+    the stored numbers are used as-is."""
+    limits = limits_from_settings(settings)
+    if not live or settings.get("portfolio_limits_explicit"):
+        return limits
+    merged = dict(limits)
+    for key, default in LIVE_DEFAULTS.items():
+        if not merged.get(key):
+            merged[key] = default
+    return merged
+
+
 def exposure_snapshot(positions: Iterable[Dict[str, Any]], working_orders: Iterable[Dict[str, Any]] = ()) -> Dict[str, Any]:
     """Market value by ticker and sector, from broker positions plus the
     notional of working BUY orders (entries not yet filled). Sell orders are

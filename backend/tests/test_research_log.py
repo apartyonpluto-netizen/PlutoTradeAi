@@ -87,3 +87,25 @@ def test_concurrent_writes_across_real_processes_lose_no_records(user_id):
 
     recorded_tickers = {r["ticker"] for r in list_research_decisions(user_id)}
     assert recorded_tickers == set(tickers)  # every concurrent process's write survived - none lost
+
+
+def test_legacy_json_array_is_migrated_to_jsonl_on_append(user_id):
+    import json
+
+    from autonomy import research_log
+
+    path = research_log._log_file(user_id)
+    path.write_text(json.dumps([{"ticker": "OLD", "schema_version": 2}]), encoding="utf-8")
+    record_research_decision(user_id, {"ticker": "NEW"})
+    text = path.read_text(encoding="utf-8")
+    assert not text.lstrip().startswith("[")
+    assert [row["ticker"] for row in list_research_decisions(user_id)] == ["OLD", "NEW"]
+
+
+def test_log_is_capped_to_the_newest_records(user_id, monkeypatch):
+    from autonomy import research_log
+
+    monkeypatch.setattr(research_log, "MAX_RECORDS", 3)
+    for index in range(5):
+        record_research_decision(user_id, {"ticker": f"T{index}"})
+    assert [row["ticker"] for row in list_research_decisions(user_id)] == ["T2", "T3", "T4"]

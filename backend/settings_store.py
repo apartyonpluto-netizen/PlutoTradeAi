@@ -34,6 +34,9 @@ def _default_settings() -> Dict[str, object]:
         "mission_brief_last_viewed_date": "",
         "api_status": "Operational",
         "trusted_news_sources": ["Official X API", "Yahoo Finance News", "MarketWatch RSS"],
+        # Savings goal. Amount unset (None) until the owner sets one.
+        "savings_goal_name": "",
+        "savings_goal_amount": None,
     }
 
 
@@ -70,8 +73,23 @@ def update_settings(user_id: str, payload: Dict[str, object]) -> Dict[str, objec
         "show_mission_brief_again",
         "mission_brief_last_viewed_date",
         "trusted_news_sources",
+        "savings_goal_name",
+        "savings_goal_amount",
     ]:
         if key not in payload:
+            continue
+        if key == "savings_goal_name":
+            safe_updates[key] = str(payload[key] or "")[:80]
+            continue
+        if key == "savings_goal_amount":
+            raw = payload[key]
+            if raw in (None, "", 0, "0"):
+                safe_updates[key] = None
+                continue
+            amount = float(raw)
+            if amount <= 0:
+                raise ValueError("Savings goal amount must be greater than zero, or blank to leave it unset.")
+            safe_updates[key] = round(amount, 2)
             continue
         safe_updates[key] = payload[key]
     if bool(safe_updates.get("show_mission_brief_again")):

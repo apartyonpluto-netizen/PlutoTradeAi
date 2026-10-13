@@ -102,6 +102,6 @@ page lives in the session scratchpad only.
 ## Blockers needing the owner
 
 - Close/re-protect INTC, MSTR, MRVL and clear 5 stale records (Admin).
-- Set option stop to 20% (default 50%).
+- Option stop default is now 20% in code. A stored 50% that was never explicitly saved migrates to 20% on the next settings read. Set a different value in Account Hub only if 20% is not the rule you want.
 - E*TRADE developer keys + OAuth; a live account and explicit limits before
   any live check.

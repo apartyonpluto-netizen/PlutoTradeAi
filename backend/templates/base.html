@@ -53,7 +53,8 @@
                 {"label": "Support & Resistance", "path": "/support-resistance", "paths": ["/support-resistance", "/reversal-map"], "icon": "⌖"},
                 {"label": "Confidence Engine", "path": "/neural-engine", "paths": ["/neural-engine"], "icon": "◎"},
                 {"label": "Options Brain", "path": "/options", "paths": ["/options"], "icon": "◈"},
-                {"label": "Backtest", "path": "/backtest", "paths": ["/backtest"], "icon": "⧗"}
+                {"label": "Backtest", "path": "/backtest", "paths": ["/backtest"], "icon": "⧗"},
+                {"label": "My Strategies", "path": "/my-strategies", "paths": ["/my-strategies"], "icon": "✧"}
             ] %}
             {% set bottom_nav = [
                 {"label": "Trading Portfolio", "path": "/trade-journal", "paths": ["/trade-journal"], "icon": "✎"},
@@ -168,6 +169,8 @@
             <div class="topbar-avatar" aria-hidden="true" title="{{ current_user.username if current_user else '' }}"></div>
         </header>
 
+        {% include "home_status_bar.html" %}
+
         {% if has_unresolved_ambiguous_submission %}
         <div class="ambiguous-freeze-banner" role="alert" id="ambiguousFreezeBanner">
             <strong>Autonomous entries paused.</strong>
@@ -259,6 +262,18 @@
     </div>
 </aside>
 
+<div class="stop-confirm" id="closeEverythingDialog" hidden>
+    <div class="stop-confirm-card" role="dialog" aria-modal="true" aria-labelledby="closeEverythingTitle">
+        <h3 id="closeEverythingTitle">Close everything?</h3>
+        <p>This cancels open orders and places closing orders for every open position. Type <b>CLOSE EVERYTHING</b> to confirm. Nothing is sent until you do.</p>
+        <input id="closeEverythingInput" type="text" autocomplete="off" placeholder="CLOSE EVERYTHING" aria-label="Type CLOSE EVERYTHING to confirm">
+        <div class="inline-actions">
+            <button type="button" class="stop-everything-button" id="closeEverythingSubmit">Flatten and cancel</button>
+            <button type="button" class="ghost-button" id="closeEverythingCancel">Go back</button>
+        </div>
+        <p class="auth-error" id="closeEverythingError" hidden></p>
+    </div>
+</div>
 <script src="/static/js/app.js"></script>
 <script>
 if ("serviceWorker" in navigator) {

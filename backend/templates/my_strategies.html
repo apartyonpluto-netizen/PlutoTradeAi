@@ -1,0 +1,314 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · My Strategies{% endblock %}
+{% block head_extras %}
+<style>
+    .strategy-layout { display: grid; grid-template-columns: minmax(16rem, 22rem) 1fr; gap: 16px; align-items: start; }
+    .strategy-rule { display: grid; grid-template-columns: 1fr 7rem; gap: 8px; margin-bottom: 8px; }
+    .strategy-callout { border-left: 3px solid var(--accent, #7dcaa5); padding: 8px 12px; margin: 10px 0; }
+    .strategy-list a { display: block; padding: 8px 0; text-decoration: none; }
+    .strategy-list a.active { font-weight: 700; }
+    @media (max-width: 800px) {
+        .strategy-layout { grid-template-columns: 1fr; }
+        .strategy-rule { grid-template-columns: 1fr; }
+    }
+</style>
+{% endblock %}
+{% block content %}
+<section class="panel">
+    <div class="panel-head">
+        <h3>My Strategies</h3>
+        <span>Your rules, your record, and what is similar</span>
+    </div>
+    <p class="muted">
+        Define a strategy, or start from a description or from trades you already took.
+        A backtest replays those rules on daily bars. It is a <strong>backtest</strong>, not a closed trade and not a probability.
+        A probability is shown only from reconciled closed trades of this strategy name, and only with 30 or more.
+        Below that, the probability is <strong>not reliably estimated</strong>.
+        Nothing on this page places, changes, or cancels a broker order.
+    </p>
+    {% if form_error %}
+    <p class="strategy-callout" role="alert">{{ form_error }}</p>
+    {% endif %}
+</section>
+
+<div class="strategy-layout">
+    <section class="panel">
+        <div class="panel-head"><h3>Saved</h3><span>{{ strategies|length }}</span></div>
+        <div class="strategy-list">
+            {% for strategy in strategies %}
+            <a href="/my-strategies?strategy={{ strategy.id }}" class="{{ 'active' if selected and selected.id == strategy.id else '' }}">
+                {{ strategy.name }}
+                <small class="muted">{{ strategy.style }} · {{ strategy.direction }} · {{ strategy.timeframe }}</small>
+            </a>
+            {% else %}
+            <p class="muted">No saved strategy yet. Use the form, a description, or an import.</p>
+            {% endfor %}
+        </div>
+
+        <form method="post" action="/my-strategies/translate" class="stack-form" style="margin-top: 16px;">
+            <label for="plainDescription">Describe it in plain English</label>
+            <textarea id="plainDescription" name="description" rows="4" placeholder="Buy pullbacks in an uptrend. RSI below 35. Stop 2%. Hold 5 days. AAPL, MSFT."></textarea>
+            <button type="submit">Turn into the form</button>
+            <p class="muted">Uses your Anthropic key from Account Hub when one is saved. Without a key, only the words that match a known rule are filled in, and the draft says so.</p>
+        </form>
+
+        <form method="post" action="/my-strategies/import-csv" class="stack-form" enctype="multipart/form-data">
+            <label for="csvFile">Import past trades (CSV)</label>
+            <input id="csvFile" type="file" name="csv_file" accept=".csv,text/csv">
+            <textarea name="csv_text" rows="3" placeholder="ticker,side,entry_date,exit_date,entry_price,exit_price"></textarea>
+            <button type="submit">Read the CSV</button>
+        </form>
+
+        <form method="post" action="/my-strategies/import-broker">
+            <button type="submit">Read Webull fill history</button>
+            <p class="muted">Read-only. Filled equity orders are paired into round trips. No order is sent.</p>
+        </form>
+    </section>
+
+    <div>
+        <section class="panel">
+            <div class="panel-head">
+                <h3>{{ "Edit strategy" if selected and not draft_note else "Strategy form" }}</h3>
+                <span>{{ form_strategy.source or "form" }}</span>
+            </div>
+            {% if draft_note %}
+            <p class="strategy-callout">{{ draft_note }}</p>
+            <form method="post" action="/my-strategies/dismiss-draft"><button type="submit" class="ghost-button">Discard this draft</button></form>
+            {% endif %}
+            <form method="post" action="/my-strategies/save" class="stack-form">
+                {% if selected and not draft_note %}<input type="hidden" name="id" value="{{ selected.id }}">{% endif %}
+                <input type="hidden" name="source" value="{{ form_strategy.source or 'form' }}">
+                <label for="strategyName">Name</label>
+                <input id="strategyName" name="name" required maxlength="80" value="{{ form_strategy.name or '' }}">
+                <label for="strategyDescription">Description</label>
+                <textarea id="strategyDescription" name="description" rows="3">{{ form_strategy.description or '' }}</textarea>
+                <label for="strategyStyle">Style</label>
+                <select id="strategyStyle" name="style">
+                    {% for style in ["custom", "breakout", "pullback", "reversal", "mean_reversion", "momentum", "vwap", "gap", "trend", "support", "resistance"] %}
+                    <option value="{{ style }}" {{ "selected" if (form_strategy.style or "custom") == style else "" }}>{{ style.replace("_", " ") }}</option>
+                    {% endfor %}
+                </select>
+                <label for="strategyDirection">Direction</label>
+                <select id="strategyDirection" name="direction">
+                    {% for direction in ["long", "short", "both"] %}
+                    <option value="{{ direction }}" {{ "selected" if (form_strategy.direction or "long") == direction else "" }}>{{ direction }}</option>
+                    {% endfor %}
+                </select>
+                <label for="strategyTimeframe">Timeframe</label>
+                <select id="strategyTimeframe" name="timeframe">
+                    <option value="daily" {{ "selected" if (form_strategy.timeframe or "daily") == "daily" else "" }}>daily</option>
+                    <option value="intraday" {{ "selected" if form_strategy.timeframe == "intraday" else "" }}>intraday</option>
+                </select>
+                <label for="strategyInstruments">Instruments</label>
+                <select id="strategyInstruments" name="instruments">
+                    {% for instrument in ["equity", "options", "both"] %}
+                    <option value="{{ instrument }}" {{ "selected" if (form_strategy.instruments or "equity") == instrument else "" }}>{{ instrument }}</option>
+                    {% endfor %}
+                </select>
+                <label for="strategyTickers">Tickers</label>
+                <input id="strategyTickers" name="tickers" value="{{ (form_strategy.tickers or [])|join(', ') }}" placeholder="AAPL, MSFT">
+                <label for="strategyHold">Max hold (trading days)</label>
+                <input id="strategyHold" name="max_hold_days" type="number" min="1" max="20" value="{{ form_strategy.max_hold_days or 5 }}">
+                <label for="strategyStop">Stop percent (optional)</label>
+                <input id="strategyStop" name="stop_percent" inputmode="decimal" value="{{ form_strategy.stop_percent if form_strategy.stop_percent is not none else '' }}" placeholder="2">
+                <label for="strategyTargetType">Target</label>
+                <select id="strategyTargetType" name="target_type">
+                    {% set target = form_strategy.target or {} %}
+                    <option value="none" {{ "selected" if (target.type or 'none') == 'none' else '' }}>none (fixed hold)</option>
+                    <option value="percent" {{ "selected" if target.type == 'percent' else '' }}>percent</option>
+                    <option value="r_multiple" {{ "selected" if target.type == 'r_multiple' else '' }}>reward multiple of the stop</option>
+                </select>
+                <input name="target_value" inputmode="decimal" value="{{ target.value if target.value is not none else '' }}" placeholder="target number">
+                <fieldset>
+                    <legend>Entry rules (all must be true)</legend>
+                    {% for slot in form_slots %}
+                    <div class="strategy-rule">
+                        <select name="rule_kind" aria-label="Entry rule {{ loop.index }}">
+                            <option value="">—</option>
+                            {% for rule in rule_catalog %}
+                            <option value="{{ rule.kind }}" {{ "selected" if slot.kind == rule.kind else "" }}>{{ rule.label }}</option>
+                            {% endfor %}
+                        </select>
+                        <input name="rule_value" aria-label="Rule value {{ loop.index }}" value="{{ slot.value }}" placeholder="value">
+                    </div>
+                    {% endfor %}
+                </fieldset>
+                {% if form_strategy.import_note %}
+                <p class="muted">{{ form_strategy.import_note }}</p>
+                {% endif %}
+                {% if scoring_enabled %}
+                <input type="hidden" name="paper_opt_in" value="0">
+                {% endif %}
+                <label>
+                    <input type="checkbox" name="paper_opt_in" value="1" {% if form_strategy.paper_opt_in %}checked{% endif %} {% if not scoring_enabled %}disabled{% endif %}>
+                    Record this strategy for paper / approval scoring
+                </label>
+                <p class="muted">
+                    {% if scoring_enabled %}
+                    The switch is on. Saving this records the strategy for a future paper approval pass.
+                    The autonomous scan does not read it, and it does not place an order.
+                    {% else %}
+                    Paper scoring is off (PLUTO_USER_STRATEGY_SCORING is not set). The engine does not read user strategies.
+                    {% endif %}
+                </p>
+                <button type="submit">Save strategy</button>
+            </form>
+            {% if selected and not draft_note %}
+            <form method="post" action="/my-strategies/{{ selected.id }}/delete" style="margin-top: 8px;">
+                <button type="submit" class="ghost-button">Delete</button>
+            </form>
+            {% endif %}
+        </section>
+
+        {% if selected and detail %}
+        {% set record = detail.record %}
+        {% set comparison = detail.comparison %}
+        <section class="panel">
+            <div class="panel-head"><h3>How {{ selected.name }} has done</h3><span>{{ record.reconciled.sample_size }} reconciled</span></div>
+            {% for line in record.honesty %}
+            <p class="muted">{{ line }}</p>
+            {% endfor %}
+            <div class="price-map-grid">
+                <div>
+                    <small>Reconciled closed trades</small>
+                    <b>{{ record.reconciled.sample_size }}</b>
+                    <p class="muted">{{ record.reconciled.note }}</p>
+                    {% if record.reconciled.reliable %}
+                    <p>Win rate {{ record.reconciled.win_probability_percent }}%
+                        {% if record.reconciled.win_probability_interval %}
+                        ({{ record.reconciled.win_probability_interval.low }}–{{ record.reconciled.win_probability_interval.high }})
+                        {% endif %}
+                    </p>
+                    <p>Mean net return {{ record.reconciled.mean_net_return_percent }}%</p>
+                    {% endif %}
+                    {% if record.reconciled.name_collision %}<p>{{ record.reconciled.name_collision }}</p>{% endif %}
+                    <p class="muted">{{ record.reconciled.attribution }}</p>
+                </div>
+                <div>
+                    <small>Imported record</small>
+                    <b>{{ record.imported.sample_size }}</b>
+                    <p class="muted">{{ record.imported.note }}</p>
+                    {% if record.imported.imported_win_rate_percent is not none %}
+                    <p>Imported win rate {{ record.imported.imported_win_rate_percent }}% · mean {{ record.imported.mean_return_percent }}%</p>
+                    {% endif %}
+                </div>
+            </div>
+
+            <form method="post" action="/my-strategies/{{ selected.id }}/backtest" class="grid-form" style="margin-top: 12px;">
+                <input name="tickers" value="{{ selected.tickers|join(', ') }}" placeholder="Tickers for this backtest">
+                <select name="lookback_months">
+                    <option value="3">3 months</option>
+                    <option value="6" selected>6 months</option>
+                    <option value="12">12 months</option>
+                </select>
+                <button type="submit">Run backtest</button>
+            </form>
+            {% if record.backtest %}
+            {% set backtest = record.backtest %}
+            <div class="strategy-callout">
+                <strong>{{ backtest.label }}</strong>
+                <p>{{ backtest.methodology_note }}</p>
+                <p>{{ backtest.probability_note }}</p>
+                <div class="price-map-grid">
+                    <div><small>Backtest trades</small><b>{{ backtest.combined.trade_count }}</b></div>
+                    <div><small>Backtest win rate</small><b>{{ backtest.combined.win_rate_percent }}%</b></div>
+                    <div><small>Backtest avg return</small><b>{{ backtest.combined.avg_return_percent }}%</b></div>
+                    <div><small>Backtest max drawdown</small><b>{{ backtest.combined.max_drawdown_percent }}%</b></div>
+                </div>
+                {% for error in backtest.errors %}<p class="muted">{{ error }}</p>{% endfor %}
+            </div>
+            {% else %}
+            <p class="muted">No backtest stored yet. Running one uses daily bars and labels the result as a backtest.</p>
+            {% endif %}
+        </section>
+
+        <section class="panel">
+            <div class="panel-head"><h3>Similar, and what their record says</h3><span>{{ comparison.profile.style }}</span></div>
+            {% if comparison.recommendations %}
+            <h4>Fits this style</h4>
+            {% for pick in comparison.recommendations %}
+            <article class="strategy-callout">
+                <strong>{{ pick.name }}</strong>
+                <span class="muted">{{ pick.kind }} · similarity {{ pick.similarity }}</span>
+                <p>{{ pick.figure_label }}: {{ pick.figure }} (sample {{ pick.sample_size }})</p>
+                <p>{{ pick.caution }}</p>
+            </article>
+            {% endfor %}
+            {% else %}
+            <p>{{ comparison.empty_recommendation_note }}</p>
+            {% endif %}
+
+            <h4>Built-in strategies</h4>
+            <table>
+                <thead>
+                    <tr><th>Strategy</th><th>Similarity</th><th>Why</th><th>Real closed trades</th><th>Backtest</th></tr>
+                </thead>
+                <tbody>
+                    {% for row in comparison.built_in %}
+                    {% if row.similarity >= 35 %}
+                    <tr>
+                        <td>{{ row.name }}</td>
+                        <td>{{ row.similarity }}</td>
+                        <td>{{ row.why }}</td>
+                        <td>
+                            {{ row.real.sample_size }} trade(s). {{ row.real.note }}
+                            {% if row.real.reliable %}
+                            Win rate {{ row.real.win_probability_percent }}%. Mean {{ row.real.mean_net_return_percent }}%.
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if row.backtest %}
+                            {{ row.backtest.label }}: {{ row.backtest.trade_count }} trades, avg {{ row.backtest.avg_return_percent }}%. {{ row.backtest.note }}
+                            {% else %}
+                            No built-in backtest saved.
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endif %}
+                    {% endfor %}
+                </tbody>
+            </table>
+
+            <h4>Setup library</h4>
+            {% if comparison.setups %}
+            <table>
+                <thead><tr><th>Setup</th><th>Similarity</th><th>Status</th><th>Out of sample</th><th>Forward</th></tr></thead>
+                <tbody>
+                    {% for row in comparison.setups %}
+                    <tr>
+                        <td>{{ row.name }}</td>
+                        <td>{{ row.similarity }}</td>
+                        <td>{{ row.status }}. {{ row.status_note }}</td>
+                        <td>{{ row.out_of_sample.label }}{% if row.out_of_sample.n %} · n={{ row.out_of_sample.n }}{% if row.out_of_sample.mean_r is not none %}, mean R {{ row.out_of_sample.mean_r }}{% endif %}{% endif %}</td>
+                        <td>{{ row.forward.label }}{% if row.forward.n %} · n={{ row.forward.n }}{% endif %}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p class="muted">No setup in the library is close enough to these rules to list.</p>
+            {% endif %}
+
+            <h4>Other users, anonymized</h4>
+            {% set cohort = comparison.other_users %}
+            <p>{{ cohort.note }}</p>
+            {% if cohort.shown %}
+            <p>Strategies in this style, excluding yours: {{ cohort.strategies }}.</p>
+            {% if cohort.backtest %}
+            <p>{{ cohort.backtest.label }}: {{ cohort.backtest.note }}
+                {% if cohort.backtest.median_avg_return_percent is not none %}
+                Median average return {{ cohort.backtest.median_avg_return_percent }}% across {{ cohort.backtest.strategies }} backtests.
+                {% endif %}
+            </p>
+            {% endif %}
+            {% if cohort.real %}
+            <p>{{ cohort.real.note }}
+                {% if cohort.real.reliable %} Sample {{ cohort.real.sample_size }}. Win rate {{ cohort.real.win_rate_percent }}%.{% endif %}
+            </p>
+            {% endif %}
+            {% endif %}
+        </section>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

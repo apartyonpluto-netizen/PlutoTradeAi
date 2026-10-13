@@ -17,6 +17,8 @@ volume behind it first; this module is only the reporting layer."""
 
 from typing import Any, Dict, List, Optional
 
+from paper_costs import performance_net
+
 from .closed_trades import list_closed_trades
 from .research_log import list_research_decisions
 
@@ -132,7 +134,10 @@ def build_performance_report(user_id: str, environment: str = "") -> Dict[str, A
     incomplete_pnl_count = 0
 
     for trade in closed_trades:
-        net_pnl = trade.get("net_realized_pnl")
+        if trade.get("pnl_status") == "complete":
+            net_pnl = performance_net(trade)
+        else:
+            net_pnl = trade.get("net_realized_pnl")
         if trade.get("pnl_status") != "complete":
             incomplete_pnl_count += 1
 
