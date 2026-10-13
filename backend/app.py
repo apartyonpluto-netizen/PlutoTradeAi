@@ -386,6 +386,15 @@ app = Flask(__name__)
 setup_logging()
 logger = get_logger("app")
 
+# User strategies live in their own blueprint so this file stays out of the
+# scanner and order path. The blueprint does not submit broker orders.
+try:
+    from .user_strategies.blueprint import user_strategies_bp
+except ImportError:
+    from user_strategies.blueprint import user_strategies_bp
+
+app.register_blueprint(user_strategies_bp)
+
 _DATA_DIR_FOR_SECRET = Path(os.environ.get("PLUTO_DATA_DIR", str(Path(__file__).resolve().parents[1] / "data"))).resolve()
 _DATA_DIR_FOR_SECRET.mkdir(parents=True, exist_ok=True)
 _SECRET_KEY_FILE = _DATA_DIR_FOR_SECRET / ".flask_secret_key"
