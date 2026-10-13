@@ -1,0 +1,32 @@
+<div class="trade-cards">
+    {% for card in trade_cards %}
+    <article class="trade-card">
+        <header>
+            <b>{{ card.ticker }}</b>
+            <span>{{ card.strategy }}</span>
+            {% if card.score is not none %}<span class="status-pill">Score {{ card.score }}</span>{% endif %}
+        </header>
+        <p>{{ card.why }}</p>
+        {% if card.chart %}
+        <svg class="trade-spark" viewBox="0 0 160 64" role="img" aria-label="Entry to exit">
+            <line x1="12" y1="{{ card.chart.y1 }}" x2="148" y2="{{ card.chart.y2 }}" class="{{ 'spark-up' if card.chart.up else 'spark-down' }}"/>
+            <circle cx="12" cy="{{ card.chart.y1 }}" r="3.5" class="spark-entry"/>
+            <circle cx="148" cy="{{ card.chart.y2 }}" r="3.5" class="{{ 'spark-up' if card.chart.up else 'spark-down' }}"/>
+        </svg>
+        <p class="trade-card-prices">
+            <span>Entry {{ "%.2f"|format(card.entry) }}</span>
+            <span>Exit {{ "%.2f"|format(card.exit) }}</span>
+        </p>
+        {% endif %}
+        <p class="trade-card-result {{ 'tone-positive' if card.net is not none and card.net > 0 else 'tone-negative' if card.net is not none and card.net < 0 else '' }}">
+            {% if card.net is not none %}
+            {{ "+" if card.net > 0 else "" }}${{ "%.2f"|format(card.net) }} after fees
+            {% else %}
+            Result incomplete
+            {% endif %}
+        </p>
+    </article>
+    {% else %}
+    <p class="muted">No closed trades yet.</p>
+    {% endfor %}
+</div>

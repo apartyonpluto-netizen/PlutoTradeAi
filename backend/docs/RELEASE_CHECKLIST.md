@@ -70,6 +70,13 @@ outbound network blocked in tests). Broker evidence by level: `docs/BROKER_VERIF
 | Option exit on executable bid, % of actual entry premium | TESTED | `_check_and_execute_option_exit`; `test_option_trade_plan.py` | Default stop is 20% (a stored untouched 50% migrates on read). Never exercised on a real option. See `docs/SANDBOX_OPTIONS_CYCLE.md`. |
 | Approval bound to ticket version; recheck before submit | TESTED | `5000638`, `test_trade_tickets.py` | APPROVAL mode not yet enabled in prod |
 | Emergency stop / kill switch / pause keeps monitoring | TESTED | Controller + scan gates | — |
+| Paper slippage and regulatory fees on paper results | TESTED | `paper_costs.py`, `test_go_live_safety.py` | Applied to the paper journal and to sandbox performance when prices are known. Live records keep broker fills and fees |
+| Losing-streak halt | TESTED | `kill_switch.py`; default 3, 0 turns it off | Daily loss limit already blocked new entries |
+| Close everything (cancel orders, flatten positions) | TESTED | `flatten_account.py`; confirmed phrase required | Code path only — do not invoke it from a script |
+| Live portfolio defaults | TESTED | 10% / 40% / 25% / 10% until the owner saves limits | Paper stays off until set |
+| Phone alerts (fill, stop, halt, error) | TESTED | `phone_alerts.py`; off until Pushover or `PLUTO_ALERT_WEBHOOK_URL` is set | — |
+| Go-live gate before live opening orders | TESTED | 30 clean trades, positive after fees, drawdown under `PLUTO_GO_LIVE_MAX_DRAWDOWN_PERCENT` (default 15), one options cycle | Sandbox orders are not blocked |
+| Live size ramp | TESTED | `PLUTO_LIVE_SIZE_FRACTION`, default 0.25 of the paper quantity | — |
 | Overnight-holding permission | INCOMPLETE | No setting | Spec §7 — owner setting required |
 
 ## Gate 5 — Security

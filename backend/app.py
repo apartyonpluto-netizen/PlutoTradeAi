@@ -704,6 +704,11 @@ def _require_login():
     user_id = session.get("user_id")
     user = get_user_by_id(user_id) if user_id else None
     if user and user.get("approved", True) and not user.get("suspended", False):
+        try:
+            import go_live_gate
+            go_live_gate.bind(user_id)
+        except Exception:
+            pass
         return None
 
     session.pop("user_id", None)
@@ -2154,7 +2159,7 @@ def _broker_framework_status() -> Dict[str, object]:
             "etrade_execution_enabled": False,
             "webull_paper_mode_only": not live_trading_armed,
             "approval_required": True,
-            "emergency_kill_switch_placeholder": True,
+            "emergency_kill_switch_placeholder": False,
         },
     }
 
@@ -2652,6 +2657,19 @@ def _build_page_context(
         "fast_monitor_health": _fast_monitor_health_status() if is_admin(user_id) else None,
         "full_scan_health": _full_scan_health_status() if is_admin(user_id) else None,
     }
+    try:
+        import home_status as home_status_mod
+        from go_live_gate import evaluate as evaluate_go_live
+
+        context["home_status"] = home_status_mod.build_home_status(user_id)
+        context["savings_goal"] = home_status_mod.build_savings_goal(user_id)
+        context["go_live"] = evaluate_go_live(user_id)
+        context["trade_cards"] = home_status_mod.build_trade_cards(user_id)
+    except Exception:
+        context.setdefault("home_status", None)
+        context.setdefault("savings_goal", None)
+        context.setdefault("go_live", None)
+        context.setdefault("trade_cards", [])
     if include_trusted_accounts:
         context["trusted_accounts"] = get_trusted_accounts(user_id)
     return context
@@ -4212,7 +4230,10 @@ def api_settings():
             {"settings": get_settings(_current_user_id()), "themes": available_themes(), "news_roadmap": get_future_news_roadmap()}
         )
     payload = request.get_json(silent=True) or {}
-    settings = update_settings(_current_user_id(), payload)
+    try:
+        settings = update_settings(_current_user_id(), payload)
+    except (TypeError, ValueError) as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
     return jsonify({"ok": True, "settings": settings})
 
 
@@ -4276,6 +4297,32 @@ def api_autonomy_emergency_stop():
     return _api_success(result, autonomy=result, ok=True)
 
 
+@app.route("/api/safety/close-everything", methods=["POST"])
+@api_guard
+def api_close_everything():
+    """Confirmed flatten. The phrase must match or nothing is sent to the broker."""
+    import flatten_account
+    import phone_alerts
+
+    payload = request.get_json(silent=True) or {}
+    if not flatten_account.confirmed(str(payload.get("confirm") or "")):
+        return _api_failure(
+            "Type CLOSE EVERYTHING to confirm. Nothing was cancelled or closed.",
+            status_code=400,
+            error_code="confirmation_required",
+            ok=False,
+        )
+    user_id = _current_user_id()
+    emergency_stop(user_id, reason="Close everything confirmed from the stop button.")
+    try:
+        result = flatten_account.run_for_user(user_id)
+    except Exception as error:  # noqa: BLE001 - the stop is already on; report the failure
+        phone_alerts.notify("error", "Close everything failed", str(error)[:500])
+        raise
+    phone_alerts.notify("halt", "Close everything", "Open orders were cancelled and positions were flattened.")
+    return _api_success(result, ok=bool(result.get("ok")), **result)
+
+
 @app.route("/api/autonomy/reset-stop", methods=["POST"])
 @api_guard
 def api_autonomy_reset_stop():
@@ -4301,6 +4348,7 @@ def api_autonomy_risk_settings():
             max_total_exposure_percent=payload.get("max_total_exposure_percent"),
             max_sector_exposure_percent=payload.get("max_sector_exposure_percent"),
             max_drawdown_percent=payload.get("max_drawdown_percent"),
+            losing_streak_limit=payload.get("losing_streak_limit"),
         )
     except (ValueError, TypeError) as error:
         raise ValidationError(str(error)) from error
@@ -4731,6 +4779,30 @@ def _reconcile_exit_orders(user_id: str, creds: Dict[str, str], account_id: str)
 # Pure trading-math helpers, deliberately factored out of _run_autonomous_trade_scan
 # and _refresh_stop_confidence so the arithmetic that actually moves money can be
 # unit-tested directly without mocking Webull, market data, or anything else.
+
+
+def _new_entry_halt_reason(user_id: str, day_pnl: float, current_balance: float, risk_settings: Dict[str, object]) -> Optional[str]:
+    """Daily-loss limit or losing streak. Phones once per distinct reason.
+    None means new entries are allowed by this check."""
+    import kill_switch
+    from autonomy.closed_trades import list_closed_trades
+
+    daily_loss_limit_percent = float(risk_settings.get("daily_loss_limit_percent", 0) or 0)
+    if _is_daily_loss_limit_hit(day_pnl, current_balance, daily_loss_limit_percent):
+        daily_loss_limit = current_balance * (daily_loss_limit_percent / 100)
+        reason = (
+            f"Daily loss limit reached (today's P/L ${day_pnl:.2f} vs -${daily_loss_limit:.2f} limit, "
+            f"{daily_loss_limit_percent:.1f}% of ${current_balance:,.2f} balance). No new trades until tomorrow."
+        )
+        kill_switch.note_halt(user_id, reason)
+        return reason
+    streak_limit = int(risk_settings.get("losing_streak_limit", 3) or 0)
+    reason = kill_switch.streak_block_reason(list_closed_trades(user_id), streak_limit)
+    if reason:
+        kill_switch.note_halt(user_id, reason)
+        return reason
+    kill_switch.clear_halt(user_id)
+    return None
 
 
 def _is_daily_loss_limit_hit(day_pnl: float, current_balance: float, daily_loss_limit_percent: float) -> bool:
@@ -6658,14 +6730,19 @@ def _apply_broker_fees(creds: Dict[str, str], account_id: str, closed_record: Di
         closed_record["fees"] = None
         closed_record["fees_source"] = "unavailable"
         closed_record["net_excludes_fees"] = True
-        return
-    closed_record["fees"] = fees["total"]
-    closed_record["fee_items"] = fees["items"]
-    closed_record["fees_source"] = "broker order history"
-    gross = closed_record.get("gross_realized_pnl")
-    if gross is not None:
-        closed_record["net_realized_pnl"] = round(float(gross) - fees["total"], 4)
-    closed_record["net_excludes_fees"] = False
+    else:
+        closed_record["fees"] = fees["total"]
+        closed_record["fee_items"] = fees["items"]
+        closed_record["fees_source"] = "broker order history"
+        gross = closed_record.get("gross_realized_pnl")
+        if gross is not None:
+            closed_record["net_realized_pnl"] = round(float(gross) - fees["total"], 4)
+        closed_record["net_excludes_fees"] = False
+    try:
+        import paper_costs
+        paper_costs.stamp_closed_record(closed_record)
+    except Exception:
+        pass
 
 
 def _check_and_execute_target_exit(
@@ -10856,7 +10933,7 @@ def _recheck_ticket_before_submission(user_id: str, creds: Dict[str, str], ticke
 
         # Portfolio limits against fresh positions: the whole ticket must fit
         # (an approval never resizes the order the user approved).
-        limits = portfolio_limits.limits_from_settings(risk_settings)
+        limits = portfolio_limits.effective_limits(risk_settings, live=webull_api.is_live_trading_armed())
         ticket_value = quantity * limit_price * (100 if instrument_type == "OPTION" else 1)
         if limits["max_position_percent"] and current_balance > 0 and ticket_value > current_balance * limits["max_position_percent"] / 100:
             reasons.append(f"this position would be {ticket_value / current_balance * 100:.1f}% of the account, over your {limits['max_position_percent']:g}% position limit")
@@ -10871,9 +10948,9 @@ def _recheck_ticket_before_submission(user_id: str, creds: Dict[str, str], ticke
             if drawdown_reason:
                 reasons.append(drawdown_reason)
         day_pnl = float(balance.get("total_day_profit_loss", 0) or 0)
-        daily_loss_limit_percent = float(risk_settings.get("daily_loss_limit_percent", 0) or 0)
-        if _is_daily_loss_limit_hit(day_pnl, current_balance, daily_loss_limit_percent):
-            reasons.append(f"daily loss limit reached (today's P/L ${day_pnl:,.2f})")
+        halt_reason = _new_entry_halt_reason(user_id, day_pnl, current_balance, risk_settings)
+        if halt_reason:
+            reasons.append(halt_reason)
         if instrument_type == "OPTION":
             needed = quantity * limit_price * 100
             buying_power = _extract_option_buying_power(balance)
@@ -11414,6 +11491,11 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
     under dry_run, for the same reason - a preview must have zero side
     effects on anything already resting at the broker, not just on new
     entries."""
+    try:
+        import go_live_gate
+        go_live_gate.bind(user_id)
+    except Exception:
+        pass
     creds = get_webull_credentials(user_id)
     if not is_webull_configured(user_id):
         raise ValidationError("Enter your Webull App Key and App Secret in Account Hub before running the trade scan.")
@@ -11512,14 +11594,10 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
     # guess.
     broker_buying_power = _extract_broker_buying_power(balance)
 
-    daily_loss_limit_percent = float(risk_settings.get("daily_loss_limit_percent", 0) or 0)
     day_pnl = float(balance.get("total_day_profit_loss", 0) or 0)
-    if _is_daily_loss_limit_hit(day_pnl, current_balance, daily_loss_limit_percent):
-        daily_loss_limit = current_balance * (daily_loss_limit_percent / 100)
-        raise ValidationError(
-            f"Daily loss limit reached (today's P/L ${day_pnl:.2f} vs -${daily_loss_limit:.2f} limit, "
-            f"{daily_loss_limit_percent:.1f}% of ${current_balance:,.2f} balance). No new trades until tomorrow."
-        )
+    halt_reason = _new_entry_halt_reason(user_id, day_pnl, current_balance, risk_settings)
+    if halt_reason:
+        raise ValidationError(halt_reason)
 
     max_positions = int(risk_settings.get("max_positions", 0) or 0)
     real_open_positions_snapshot = webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id)
@@ -11619,15 +11697,11 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
 
     risk_percent_of_balance = float(risk_settings.get("risk_percent_of_balance", 0) or 0)
     risk_budget = _compute_risk_budget(current_balance, risk_percent_of_balance)
-    # Set in Account Hub > Risk Limits > Portfolio (0 = off).
-    max_position_exposure_percent = float(risk_settings.get("max_position_exposure_percent", 0) or 0)
+    # Paper: off until set. Live: sensible defaults until the owner saves their own.
+    live_entries = webull_api.is_live_trading_armed()
+    portfolio_limit_settings = portfolio_limits.effective_limits(risk_settings, live=live_entries)
+    max_position_exposure_percent = float(portfolio_limit_settings.get("max_position_percent") or 0)
     position_exposure_cap = _compute_position_exposure_cap(current_balance, max_position_exposure_percent)
-
-    # Portfolio limits (portfolio_limits.py) - all off until the user sets
-    # them. Exposure counts every broker position, including holdings the
-    # agent never opened, plus working entry orders; trades placed or
-    # proposed later in this scan are added as they happen.
-    portfolio_limit_settings = portfolio_limits.limits_from_settings(risk_settings)
     portfolio_snapshot = portfolio_limits.exposure_snapshot(
         list(real_open_positions_snapshot) + list(margin_open_positions_snapshot), scan_working_orders,
     )
@@ -12153,6 +12227,24 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                     extra_caps=_scan_portfolio_room(ticker),
                 )
                 option_quantity = int(option_sizing["quantity"])
+                if option_quantity >= 1 and webull_api.is_live_trading_armed():
+                    import live_ramp
+                    ramped_option_quantity = live_ramp.scale_quantity(option_quantity)
+                    if ramped_option_quantity < 1:
+                        skipped.append({
+                            "ticker": ticker,
+                            "recommendation": opp.get("recommendation"),
+                            "confidence": opp.get("confidence"),
+                            "reason_skipped": (
+                                f"live size ramp ({live_ramp.fraction():.0%} of the paper size) "
+                                "is below 1 contract"
+                            ),
+                            "was_qualifying": True,
+                            "skip_category": "live_ramp",
+                            "instrument_type": "OPTION",
+                        })
+                        continue
+                    option_quantity = ramped_option_quantity
                 if option_quantity >= 1:
                     option_entry: Dict[str, object] = {
                         "ticker": ticker,
@@ -12309,6 +12401,19 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             extra_caps=_scan_portfolio_room(ticker),
         )
         quantity = int(sizing["quantity"])
+        if quantity >= 1 and webull_api.is_live_trading_armed():
+            import live_ramp
+            ramped_quantity = live_ramp.scale_quantity(quantity)
+            if ramped_quantity < 1:
+                sizing = {
+                    **sizing,
+                    "reason": (
+                        f"live size ramp ({live_ramp.fraction():.0%} of the paper size) is below 1 share"
+                    ),
+                }
+                quantity = 0
+            else:
+                quantity = ramped_quantity
         if quantity < 1:
             skipped.append(
                 {
@@ -13404,7 +13509,7 @@ def api_accounts():
         "tradingview_executes_trades": False,
         "options_execution_disabled": True,
         "approval_required_by_default": True,
-        "emergency_kill_switch_placeholder": True,
+        "emergency_kill_switch_placeholder": False,
     }
     return _api_success(
         {"accounts": accounts, "safety": safety, "broker_framework": broker_framework, "webull_configured": is_webull_configured(user_id)},
@@ -13570,7 +13675,7 @@ def api_status():
             "live_trading_enabled": webull_api.is_live_trading_armed(),
             "options_execution_enabled": False,
             "approval_required": True,
-            "emergency_kill_switch_placeholder": True,
+            "emergency_kill_switch_placeholder": False,
         },
         "autonomy": get_autonomy_status(_current_user_id()),
     }

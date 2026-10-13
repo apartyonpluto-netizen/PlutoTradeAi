@@ -169,6 +169,8 @@
             <div class="topbar-avatar" aria-hidden="true" title="{{ current_user.username if current_user else '' }}"></div>
         </header>
 
+        {% include "home_status_bar.html" %}
+
         {% if has_unresolved_ambiguous_submission %}
         <div class="ambiguous-freeze-banner" role="alert" id="ambiguousFreezeBanner">
             <strong>Autonomous entries paused.</strong>
@@ -260,6 +262,18 @@
     </div>
 </aside>
 
+<div class="stop-confirm" id="closeEverythingDialog" hidden>
+    <div class="stop-confirm-card" role="dialog" aria-modal="true" aria-labelledby="closeEverythingTitle">
+        <h3 id="closeEverythingTitle">Close everything?</h3>
+        <p>This cancels open orders and places closing orders for every open position. Type <b>CLOSE EVERYTHING</b> to confirm. Nothing is sent until you do.</p>
+        <input id="closeEverythingInput" type="text" autocomplete="off" placeholder="CLOSE EVERYTHING" aria-label="Type CLOSE EVERYTHING to confirm">
+        <div class="inline-actions">
+            <button type="button" class="stop-everything-button" id="closeEverythingSubmit">Flatten and cancel</button>
+            <button type="button" class="ghost-button" id="closeEverythingCancel">Go back</button>
+        </div>
+        <p class="auth-error" id="closeEverythingError" hidden></p>
+    </div>
+</div>
 <script src="/static/js/app.js"></script>
 <script>
 if ("serviceWorker" in navigator) {

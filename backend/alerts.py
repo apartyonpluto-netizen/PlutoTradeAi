@@ -131,11 +131,19 @@ def add_manual_alert(user_id: str, payload: Dict[str, str]) -> Dict[str, str]:
     }
 
     alerts_file = _alerts_file(user_id)
+    inserted = False
     with _locked(alerts_file):
         alerts = load_manual_alerts(user_id)
         if not any(existing["id"] == alert["id"] for existing in alerts):
             alerts.insert(0, alert)
             _save_json(alerts_file, alerts)
+            inserted = True
+    if inserted:
+        try:
+            import phone_alerts
+            phone_alerts.notify_alert(alert)
+        except Exception:
+            pass
     return alert
 
 

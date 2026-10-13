@@ -102,6 +102,11 @@ def _default_settings() -> Dict[str, object]:
         "max_total_exposure_percent": 0.0,
         "max_sector_exposure_percent": 0.0,
         "max_drawdown_percent": 0.0,
+        # False until the owner saves a portfolio limit (including Off).
+        # Live accounts that have never saved one use portfolio_limits.LIVE_DEFAULTS.
+        "portfolio_limits_explicit": False,
+        # Consecutive losing closes that pause new entries. 0 turns it off.
+        "losing_streak_limit": 3,
         "emergency_stop_enabled": False,
         "last_mode_change": now,
         "mode_change_reason": "Initialization",
@@ -284,6 +289,7 @@ def update_risk_settings(
     max_total_exposure_percent: float | None = None,
     max_sector_exposure_percent: float | None = None,
     max_drawdown_percent: float | None = None,
+    losing_streak_limit: int | None = None,
 ) -> Dict[str, object]:
     # Portfolio limits (portfolio_limits.py): percents of equity, 0 = off.
     for label, value in (
@@ -306,6 +312,8 @@ def update_risk_settings(
         raise ValueError("Option stop loss percent must be between 0 (exclusive) and 100.")
     if option_close_days_before_expiration is not None and option_close_days_before_expiration < 0:
         raise ValueError("Option close-days-before-expiration must be zero or positive.")
+    if losing_streak_limit is not None and not (0 <= int(losing_streak_limit) <= 20):
+        raise ValueError("Losing streak limit must be between 0 (off) and 20.")
 
     def _mutate(settings: Dict[str, object]) -> None:
         if daily_loss_limit_percent is not None:
@@ -329,6 +337,12 @@ def update_risk_settings(
         ):
             if value is not None:
                 settings[key] = float(value)
+        if any(value is not None for value in (
+            max_position_exposure_percent, max_total_exposure_percent, max_sector_exposure_percent, max_drawdown_percent,
+        )):
+            settings["portfolio_limits_explicit"] = True
+        if losing_streak_limit is not None:
+            settings["losing_streak_limit"] = int(losing_streak_limit)
 
     return _derived(_locked_read_modify_write(user_id, _mutate))
 

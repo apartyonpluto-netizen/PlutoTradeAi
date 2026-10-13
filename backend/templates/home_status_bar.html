@@ -1,0 +1,26 @@
+{% if home_status %}
+<section class="home-status-bar" aria-label="Trading status">
+    <div class="home-status-mode mode-{{ home_status.mode }}{% if home_status.halted %} is-halted{% endif %}">
+        <small>Mode</small>
+        <b>{{ home_status.mode_label }}{% if home_status.halted %} · Halted{% endif %}</b>
+    </div>
+    <div>
+        <small>Today after fees</small>
+        <b class="{{ 'tone-positive' if home_status.today_pnl > 0 else 'tone-negative' if home_status.today_pnl < 0 else '' }}">
+            {{ "+" if home_status.today_pnl > 0 else "" }}${{ "%.2f"|format(home_status.today_pnl) }}
+        </b>
+    </div>
+    {% set broker_day = webull_balance.balance.day_pnl if webull_balance is defined and webull_balance and webull_balance.balance and webull_balance.balance.day_pnl is defined else none %}
+    {% set cap_loss = (broker_day * -1) if broker_day is not none and broker_day < 0 else home_status.loss_today_dollars %}
+    {% set cap_used = (cap_loss / home_status.loss_cap_dollars * 100) if home_status.loss_cap_dollars else 0 %}
+    <div class="home-status-cap">
+        <small>Daily loss cap</small>
+        <b>{{ "%.0f"|format(cap_used if cap_used < 100 else 100) }}% used</b>
+        <span class="home-status-meter" aria-hidden="true"><i style="width: {{ cap_used if cap_used < 100 else 100 }}%;"></i></span>
+    </div>
+    <button type="button" class="stop-everything-button" data-close-everything>Stop</button>
+</section>
+{% if home_status.halted and home_status.halt_reason %}
+<p class="home-status-halt">{{ home_status.halt_reason }}</p>
+{% endif %}
+{% endif %}

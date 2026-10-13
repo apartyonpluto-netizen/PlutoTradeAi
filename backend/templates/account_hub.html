@@ -406,7 +406,13 @@
             <input type="range" id="confidenceThresholdSlider" min="0" max="99" step="1" value="{{ settings_payload.ai_confidence_threshold if settings_payload else 68 }}">
             <p class="risk-slider-preview">Only setups scoring at or above this clear the autonomous scan.</p>
         </div>
-        <p class="risk-slider-group-title">Portfolio (0 = off)</p>
+        <div class="risk-slider-row">
+            <div class="risk-slider-label"><span>Losing streak halt</span><b id="losingStreakValue">{{ autonomy_status.losing_streak_limit if autonomy_status and autonomy_status.losing_streak_limit is not none else 3 }}</b></div>
+            <input type="range" id="losingStreakSlider" min="0" max="10" step="1" value="{{ autonomy_status.losing_streak_limit if autonomy_status and autonomy_status.losing_streak_limit is not none else 3 }}">
+            <p class="risk-slider-preview">New entries pause after this many losing closes in a row. 0 turns the streak halt off. The daily loss limit still applies.</p>
+        </div>
+        <p class="risk-slider-group-title">Portfolio (0 = off on paper)</p>
+        <p class="muted">On a live account that has never saved these, they start at 10% per position, 40% total, 25% per sector, and a 10% drawdown pause. Saving any value here, including Off, keeps your numbers.</p>
         {% set portfolio_limit_rows = [
             ("maxPositionExposure", "max_position_exposure_percent", "Largest single position", "Share of the account one new position may take."),
             ("maxTotalExposure", "max_total_exposure_percent", "Total invested", "Everything held, including positions you opened yourself, plus working orders."),

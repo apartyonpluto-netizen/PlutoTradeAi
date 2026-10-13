@@ -1652,6 +1652,10 @@ const bindAutonomyControls = () => {
       if (label) label.textContent = slider.value;
     });
 
+    wireSlider(document.getElementById("losingStreakSlider"), "losingStreakValue", (slider, label) => {
+      if (label) label.textContent = Number(slider.value) ? slider.value : "Off";
+    });
+
     wireSlider(confidenceThresholdSlider, "confidenceThresholdValue", (slider, label) => {
       if (label) label.textContent = slider.value + "%";
     });
@@ -1685,6 +1689,7 @@ const bindAutonomyControls = () => {
             method: "POST",
             body: JSON.stringify({
               daily_loss_limit_percent: dailyLossPercentSlider instanceof HTMLInputElement ? Number(dailyLossPercentSlider.value) : undefined,
+              losing_streak_limit: document.getElementById("losingStreakSlider") instanceof HTMLInputElement ? Number(document.getElementById("losingStreakSlider").value) : undefined,
               risk_percent_of_balance: riskPercentSlider instanceof HTMLInputElement ? Number(riskPercentSlider.value) : undefined,
               max_positions: maxPositionsSlider instanceof HTMLInputElement ? Number(maxPositionsSlider.value) : undefined,
               ...(() => {
@@ -3081,8 +3086,75 @@ const bindNavGroups = () => {
   }
 };
 
+const bindSafetyControls = () => {
+  const dialog = document.getElementById("closeEverythingDialog");
+  const input = document.getElementById("closeEverythingInput");
+  const error = document.getElementById("closeEverythingError");
+  const openers = document.querySelectorAll("[data-close-everything]");
+  if (!(dialog instanceof HTMLElement) || openers.length === 0) return;
+  const showError = (message) => {
+    if (!(error instanceof HTMLElement)) return;
+    error.hidden = !message;
+    error.textContent = message || "";
+  };
+  const close = () => {
+    dialog.hidden = true;
+    showError("");
+  };
+  openers.forEach((button) => {
+    button.addEventListener("click", () => {
+      dialog.hidden = false;
+      if (input instanceof HTMLInputElement) {
+        input.value = "";
+        input.focus();
+      }
+    });
+  });
+  document.getElementById("closeEverythingCancel")?.addEventListener("click", close);
+  document.getElementById("closeEverythingSubmit")?.addEventListener("click", async () => {
+    const phrase = input instanceof HTMLInputElement ? input.value.trim() : "";
+    if (phrase !== "CLOSE EVERYTHING") {
+      showError("Type CLOSE EVERYTHING exactly. Nothing was sent.");
+      return;
+    }
+    try {
+      await requestJson("/api/safety/close-everything", {
+        method: "POST",
+        body: JSON.stringify({ confirm: phrase }),
+      });
+      close();
+      showToast("Close everything was sent. The emergency stop is on.", "success");
+    } catch (err) {
+      showError(err.message || "Close everything failed.");
+    }
+  });
+
+  const goalForm = document.getElementById("savingsGoalForm");
+  if (goalForm instanceof HTMLFormElement) {
+    goalForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = new FormData(goalForm);
+      const amount = String(data.get("savings_goal_amount") || "").trim();
+      try {
+        await requestJson("/api/settings", {
+          method: "POST",
+          body: JSON.stringify({
+            savings_goal_name: String(data.get("savings_goal_name") || ""),
+            savings_goal_amount: amount === "" ? null : Number(amount),
+          }),
+        });
+        showToast("Savings goal saved.", "success");
+        window.setTimeout(() => window.location.reload(), 400);
+      } catch (err) {
+        showToast(err.message, "error");
+      }
+    });
+  }
+};
+
 onReady(() => {
   bindMobileNav();
+  bindSafetyControls();
   bindNavGroups();
   bindAlertDrawer();
   bindGlobalSearch();

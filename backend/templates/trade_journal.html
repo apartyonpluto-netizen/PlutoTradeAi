@@ -150,7 +150,14 @@
     </table>
 </section>
 
-<section class="panel panel-table">
+{% if trade_cards %}
+<section class="panel">
+    <div class="panel-head"><h3>Closed trades</h3><span>After fees</span></div>
+    {% include "trade_cards.html" %}
+</section>
+{% endif %}
+
+<section class="panel panel-table wide-on-desktop">
     <div class="panel-head"><h3>Autonomous Closed Trades &mdash; Realized P&amp;L</h3><span>{{ closed_trades|length }} closed</span></div>
     <p class="muted">
         The durable, conclusively-recorded outcome of every autonomous position this app has confirmed CLOSED &mdash;

@@ -641,6 +641,13 @@ def _place_order_with_retry(
     risk-reducing orders (exits, stops, take-profits) pass straight through."""
     if not (opens_position and is_live_trading_armed()):
         return _send_order_with_retry(trade_client, account_id, order, action_label, place_method_name)
+    try:
+        import go_live_gate
+        go_live_gate.refuse_if_not_ready()
+    except Exception as error:
+        if error.__class__.__name__ != "GoLiveNotReady":
+            raise
+        raise DefiniteOrderRejection(f"Go-live gate: {error}") from error
     limits = _live_limits()
     try:
         limits.reserve(order)
