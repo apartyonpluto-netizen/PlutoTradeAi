@@ -1,4 +1,8 @@
-"""Home-screen facts computed from local records. No broker calls."""
+"""Home-screen facts computed from local records. No broker calls.
+
+The daily loss-cap meter is not computed here. It uses the broker day P/L
+in daily_loss.evaluate, the same figure the scan halt uses, and is injected
+when a page renders. today_pnl below is closed trades after fees only."""
 
 from __future__ import annotations
 
@@ -14,7 +18,6 @@ from integrations.webull import is_live_trading_armed
 from kill_switch import current_halt
 from paper_costs import performance_net
 from settings_store import get_settings
-from webull_credentials import get_virtual_starting_balance
 
 _NY = ZoneInfo("America/New_York")
 
@@ -70,21 +73,13 @@ def build_home_status(user_id: str) -> Dict[str, Any]:
         if net is not None:
             today_nets.append(net)
     today_pnl = round(sum(today_nets), 2)
-    balance = get_virtual_starting_balance(user_id)
-    limit_percent = float(status.get("daily_loss_limit_percent") or 0)
-    cap = balance * (limit_percent / 100.0) if limit_percent > 0 and balance > 0 else 0.0
-    loss = abs(today_pnl) if today_pnl < 0 else 0.0
-    used = round(loss / cap * 100.0, 1) if cap else 0.0
     return {
         "mode": mode,
         "mode_label": {"live": "Live", "paper": "Paper", "off": "Off"}[mode],
         "halted": emergency or bool(halt.get("active")),
         "halt_reason": "Emergency stop is on." if emergency else str(halt.get("reason") or ""),
         "today_pnl": today_pnl,
-        "loss_cap_used_percent": used,
-        "daily_loss_limit_percent": limit_percent,
-        "loss_cap_dollars": round(cap, 2),
-        "loss_today_dollars": round(loss, 2),
+        "daily_loss_limit_percent": float(status.get("daily_loss_limit_percent") or 0),
     }
 
 

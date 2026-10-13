@@ -4,7 +4,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 import pandas as pd
-import yfinance as yf
+
+try:
+    from .integrations import alpaca_data
+except ImportError:
+    from integrations import alpaca_data
 
 try:
     from .brains.strategy_brain import _normalize_ohlcv, build_strategy_intelligence
@@ -22,16 +26,9 @@ def _fetch_daily_history(ticker: str, lookback_months: int) -> pd.DataFrame:
     # Buffer beyond the requested window so the first backtest day already has
     # a full EMA200/RSI warmup window behind it, not just MIN_WARMUP_BARS.
     start = end - timedelta(days=lookback_months * 31 + 320)
-    raw = yf.download(
-        tickers=ticker.upper(),
-        start=start.isoformat(),
-        end=(end + timedelta(days=1)).isoformat(),
-        interval="1d",
-        auto_adjust=False,
-        progress=False,
-        threads=False,
-    )
-    return raw
+    start_at = datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)
+    end_at = datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+    return alpaca_data.get_bars_single(ticker.upper(), period="1d", interval="1d", start=start_at, end=end_at)
 
 
 def _summarize(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -193,8 +190,8 @@ def run_backtest(
         "methodology_note": (
             "Daily-bar strategies only (Breakout, Pullback, Reversal, Trend Continuation, "
             "Support Bounce, Resistance Rejection, Mean Reversion, Momentum) - VWAP/gap/extended-hours "
-            "signals are excluded because Yahoo Finance doesn't retain 5-minute intraday history "
-            "beyond ~60 days, so they can't be reconstructed for older dates. Entries fill at the next "
+            "signals are excluded because this walk uses daily bars only (Alpaca IEX, free tier). "
+            "Entries fill at the next "
             "trading day's open after a signal fires; exits are a fixed hold period, not a stop/target."
         ),
     }

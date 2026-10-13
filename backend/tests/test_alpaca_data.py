@@ -250,3 +250,66 @@ def test_get_latest_trade_price_returns_none_for_an_empty_symbol(monkeypatch):
     with patch.object(alpaca_data.requests, "get") as mock_get:
         assert alpaca_data.get_latest_trade_price("") is None
     mock_get.assert_not_called()
+
+
+def test_dashboard_periods_are_on_the_free_tier_calendar_lookback():
+    assert alpaca_data._PERIOD_TO_LOOKBACK_DAYS["2mo"] == 70
+    assert alpaca_data._PERIOD_TO_LOOKBACK_DAYS["3mo"] == 100
+    assert alpaca_data._PERIOD_TO_LOOKBACK_DAYS["6mo"] == 200
+
+
+def test_get_bars_uses_an_explicit_range_and_the_iex_feed(monkeypatch):
+    from datetime import datetime, timezone
+
+    monkeypatch.setenv("ALPACA_API_KEY_ID", "key123")
+    monkeypatch.setenv("ALPACA_API_SECRET_KEY", "secret456")
+    payload = {"bars": {"AAPL": [{"t": "2026-01-02T14:30:00Z", "o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 10}]}, "next_page_token": None}
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    end = datetime(2026, 2, 1, tzinfo=timezone.utc)
+    with patch.object(alpaca_data.requests, "get", return_value=_fake_response(200, payload)) as mock_get:
+        frame = alpaca_data.get_bars_single("AAPL", period="1d", interval="1d", start=start, end=end)
+    assert frame["Close"].tolist() == [1.5]
+    params = mock_get.call_args.kwargs["params"]
+    assert params["start"] == "2026-01-01T00:00:00Z"
+    assert params["end"] == "2026-02-01T00:00:00Z"
+    assert params["feed"] == "iex"
+    assert params["timeframe"] == "1Day"
+
+
+def test_search_assets_prefers_symbol_prefix_and_caches_the_list(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY_ID", "key123")
+    monkeypatch.setenv("ALPACA_API_SECRET_KEY", "secret456")
+    alpaca_data._ASSET_CACHE["at"] = 0.0
+    alpaca_data._ASSET_CACHE["assets"] = None
+    payload = [
+        {"symbol": "AAPL", "name": "Apple Inc", "exchange": "NASDAQ", "tradable": True},
+        {"symbol": "AAA", "name": "Alpha ETF", "exchange": "ARCA", "tradable": True},
+        {"symbol": "MSFT", "name": "Microsoft", "tradable": False},
+    ]
+    try:
+        with patch.object(alpaca_data.requests, "get", return_value=_fake_response(200, payload)) as mock_get:
+            rows = alpaca_data.search_assets("AA")
+            assert [row["symbol"] for row in rows] == ["AAPL", "AAA"]
+            assert rows[1]["type"] == "ETF"
+            by_name = alpaca_data.search_assets("apple")
+            assert [row["symbol"] for row in by_name] == ["AAPL"]
+            assert alpaca_data.search_assets("msft") == []
+        assert mock_get.call_count == 1
+        called = mock_get.call_args
+        assert called.args[0].endswith("/v2/assets")
+        assert called.kwargs["params"] == {"status": "active", "asset_class": "us_equity"}
+    finally:
+        alpaca_data._ASSET_CACHE["at"] = 0.0
+        alpaca_data._ASSET_CACHE["assets"] = None
+
+
+def test_history_pages_use_alpaca_and_vix_and_option_chains_stay_put():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    for name in ("candle_brain.py", "analytics.py", "backtest_engine.py", "paper_trader.py", "pattern_brain.py"):
+        text = (root / name).read_text(encoding="utf-8")
+        assert "import yfinance" not in text
+    for name in ("regime.py", "options_brain.py", "options/options_brain.py"):
+        text = (root / name).read_text(encoding="utf-8")
+        assert "import yfinance" in text

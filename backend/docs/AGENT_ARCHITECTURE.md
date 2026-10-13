@@ -52,9 +52,9 @@ outcomes — that part hasn't changed.
 | `brains/llm_reasoning.py` | the opportunity dict + up to 3 recent news headlines (`fetch_news_bundle`) | **Yes** — only if the user has their own Anthropic key; can veto or adjust confidence ±20, after sizing, before submission | Claude (Sonnet 5) + news/x_news.py |
 | `autonomy/options_selector.py` | `current_price`, Webull's live option chain + snapshot | **Yes** — the only path that ever calls the broker for a *real* option order | Webull |
 | `market_scanner.py` (`scan_market`) | Nasdaq-listed universe (snapshot screen, then bar score; top `PLUTO_SCANNER_TOP_N`, default 48). An explicit ticker list still uses the original bar fetch. | **Yes, indirectly** — its output (`scanner_rows`) decides *which* tickers get the deep (strategy/chart/extended-hours) treatment at all, via `_resolve_analysis_tickers` (still capped at 6: watchlist first, then scanner rank) | Alpaca |
-| `candle_brain.py` | daily OHLCV | **No** — computed only when `include_patterns=True`, which the autonomous scan never passes | ⚠ yfinance |
-| `pattern_brain.py` | daily OHLCV | **No** — same as candle_brain | ⚠ yfinance |
-| `analytics.py` (reversal/trend) | daily OHLCV | **No** — see "computed but discarded" in Gaps below | ⚠ yfinance |
+| `candle_brain.py` | daily OHLCV | **No** — computed only when `include_patterns=True`, which the autonomous scan never passes | Alpaca (IEX) |
+| `pattern_brain.py` | daily OHLCV | **No** — same as candle_brain | Alpaca (via setups) |
+| `analytics.py` (reversal/trend) | daily OHLCV | **No** — display pages only; the scan does not request these rows | Alpaca (IEX) |
 | `regime.py` | VIX snapshot | **No, by explicit design** — shadow-mode only, recorded on every entry for future backtesting, never reads by anything that sizes or gates a trade. This is a deliberate safety boundary (see the module's own docstring), not a gap — don't "fix" it into an active signal without a real review. | (VIX feed) |
 | `neural/neural_engine.py` | scanner_rows + watchlist + news + options payloads | **No** — feeds the dashboard's "Neural Core" stat card only | (aggregates others) |
 | `options/options_brain.py` | option chain + Greeks | **No** — this is the *legacy research* options page, explicitly disclaimed "no options execution is enabled." Not the same system as `options_selector.py`. Easy to confuse by name; don't. | yfinance |
@@ -72,8 +72,8 @@ outcomes — that part hasn't changed.
 
 ## Gaps found while writing this map (2026-09-11, not yet fixed)
 
-- **`candle_brain.py`, `pattern_brain.py`, `analytics.py` still call `yfinance` directly.** Everything on the live-decision path (strategy/chart/extended-hours/scanner) was migrated to Alpaca after the 2026-08-28 Yahoo rate-limit incident (see the `alpaca-market-data-migration` memory); these three were not, because they don't feed live trades. They likely still degrade under the same rate-limiting that motivated the migration — worth a follow-up if the Analysis pages that use them (Candle Brain, Pattern Brain, Reversal Map, Trend Detection) matter to you day-to-day.
-- **Fixed 2026-10-06: the autonomous scan no longer computes reversal/trend.** Those rows were never read by the scan and the call pulled yfinance. Dashboard and analysis pages that display them still pass `include_reversal=True, include_trend=True`. `candle_brain.py`, `pattern_brain.py`, and `analytics.py` remain on yfinance for those display pages.
+- **Candle, pattern, reversal/trend, and the backtester read Alpaca IEX bars** (free tier, `feed=iex`). Pattern brain was already on Alpaca through `setups/`. Still on yfinance, because Alpaca's free equities feed cannot replace them: `regime.py` (VIX is an index) and the research options chain (`options_brain.py` / `options/options_brain.py`). Neither feeds order placement.
+- **Fixed 2026-10-06: the autonomous scan no longer computes reversal/trend.** Those rows were never read by the scan. Dashboard and analysis pages that display them still pass `include_reversal=True, include_trend=True`, and that history now comes from Alpaca.
 - **Two `options_brain.py` modules exist** — a legacy top-level one and `options/options_brain.py`, which literally imports from the legacy one (`from options_brain import build_options_outlook as legacy_build_options_outlook`). Neither is the real execution path (that's `autonomy/options_selector.py`). Naming collision risk for future work — grep both before touching "options brain" anything.
 - **Fixed 2026-10-06: the scanner timeout message no longer mentions Yahoo Finance.** A timeout now says the Nasdaq screen did not finish. The scan itself is Alpaca snapshots plus bars.
 

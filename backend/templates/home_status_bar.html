@@ -10,13 +10,16 @@
             {{ "+" if home_status.today_pnl > 0 else "" }}${{ "%.2f"|format(home_status.today_pnl) }}
         </b>
     </div>
-    {% set broker_day = webull_balance.balance.day_pnl if webull_balance is defined and webull_balance and webull_balance.balance and webull_balance.balance.day_pnl is defined else none %}
-    {% set cap_loss = (broker_day * -1) if broker_day is not none and broker_day < 0 else home_status.loss_today_dollars %}
-    {% set cap_used = (cap_loss / home_status.loss_cap_dollars * 100) if home_status.loss_cap_dollars else 0 %}
     <div class="home-status-cap">
         <small>Daily loss cap</small>
-        <b>{{ "%.0f"|format(cap_used if cap_used < 100 else 100) }}% used</b>
-        <span class="home-status-meter" aria-hidden="true"><i style="width: {{ cap_used if cap_used < 100 else 100 }}%;"></i></span>
+        {% if loss_cap is defined and loss_cap and loss_cap.available and loss_cap.limit_percent %}
+        <b title="Broker day P/L ${{ '%.2f'|format(loss_cap.day_pnl) }} of a ${{ '%.2f'|format(loss_cap.cap_dollars) }} cap">{{ "%.0f"|format(loss_cap.used_percent if loss_cap.used_percent < 100 else 100) }}% used</b>
+        <span class="home-status-meter" aria-hidden="true"><i style="width: {{ loss_cap.used_percent if loss_cap.used_percent < 100 else 100 }}%;"></i></span>
+        {% elif loss_cap is defined and loss_cap and loss_cap.available %}
+        <b>Off</b>
+        {% else %}
+        <b>—</b>
+        {% endif %}
     </div>
     <button type="button" class="stop-everything-button" data-close-everything>Stop</button>
 </section>

@@ -39,25 +39,12 @@ per symbol, sorted by symbol then timestamp, paginated via
 next_page_token when the total point count (across ALL symbols, not
 per-symbol) exceeds `limit`.
 
-Deliberately scoped to the candidate-discovery path only - NOT a full
-yfinance replacement across this app. Left on yfinance, as a conscious
-choice, not an oversight:
-  - regime.py's single VIX (^VIX) shadow-mode-only snapshot: Alpaca's
-    equities API has no index data, VIX isn't a tradable stock/ETF, and
-    this call is low-frequency/non-critical (regime.py's own docstring:
-    "SHADOW MODE ONLY... nothing derived from this is read by
-    entries_allowed, sizing, the LLM step, or order submission") - not a
-    contributor to the rate-limit problem this module fixes.
-  - options_brain.py's option-chain fetch: a different Alpaca endpoint and
-    response shape (/v1beta1/options/snapshots/{symbol}, per-contract
-    snapshots rather than OHLCV bars) - already explicitly excluded from
-    the actual autonomous-scan path via include_options=False (see
-    app.py's own comment on that call), so it isn't part of why
-    candidates_found was 0.
-  - app.py's yf.Search() ticker-name-autocomplete helper and
-    analytics.py/candle_brain.py/pattern_brain.py/paper_trader.py's own
-    yf.Ticker(...).history() calls: separate, lower-traffic dashboard
-    features, not part of the scan/candidate-discovery request path."""
+Also serves the dashboard history pages (candle brain, reversal/trend,
+backtester, paper-trade marks, ticker search). Still not a VIX or listed
+option-chain source: Alpaca's free equities feed has no index data, and
+the research options page's chain stays on the feed it was written for.
+Stock and ETF bars here always pass feed=iex (or ALPACA_DATA_FEED) so a
+free-tier key is not sent to the paid SIP feed."""
 
 _DATA_BASE_URL = "https://data.alpaca.markets"
 _STOCK_BARS_PATH = "/v2/stocks/bars"
@@ -71,6 +58,9 @@ _PERIOD_TO_LOOKBACK_DAYS = {
     "2d": 6,
     "5d": 12,
     "1mo": 40,
+    "2mo": 70,
+    "3mo": 100,
+    "6mo": 200,
     "9mo": 285,
     "1y": 380,
     "2y": 760,
@@ -174,7 +164,13 @@ def _bars_to_frame(bars: List[Dict[str, object]]) -> pd.DataFrame:
     return frame.sort_index()
 
 
-def get_bars(symbols: Sequence[str], period: str, interval: str) -> Dict[str, pd.DataFrame]:
+def get_bars(
+    symbols: Sequence[str],
+    period: str,
+    interval: str,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+) -> Dict[str, pd.DataFrame]:
     """Multi-symbol historical bars - replaces market_scanner.py's batched
     yf.download() call. Returns {symbol: flat_dataframe}, one entry per
     symbol that had any data in the response (a symbol Alpaca has no bars
@@ -191,14 +187,17 @@ def get_bars(symbols: Sequence[str], period: str, interval: str) -> Dict[str, pd
         return {}
 
     headers = _credential_headers()
+    start_at = start or _resolve_start(period)
     params = {
         "symbols": ",".join(normalized_symbols),
         "timeframe": _resolve_timeframe(interval),
-        "start": _resolve_start(period).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "start": start_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "limit": 10000,
         "adjustment": "raw",
         "feed": _feed(),
     }
+    if end is not None:
+        params["end"] = end.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     bars_by_symbol: Dict[str, List[Dict[str, object]]] = {}
     page_token: Optional[str] = None
@@ -222,7 +221,13 @@ def get_bars(symbols: Sequence[str], period: str, interval: str) -> Dict[str, pd
     return {symbol: _bars_to_frame(bars) for symbol, bars in bars_by_symbol.items()}
 
 
-def get_bars_single(symbol: str, period: str, interval: str) -> pd.DataFrame:
+def get_bars_single(
+    symbol: str,
+    period: str,
+    interval: str,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+) -> pd.DataFrame:
     """Single-symbol convenience wrapper over get_bars - replaces the
     yf.download(tickers=<one ticker>, ...) pattern used by
     brains/strategy_brain.py, brains/charting_brain.py, and
@@ -232,7 +237,9 @@ def get_bars_single(symbol: str, period: str, interval: str) -> pd.DataFrame:
     normalized = (symbol or "").strip().upper()
     if not normalized:
         return pd.DataFrame(columns=_REQUIRED_COLUMNS)
-    return get_bars([normalized], period=period, interval=interval).get(normalized, pd.DataFrame(columns=_REQUIRED_COLUMNS))
+    return get_bars([normalized], period=period, interval=interval, start=start, end=end).get(
+        normalized, pd.DataFrame(columns=_REQUIRED_COLUMNS)
+    )
 
 
 _LATEST_TRADE_PATH_TEMPLATE = "/v2/stocks/{symbol}/trades/latest"
@@ -380,3 +387,62 @@ def probe_latest_trade(symbol: str = "SPY") -> float:
     if price is None:
         raise RuntimeError("Alpaca responded but included no trade price.")
     return float(price)
+
+
+_TRADING_BASE_URL = "https://paper-api.alpaca.markets"
+_ASSETS_PATH = "/v2/assets"
+_ASSET_CACHE: Dict[str, object] = {"at": 0.0, "assets": None}
+_ASSET_CACHE_SECONDS = 6 * 3600
+
+
+def _trading_base() -> str:
+    return os.environ.get("ALPACA_TRADING_BASE_URL", _TRADING_BASE_URL).rstrip("/")
+
+
+def _load_active_assets() -> List[Dict[str, str]]:
+    """Read-only asset list. Cached so ticker search is one Alpaca call per
+    few hours, not one per keystroke. Never an order endpoint."""
+    cached_at = float(_ASSET_CACHE.get("at") or 0)
+    cached = _ASSET_CACHE.get("assets")
+    if isinstance(cached, list) and (time.time() - cached_at) < _ASSET_CACHE_SECONDS:
+        return cached
+    response = _call_with_429_retry(
+        "assets",
+        lambda: requests.get(
+            _trading_base() + _ASSETS_PATH,
+            headers=_credential_headers(),
+            params={"status": "active", "asset_class": "us_equity"},
+            timeout=15,
+        ),
+    )
+    if response.status_code != 200:
+        raise ValueError(f"Alpaca API error (assets): HTTP {response.status_code}")
+    assets = []
+    for row in response.json() or []:
+        if not isinstance(row, dict) or not row.get("tradable"):
+            continue
+        symbol = str(row.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        assets.append({
+            "symbol": symbol,
+            "name": str(row.get("name") or symbol),
+            "exchange": str(row.get("exchange") or ""),
+            "type": "ETF" if "etf" in str(row.get("name") or "").lower() else "EQUITY",
+        })
+    _ASSET_CACHE["at"] = time.time()
+    _ASSET_CACHE["assets"] = assets
+    return assets
+
+
+def search_assets(query: str, limit: int = 8) -> List[Dict[str, str]]:
+    """Symbol-prefix matches first, then name contains. Free-tier friendly:
+    the asset list is cached, and this does not request SIP or options data."""
+    text = (query or "").strip()
+    if not text:
+        return []
+    needle = text.upper()
+    assets = _load_active_assets()
+    symbols = [row for row in assets if row["symbol"].startswith(needle)]
+    names = [row for row in assets if needle in row["name"].upper() and row not in symbols]
+    return (symbols + names)[:limit]

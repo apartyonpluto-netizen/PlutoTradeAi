@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-import yfinance as yf
+try:
+    from .integrations import alpaca_data
+except ImportError:
+    from integrations import alpaca_data
 
 
 CANDLE_PATTERNS = [
@@ -28,7 +31,7 @@ def _confidence(is_match: bool, base: float = 0.72) -> float:
 
 
 def analyze_candles(ticker: str) -> Dict[str, object]:
-    history = yf.Ticker(ticker).history(period="2mo", interval="1d", auto_adjust=False)
+    history = alpaca_data.get_bars_single(ticker, period="2mo", interval="1d")
     if history.empty or len(history) < 5:
         raise ValueError(f"Not enough data for {ticker}.")
 

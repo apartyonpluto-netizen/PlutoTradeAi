@@ -73,11 +73,32 @@ def test_main_returns_nonzero_if_either_endpoint_fails(monkeypatch):
 
 def test_main_returns_nonzero_on_a_request_exception(monkeypatch):
     _set_urls(monkeypatch)
+    monkeypatch.setattr(trigger.time, "sleep", lambda _seconds: None)
 
-    with patch.object(trigger.requests, "post", side_effect=requests.exceptions.ConnectionError("refused")):
+    with patch.object(trigger.requests, "post", side_effect=requests.exceptions.ConnectionError("refused")) as mock_post:
         exit_code = trigger.main()
 
     assert exit_code == 1
+    # Two endpoints, each retried across the deploy-gap sleeps.
+    assert mock_post.call_count == 2 * (len(trigger._DEPLOY_GAP_SLEEPS) + 1)
+
+
+def test_main_retries_a_502_then_succeeds(monkeypatch):
+    _set_urls(monkeypatch)
+    monkeypatch.setattr(trigger.time, "sleep", lambda _seconds: None)
+    seen = {"n": 0}
+
+    def _side_effect(url, **kwargs):
+        seen["n"] += 1
+        if seen["n"] == 1:
+            return _mock_response(502, "bad gateway")
+        return _mock_response(200, "ok")
+
+    with patch.object(trigger.requests, "post", side_effect=_side_effect) as mock_post:
+        exit_code = trigger.main()
+
+    assert exit_code == 0
+    assert mock_post.call_count == 3
 
 
 def test_main_refuses_to_run_without_cron_trigger_url(monkeypatch):

@@ -31,8 +31,14 @@ services:
     # fcntl.flock'd (correct across threads AND processes, not just
     # processes) or protected by its own threading.Lock - see those
     # modules' own docstrings.
-    startCommand: gunicorn --chdir backend app:app --workers 4 --worker-class gthread --threads 3 --timeout 90 --preload
+    # A persistent disk disables Render's zero-downtime swap: the old
+    # instance is stopped before the new one starts. preDeployCommand
+    # refuses that swap during the regular US cash session (exit 1 keeps
+    # the current deploy serving). See docs/DEPLOYS.md.
+    preDeployCommand: python backend/scripts/market_hours_deploy_gate.py
+    startCommand: gunicorn --chdir backend app:app --workers 4 --worker-class gthread --threads 3 --timeout 90 --graceful-timeout 30 --preload
     healthCheckPath: /healthz
+    maxShutdownDelaySeconds: 90
     envVars:
       - key: FLASK_SECRET_KEY
         generateValue: true

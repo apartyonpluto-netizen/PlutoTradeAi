@@ -6,14 +6,19 @@ run. Tests drive it with a fake broker. Do not call run against a live
 account from a script or a test.
 
 Equity closes are marketable DAY limits 1% through the last price, the same
-cushion manual closes already use. An option is closed only when the
-position row itself carries the contract fields the order API requires.
-Anything else is reported as not closed, never guessed.
+cushion manual closes already use. An option row that lacks strike, right,
+or expiration is filled in from an OCC symbol (e.g. NVDA260918C00105000)
+or from a caller-supplied read-only lookup. plan() never calls the close
+hooks; only execute() does, and only for rows that resolved.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any, Callable, Dict, List, Optional
+
+# Root (1-6 letters), YYMMDD, C/P, strike in thousandths (8 digits).
+_OCC = re.compile(r"^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$")
 
 CONFIRM_PHRASE = "CLOSE EVERYTHING"
 CLOSE_THROUGH = 0.01
@@ -37,8 +42,55 @@ def _instrument(row: Dict[str, Any]) -> str:
     return "OPTION" if str(row.get("instrument_type") or "").upper() == "OPTION" else "EQUITY"
 
 
-def plan(positions: List[Dict[str, Any]], open_orders: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """What to cancel and what to close. No broker calls."""
+def parse_occ_symbol(symbol: str) -> Optional[Dict[str, Any]]:
+    """Contract fields from an OCC symbol. None when the symbol is not one,
+    or the date/strike is not a real contract (month 13, strike 0)."""
+    match = _OCC.match(str(symbol or "").replace(" ", "").upper())
+    if not match:
+        return None
+    root, year, month, day, right, strike_raw = match.groups()
+    if not 1 <= int(month) <= 12 or not 1 <= int(day) <= 31:
+        return None
+    strike = int(strike_raw) / 1000.0
+    if strike <= 0:
+        return None
+    return {
+        "underlying": root,
+        "option_type": "CALL" if right == "C" else "PUT",
+        "strike_price": strike,
+        "expiration_date": f"20{year}-{month}-{day}",
+    }
+
+
+def resolve_option_contract(
+    position: Dict[str, Any],
+    lookup: Optional[Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Fields already on the row, else the OCC symbol, else lookup(position).
+
+    lookup is read-only. This function does not place or cancel orders.
+    """
+    direct = _option_contract(position)
+    if direct:
+        return direct
+    parsed = parse_occ_symbol(str(position.get("symbol") or position.get("option_symbol") or ""))
+    if parsed:
+        return parsed
+    if lookup is None:
+        return None
+    found = lookup(position)
+    if not isinstance(found, dict):
+        return None
+    return _option_contract({**position, **found}) or parse_occ_symbol(str(found.get("symbol") or ""))
+
+
+def plan(
+    positions: List[Dict[str, Any]],
+    open_orders: List[Dict[str, Any]],
+    resolve_contract: Optional[Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
+) -> Dict[str, Any]:
+    """What to cancel and what to close. Does not call close hooks.
+    resolve_contract, when passed, is the only optional read."""
     cancels: List[Dict[str, Any]] = []
     closes: List[Dict[str, Any]] = []
     errors: List[str] = []
@@ -79,9 +131,13 @@ def plan(positions: List[Dict[str, Any]], open_orders: List[Dict[str, Any]]) -> 
             "account_id": str(position.get("account_id") or ""),
         }
         if row["instrument"] == "OPTION":
-            contract = _option_contract(position)
+            try:
+                contract = resolve_option_contract(position, resolve_contract)
+            except Exception as error:  # noqa: BLE001 - a lookup failure skips this row, not the rest
+                errors.append(f"{symbol}: option contract lookup failed ({error}), so it was not closed")
+                continue
             if contract is None:
-                errors.append(f"{symbol}: option is missing strike, type, or expiration, so it was not closed")
+                errors.append(f"{symbol}: option contract could not be resolved, so it was not closed")
                 continue
             row.update(contract)
         closes.append(row)
@@ -90,7 +146,11 @@ def plan(positions: List[Dict[str, Any]], open_orders: List[Dict[str, Any]]) -> 
 
 
 def _option_contract(position: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    underlying = position.get("underlying_symbol") or position.get("underlying") or position.get("symbol")
+    underlying = position.get("underlying_symbol") or position.get("underlying")
+    if not underlying:
+        symbol = str(position.get("symbol") or "")
+        if symbol and parse_occ_symbol(symbol) is None:
+            underlying = symbol
     option_type = str(position.get("option_type") or position.get("call_put") or "").upper()
     strike = _float(position.get("strike_price") or position.get("strike"))
     expiration = str(position.get("expiration_date") or position.get("option_expire_date") or position.get("expiration") or "")
@@ -184,7 +244,17 @@ def run_for_user(user_id: str) -> Dict[str, Any]:
     fresh_positions: List[Dict[str, Any]] = []
     for account_id in account_ids:
         fresh_positions.extend(_tagged(webull_api.get_account_positions(creds["app_key"], creds["app_secret"], account_id), account_id))
-    close_plan = plan(fresh_positions, [])
+    def _lookup_contract(position: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        symbol = str(position.get("symbol") or position.get("option_symbol") or "").replace(" ", "")
+        if not symbol:
+            return None
+        rows = webull_api.get_option_snapshot(creds["app_key"], creds["app_secret"], [symbol])
+        row = rows[0] if rows else {}
+        if not isinstance(row, dict):
+            return None
+        return row
+
+    close_plan = plan(fresh_positions, [], resolve_contract=_lookup_contract)
 
     def _close_equity(item: Dict[str, Any]) -> None:
         webull_api.place_stock_order(

@@ -8,10 +8,10 @@
   with a `.json` manifest (time, file count, SHA-256).
 - Admin → Backups: list, "Back up now", "Verify" (checksum + every JSON file
   parses), "Download".
-- Snapshots are on the SAME disk. They protect against damaged or wrongly
-  rewritten files, not against losing the disk. Download one at least weekly
-  and store it elsewhere. Downloads contain encrypted credentials and all
-  trading records - treat them as sensitive.
+- Snapshots are also uploaded off the disk when `PLUTO_BACKUP_S3_*` is set
+  on the web service (`docs/DURABLE_STORAGE.md`). Without that, they protect
+  against damaged files only. Downloads contain encrypted credentials and
+  all trading records — treat them as sensitive.
 
 ## Restore (manual, deliberate)
 
@@ -33,3 +33,7 @@ Never restore over live data while the app is trading.
 7. Resume the cron job and worker; clear `PLUTO_DISABLE_NEW_ENTRIES`; turn the
    emergency stop off only after Broker sync is clean or its differences are
    understood.
+
+## If the disk itself is gone
+
+The in-app Download button is gone with it. Pull the latest `pluto-data-*.tar.gz` from the off-site bucket (`docs/DURABLE_STORAGE.md`), verify the checksum against the matching `.json` manifest, and extract into an empty directory with `offsite_backup.restore_archive`. That function refuses to extract into the live data directory. Copy back only the files you mean to restore, then do steps 6 and 7.
