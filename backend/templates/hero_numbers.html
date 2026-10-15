@@ -1,0 +1,25 @@
+<section class="pluto-hero" aria-label="Account snapshot">
+    <div class="pluto-hero-stat">
+        <p class="pluto-kicker">Account value</p>
+        {% if webull_balance is defined and webull_balance and webull_balance.connected and webull_balance.balance %}
+        <p class="pluto-hero-number">${{ "{:,.2f}".format(webull_balance.balance.net_liquidation_value|float) }}</p>
+        <p class="muted">Paper account {{ webull_balance.balance.account_number }}</p>
+        {% elif webull_balance is defined and webull_balance and webull_balance.error %}
+        <p class="pluto-hero-number">—</p>
+        <p class="muted">{{ webull_balance.error }}</p>
+        {% else %}
+        <p class="pluto-hero-number">—</p>
+        <p class="muted">Connect Webull in Account Hub to show value. Paper trading only.</p>
+        {% endif %}
+    </div>
+    <div class="pluto-hero-stat">
+        <p class="pluto-kicker">Today after fees</p>
+        {% if home_status %}
+        <p class="pluto-hero-number {{ 'tone-positive' if home_status.today_pnl > 0 else 'tone-negative' if home_status.today_pnl < 0 else '' }}">{{ "+" if home_status.today_pnl > 0 else "" }}${{ "%.2f"|format(home_status.today_pnl) }}</p>
+        <p class="muted">{{ home_status.mode_label }}{% if home_status.halted %} · Halted{% endif %}</p>
+        {% else %}
+        <p class="pluto-hero-number">—</p>
+        <p class="muted">P&amp;L appears after the account status loads.</p>
+        {% endif %}
+    </div>
+</section>

@@ -1,13 +1,14 @@
 {% extends "base.html" %}
 {% block title %}PlutoTrade AI · Trading Portfolio{% endblock %}
 {% block content %}
+{% include "hero_numbers.html" %}
 {% if webull_balance.connected and webull_balance.balance %}
 <section class="panel account-summary-card">
     <div class="panel-head">
         <span>Net Account Value</span>
         <span>Webull Sandbox &middot; {{ webull_balance.balance.account_number }}</span>
     </div>
-    <div class="account-summary-value">${{ "{:,.2f}".format(webull_balance.balance.net_liquidation_value|float) }}</div>
+    <div class="account-summary-value pluto-hero-number">${{ "{:,.2f}".format(webull_balance.balance.net_liquidation_value|float) }}</div>
     <div class="account-summary-pnl {{ 'tone-positive' if webull_balance.balance.unrealized_pnl >= 0 else 'tone-negative' }}">
         Open P&amp;L {{ webull_balance.balance.unrealized_pnl_display }}
         ({{ "+" if webull_balance.balance.unrealized_pnl_percent >= 0 else "" }}{{ webull_balance.balance.unrealized_pnl_percent }}%)
@@ -102,7 +103,7 @@
         <thead><tr><th>Ticker</th><th>Qty</th><th>Cost Basis</th><th>Last Price</th><th>Market Value</th><th>Unrealized P/L</th><th>Exit Signal</th><th>Actions</th></tr></thead>
         <tbody>
         {% for position in webull_positions.positions %}
-        <tr data-position-ticker="{{ position.symbol }}">
+        <tr data-position-ticker="{{ position.symbol }}" data-trade-detail-row data-ticker="{{ position.symbol }}">
             <td>{{ position.symbol }}</td>
             <td>{{ position.quantity }}</td>
             <td>${{ position.cost_price }}</td>
@@ -157,6 +158,18 @@
 </section>
 {% endif %}
 
+<section class="panel" data-trade-detail-chart hidden>
+    <div class="panel-head"><h3>Trade detail</h3><span id="tradeDetailTicker">—</span></div>
+    <div class="pluto-chart" id="tradeDetailChart" role="img" aria-label="Candlestick chart for the selected trade"></div>
+    <p class="pluto-chart-legend">
+        <span class="mark-entry">Entry</span>
+        <span class="mark-exit">Exit</span>
+        <span class="mark-stop">Stop</span>
+        <span class="mark-target">Target</span>
+    </p>
+    <p class="muted" data-chart-note>Select a trade. Entry, exit, stop, and target are drawn when this account has them saved.</p>
+</section>
+
 <section class="panel panel-table wide-on-desktop">
     <div class="panel-head"><h3>Autonomous Closed Trades &mdash; Realized P&amp;L</h3><span>{{ closed_trades|length }} closed</span></div>
     <p class="muted">
@@ -169,7 +182,7 @@
         <thead><tr><th>Ticker</th><th>Filled Qty</th><th>Avg Entry</th><th>Exit Type</th><th>Avg Exit</th><th>Realized P&amp;L</th><th>Close Reason</th><th>Exited</th></tr></thead>
         <tbody>
         {% for trade in closed_trades %}
-        <tr>
+        <tr data-trade-detail-row data-ticker="{{ trade.ticker }}">
             <td>{{ trade.ticker }}</td>
             <td>{{ trade.filled_quantity }}</td>
             <td>${{ "%.2f"|format(trade.average_entry_price|float) if trade.average_entry_price is not none else "—" }}</td>
@@ -201,7 +214,7 @@
         <thead><tr><th>Ticker</th><th>Direction</th><th>Order Type</th><th>Qty</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody>
         {% for trade in open_paper_trades %}
-        <tr data-trade-id="{{ trade.id }}">
+        <tr data-trade-id="{{ trade.id }}" data-trade-detail-row data-ticker="{{ trade.ticker }}">
             <td>{{ trade.ticker }}</td>
             <td>{{ trade.direction }}</td>
             <td>{{ trade.order_type or "MARKET" }}</td>
@@ -225,7 +238,7 @@
         <thead><tr><th>Ticker</th><th>Direction</th><th>Order Type</th><th>Qty</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Status</th></tr></thead>
         <tbody>
         {% for trade in closed_paper_trades %}
-        <tr data-trade-id="{{ trade.id }}">
+        <tr data-trade-id="{{ trade.id }}" data-trade-detail-row data-ticker="{{ trade.ticker }}">
             <td>{{ trade.ticker }}</td>
             <td>{{ trade.direction }}</td>
             <td>{{ trade.order_type or "MARKET" }}</td>

@@ -293,6 +293,33 @@ def api_chart_history_ticker(ticker: str):
     payload = get_chart_history_for_ticker(ticker=ticker, chart_interval=chart_interval, force_refresh=force_refresh)
     return _api_success(payload, chart_history=payload, ok=True)
 
+@_route_bp.route("/api/chart-data/<ticker>", methods=["GET"])
+@api_guard
+def api_chart_data(ticker: str):
+    """Candles plus entry, exit, stop, and target marks for one ticker.
+
+    Bars go through get_chart_history_for_ticker, which already caches
+    Alpaca responses. This route has no refresh flag, so rendering a page
+    cannot force a new upstream call. Marks are read from stored trades.
+    """
+    from chart_data import build_chart_payload
+
+    interval = request.args.get("interval", DEFAULT_CHART_INTERVAL)
+    try:
+        payload = build_chart_payload(
+            ticker=ticker,
+            interval=interval,
+            load_history=lambda symbol, chart_interval: get_chart_history_for_ticker(
+                ticker=symbol, chart_interval=chart_interval, force_refresh=False
+            ),
+            closed_trades=list_closed_trades(_current_user_id()),
+            overnight_orders=list_overnight_orders(_current_user_id()),
+            paper_trades=list_paper_trades(_current_user_id()),
+        )
+    except ValueError as error:
+        raise ValidationError(str(error)) from error
+    return _api_success(payload, **payload, ok=True)
+
 @_route_bp.route("/api/reversal-map", methods=["GET"])
 def api_reversal_map():
     # Only reads reversal_rows/trend_errors below - include_opportunities=False

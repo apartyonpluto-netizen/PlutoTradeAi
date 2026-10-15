@@ -6,6 +6,76 @@
     <title>{% block title %}PlutoTrade AI{% endblock %}</title>
     <link rel="stylesheet" href="/static/css/style.css">
     <link rel="stylesheet" href="/static/css/pluto-space.css">
+    <link rel="stylesheet" href="/static/css/pluto-redesign.css">
+    <style id="pluto-tokens">
+        @font-face {
+            font-family: "Inter";
+            font-style: normal;
+            font-weight: 400;
+            font-display: swap;
+            src: url("/static/fonts/inter-latin-400.woff2") format("woff2");
+        }
+        @font-face {
+            font-family: "Inter";
+            font-style: normal;
+            font-weight: 600;
+            font-display: swap;
+            src: url("/static/fonts/inter-latin-600.woff2") format("woff2");
+        }
+        @font-face {
+            font-family: "Inter";
+            font-style: normal;
+            font-weight: 700;
+            font-display: swap;
+            src: url("/static/fonts/inter-latin-700.woff2") format("woff2");
+        }
+        :root,
+        :root:not([data-theme="onyx"]):not([data-theme="nebula"]) {
+            --bg-base: #07060b;
+            --bg-elevated: #121018;
+            --bg-elevated-soft: #1a1722;
+            --bg-surface: #100e16;
+            --text-primary: #f4f2f8;
+            --text-secondary: #b7b1c4;
+            --text-muted: #847e92;
+            --accent: #b08cff;
+            --accent-soft: rgba(176, 140, 255, 0.16);
+            --accent-primary: #b08cff;
+            --accent-primary-soft: rgba(176, 140, 255, 0.18);
+            --accent-magenta: #b08cff;
+            --accent-gold: #b7b1c4;
+            --accent-ink: #160e24;
+            --positive: #3dce7a;
+            --negative: #ff5d6c;
+            --caution: #b7b1c4;
+            --stop: #c62828;
+            --border: transparent;
+            --border-strong: transparent;
+            --shadow-1: none;
+            --shadow-2: none;
+            --radius-sm: 10px;
+            --radius-md: 14px;
+            --radius-lg: 18px;
+            --radius-xl: 22px;
+            --space-1: 8px;
+            --space-2: 12px;
+            --space-3: 16px;
+            --space-4: 20px;
+            --space-5: 24px;
+            --space-6: 32px;
+            --space-7: 40px;
+            --text-xs: 0.75rem;
+            --text-sm: 0.875rem;
+            --text-md: 1rem;
+            --text-lg: 1.25rem;
+            --text-xl: 1.75rem;
+            --text-2xl: 3rem;
+            --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            --transition: 150ms ease;
+            color-scheme: dark;
+        }
+    </style>
+    <script src="/static/js/vendor/lightweight-charts-5.2.1.standalone.production.js"></script>
     <link rel="manifest" href="/static/manifest.json">
     <link rel="icon" href="/static/icons/favicon-32.png" sizes="32x32">
     <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
@@ -275,6 +345,7 @@
     </div>
 </div>
 <script src="/static/js/app.js"></script>
+<script src="/static/js/pluto-charts.js"></script>
 <script>
 if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {

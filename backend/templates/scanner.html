@@ -1,6 +1,26 @@
 {% extends "base.html" %}
 {% block title %}PlutoTrade AI · Market Scanner{% endblock %}
 {% block content %}
+<section class="panel" data-scanner-chart data-ticker="{{ scanner_rows[0].ticker if scanner_rows else '' }}">
+    <div class="panel-head">
+        <h3>Price</h3>
+        <span id="scannerChartTicker">{{ scanner_rows[0].ticker if scanner_rows else "—" }}</span>
+    </div>
+    <div class="chart-interval-row" role="group" aria-label="Candle interval">
+        <button type="button" data-chart-interval="15m">15m</button>
+        <button type="button" data-chart-interval="1h">1H</button>
+        <button type="button" class="is-active" data-chart-interval="1d">1D</button>
+    </div>
+    <div class="pluto-chart" id="scannerChart" role="img" aria-label="Candlestick chart for the selected ticker"></div>
+    <p class="pluto-chart-legend">
+        <span class="mark-entry">Entry</span>
+        <span class="mark-exit">Exit</span>
+        <span class="mark-stop">Stop</span>
+        <span class="mark-target">Target</span>
+    </p>
+    <p class="muted" data-chart-note>{% if scanner_rows %}Select a row to change the ticker. Candles load once per symbol.{% else %}No scanner rows yet.{% endif %}</p>
+</section>
+
 <section class="panel panel-table">
     <div class="panel-head">
         <h3>Market Scanner</h3>
@@ -43,10 +63,10 @@
         </thead>
         <tbody>
         {% for row in scanner_rows %}
-        <tr>
+        <tr data-ticker="{{ row.ticker }}" class="{{ 'is-selected' if loop.first else '' }}">
             <td>{{ row.ticker }}</td>
             <td>${{ row.price }}</td>
-            <td class="{{ 'tone-positive' if row.percent_change >= 0 else 'tone-caution' }}">{{ row.percent_change }}%</td>
+            <td class="{{ 'tone-positive' if row.percent_change >= 0 else 'tone-negative' }}">{{ row.percent_change }}%</td>
             <td>{{ row.relative_volume }}x</td>
             <td>{{ row.volume }}</td>
             <td>{{ row.scanner_score }}</td>
