@@ -1,5 +1,7 @@
 # Loaded by routes.load_into into the Flask app module. Not imported directly.
 
+import live_market_stream
+
 @_route_bp.route("/market-scanner")
 @_route_bp.route("/scanner")
 def scanner_page() -> str:
@@ -401,4 +403,61 @@ def api_neural_status():
             "strategy_map": strategy_map,
             "chart_levels_map": chart_levels_map,
         }
+    )
+
+@_route_bp.route("/api/market/status", methods=["GET"])
+@api_guard
+def api_market_stream_status():
+    """Read-only stream health. Does not place orders. Login required."""
+    status = live_market_stream.get_service().connection_status()
+    return _api_success(
+        status,
+        data_status=status.get("state", "unavailable"),
+        provider=status.get("effective_provider"),
+        ok=True,
+    )
+
+@_route_bp.route("/api/market/quote/<ticker>", methods=["GET"])
+@api_guard
+def api_market_stream_quote(ticker: str):
+    response = live_market_stream.get_service().get_quote(ticker)
+    if response.get("success"):
+        return _api_success(
+            response.get("data") or {},
+            data_status=response.get("data_status"),
+            provider=response.get("provider"),
+            ok=True,
+        )
+    message = response.get("error") or "Quote unavailable"
+    invalid = "invalid" in message.lower() or "required" in message.lower()
+    return _api_failure(
+        message,
+        status_code=400 if invalid else 404,
+        error_code="invalid_symbol" if invalid else "quote_unavailable",
+        data_status=response.get("data_status"),
+        provider=response.get("provider"),
+        ok=False,
+    )
+
+@_route_bp.route("/api/market/quotes", methods=["GET"])
+@api_guard
+def api_market_stream_quotes():
+    raw = request.args.get("symbols", "")
+    symbols = [item.strip() for item in raw.split(",") if item.strip()] if raw else None
+    response = live_market_stream.get_service().get_quotes(symbols)
+    if response.get("success"):
+        return _api_success(
+            response.get("data") or {},
+            data_status=response.get("data_status"),
+            provider=response.get("provider"),
+            ok=True,
+        )
+    message = response.get("error") or "No quotes available"
+    return _api_failure(
+        message,
+        status_code=400,
+        error_code="quote_unavailable",
+        data_status=response.get("data_status"),
+        provider=response.get("provider"),
+        ok=False,
     )
