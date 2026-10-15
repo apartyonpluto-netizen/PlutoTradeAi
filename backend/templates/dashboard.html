@@ -25,32 +25,72 @@
 </section>
 {% endif %}
 
-{% if savings_goal %}
-<section class="panel savings-goal-panel">
-    <div class="panel-head">
-        <h3>Savings goal</h3>
-        <span>{% if savings_goal.unset %}Not set{% else %}{{ "%.0f"|format(savings_goal.progress_percent or 0) }}%{% endif %}</span>
+{% set autonomy_active = autonomy_status and autonomy_status.current_mode == "AUTONOMOUS" %}
+<section class="orbit-home">
+    <p class="orbit-kicker">you're in orbit.</p>
+    <p class="orbit-pnl {{ 'tone-positive' if home_status and home_status.today_pnl > 0 else 'tone-negative' if home_status and home_status.today_pnl < 0 else '' }}">
+        {% if home_status %}{{ "+" if home_status.today_pnl > 0 else "" }}${{ "%.2f"|format(home_status.today_pnl) }}{% else %}—{% endif %}
+        <small>today, after fees</small>
+    </p>
+    <p class="account-figure">
+        <strong>{% if webull_balance.connected and webull_balance.balance %}${{ webull_balance.balance.net_liquidation_value }}{% else %}—{% endif %}</strong>
+        <small>account value · {{ home_status.mode_label|lower if home_status else "off" }}{% if home_status and home_status.halted %} · halted{% endif %}</small>
+    </p>
+    <p class="now-line">
+        {% if status_summary.scanner_status == "Running" %}
+        now scanning: {{ scanner_rows|length }} tickers · {{ status_summary.market_sentiment|lower }} market
+        {% else %}
+        scanner's quiet · {{ scanner_rows|length }} tickers · {{ status_summary.market_sentiment|lower }} market
+        {% endif %}
+    </p>
+    <div class="orbital-core-cinematic {{ 'orbital-core-active' if autonomy_active else '' }}" data-live-scan="{{ 'true' if status_summary.scanner_status == 'Running' else 'false' }}">
+        <button type="button" class="orbit-arm" id="activatePlanetButton" data-active="{{ 'true' if autonomy_active else 'false' }}" aria-pressed="{{ 'true' if autonomy_active else 'false' }}">
+            <small id="activatePlanetLabel">the bot is</small>
+            <h3 id="activatePlanetMain">{{ "running" if autonomy_active else "off" }}</h3>
+            <p id="activatePlanetSub">{{ status_summary.ai_confidence }}{% if autonomy_active %} · sandbox only{% endif %}</p>
+        </button>
     </div>
-    {% if savings_goal.unset %}
-    <p class="muted">Realized live profit toward a goal you name. First goal idea: {{ savings_goal.placeholder }}. Nothing is counted until you set an amount. Paper profit does not fill this meter.</p>
-    {% else %}
-    <p><b>{{ savings_goal.name or savings_goal.placeholder }}</b> · ${{ "%.2f"|format(savings_goal.banked) }} of ${{ "%.2f"|format(savings_goal.amount) }} realized live profit</p>
-    <span class="home-status-meter savings-meter" aria-hidden="true"><i style="width: {{ savings_goal.progress_percent }}%;"></i></span>
-    {% endif %}
-    <form id="savingsGoalForm" class="savings-goal-form">
-        <input type="text" name="savings_goal_name" maxlength="80" placeholder="Goal name (a new MacBook)" value="{{ savings_goal.name }}">
-        <input type="number" name="savings_goal_amount" min="0" step="0.01" placeholder="Amount" value="{{ savings_goal.amount if savings_goal.amount else '' }}">
-        <button type="submit">Save goal</button>
-    </form>
 </section>
-{% endif %}
 
-{% if trade_cards %}
-<section class="panel">
-    <div class="panel-head"><h3>Recent trades</h3><a class="view-link" href="/trade-journal">Journal</a></div>
-    {% include "trade_cards.html" %}
+<nav class="home-index" aria-label="Home">
+    <a href="#setups"><span>01</span><div><b>setups</b><small>names the scan actually likes</small></div></a>
+    <a href="#positions"><span>02</span><div><b>positions</b><small>what closed, and the account</small></div></a>
+    <a href="#recap"><span>03</span><div><b>recap</b><small>taken and skipped today</small></div></a>
+    <a href="#goal"><span>04</span><div><b>goal</b><small>name it, or hide it</small></div></a>
+</nav>
+
+<section class="panel" id="setups" data-chart-scope>
+    <div class="panel-head"><h3>Setups</h3><span>{{ upcoming_opportunities|length }}</span></div>
+    <div class="setup-list">
+        {% for item in upcoming_opportunities[:6] %}
+        {% set why = item.trade_thesis or item.why_ai_likes_it or item.strategy %}
+        {% set confidence = item.confidence|int %}
+        <article class="setup-card chart-pick" data-ticker="{{ item.ticker }}" data-entry="{{ item.ideal_entry }}" data-stop="{{ item.stop }}" data-target="{{ item.target }}">
+            <span class="setup-num">{{ "%02d"|format(loop.index) }}</span>
+            <div class="setup-body">
+                <h3>{{ item.ticker }}</h3>
+                <p>{{ why }}</p>
+                <p class="muted">Entry {{ item.ideal_entry }} · Stop {{ item.stop }} · Target {{ item.target }}</p>
+                <div class="confidence" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ confidence }}" aria-label="Confidence {{ 'strong' if confidence >= 70 else 'building' if confidence >= 40 else 'weak' }}">
+                    <i style="width: {{ confidence if confidence < 100 else 100 }}%;"></i>
+                </div>
+                <span class="confidence-word">{{ 'strong' if confidence >= 70 else 'building' if confidence >= 40 else 'weak' }}</span>
+            </div>
+        </article>
+        {% else %}
+        <p class="muted">Nothing on the list yet. When a name qualifies, it shows up here with the reason.</p>
+        {% endfor %}
+    </div>
+    <div class="pluto-chart" id="setupChart" data-pluto-chart data-interval="15m" aria-label="Candlestick chart"></div>
+    <p class="pluto-chart-note">Tap a name. Entry, stop, and target show if we have them.</p>
 </section>
-{% endif %}
+
+<section class="panel" id="positions" data-chart-scope>
+    <div class="panel-head"><h3>Positions</h3><a class="view-link" href="/trade-journal">Journal</a></div>
+    {% include "trade_cards.html" %}
+    <div class="pluto-chart" id="tradeChart" data-pluto-chart data-interval="15m" aria-label="Trade candlestick chart"></div>
+    <p class="pluto-chart-note">Tap a trade. Same chart, with the exit if it closed.</p>
+</section>
 
 <section class="glass-panel account-balance-topbar">
     <div class="panel-head"><h3>Account Balance</h3><span>{{ "Webull Sandbox (live)" if webull_balance.connected and webull_balance.balance else "Not Connected" }}</span></div>
@@ -78,6 +118,59 @@
     <ul class="broker-sync-items" id="brokerSyncItems"></ul>
 </section>
 
+<section class="panel" id="recap">
+    <div class="panel-head"><h3>Recap</h3><span>today</span></div>
+    {% if daily_recap %}
+    <p>{{ daily_recap.taken|length }} taken · {{ daily_recap.skipped|length }} skipped</p>
+    <ul class="recap-list">
+        {% for row in daily_recap.taken %}
+        <li>
+            <b>{{ row.ticker }}</b>
+            <span>{{ row.why }}</span>
+            {% if row.net is not none %}
+            <span class="{{ 'tone-positive' if row.net > 0 else 'tone-negative' if row.net < 0 else '' }}">{{ "+" if row.net > 0 else "" }}${{ "%.2f"|format(row.net) }}</span>
+            {% endif %}
+        </li>
+        {% else %}
+        <li><span class="muted">Nothing taken today.</span></li>
+        {% endfor %}
+        {% for row in daily_recap.skipped %}
+        <li><b>{{ row.ticker }}</b><span>Skipped. {{ row.why }}</span></li>
+        {% endfor %}
+    </ul>
+    {% if daily_recap.goal %}
+    <p><b>{{ daily_recap.goal.name }}</b> · ${{ "%.2f"|format(daily_recap.goal.banked) }} of ${{ "%.2f"|format(daily_recap.goal.amount) }}</p>
+    <span class="home-status-meter savings-meter" aria-hidden="true"><i style="width: {{ daily_recap.goal.progress_percent or 0 }}%;"></i></span>
+    <p class="muted">Moved {{ "+" if daily_recap.goal.today > 0 else "" }}${{ "%.2f"|format(daily_recap.goal.today) }} today. Paper trades don't count.</p>
+    {% endif %}
+    {% else %}
+    <p class="muted">Recap is unavailable right now.</p>
+    {% endif %}
+</section>
+
+{% if savings_goal %}
+<section class="panel goal-panel" id="goal">
+    <div class="panel-head"><h3>Goal</h3><span>only you</span></div>
+    <form id="savingsGoalForm" class="savings-goal-form">
+        <label class="toggle-wrap">
+            <input type="checkbox" name="savings_goal_visible" {% if savings_goal.visible %}checked{% endif %}>
+            <span>Show goal</span>
+        </label>
+        <div class="goal-body" {% if not savings_goal.visible %}hidden{% endif %}>
+            {% if savings_goal.unset %}
+            <p class="muted">Give it a name and a number. It stays on your account. Paper trades don't fill it.</p>
+            {% else %}
+            <p><b>{{ savings_goal.name or "Goal" }}</b> · ${{ "%.2f"|format(savings_goal.banked) }} of ${{ "%.2f"|format(savings_goal.amount) }} realized live profit</p>
+            <span class="home-status-meter savings-meter" aria-hidden="true"><i style="width: {{ savings_goal.progress_percent or 0 }}%;"></i></span>
+            {% endif %}
+            <input type="text" name="savings_goal_name" maxlength="80" placeholder="Goal name" value="{{ savings_goal.name }}">
+            <input type="number" name="savings_goal_amount" min="0" step="0.01" placeholder="Amount" value="{{ savings_goal.amount if savings_goal.amount else '' }}">
+            <button type="submit">Save goal</button>
+        </div>
+    </form>
+</section>
+{% endif %}
+
 <section class="panel" id="tradeTicketsPanel" hidden>
     <div class="panel-head"><h3>Awaiting Your Approval</h3><span>Trade tickets</span></div>
     <p class="muted" id="tradeTicketsSummary">Loading...</p>
@@ -86,7 +179,7 @@
 
 <section class="mission-control-layout">
     <section class="center-command">
-        <section class="glass-panel orbital-command-stage">
+        <section class="glass-panel orbital-command-stage legacy-cockpit">
             <div class="orbital-command-grid">
                 <article class="float-module module-nw">
                     <small>Neural Link</small>
@@ -119,25 +212,10 @@
                     <p>{{ status_summary.account_status }} account stack</p>
                 </article>
 
-                {% set autonomy_active = autonomy_status and autonomy_status.current_mode == "AUTONOMOUS" %}
-                <div class="orbital-core-cinematic {{ 'orbital-core-active' if autonomy_active else '' }}">
-                    <span class="core-atmosphere"></span>
-                    <span class="core-ring ring-a"></span>
-                    <span class="core-ring ring-b"></span>
-                    <span class="core-ring ring-c"></span>
-                    <span class="core-satellite sat-a"></span>
-                    <span class="core-satellite sat-b"></span>
-                    <span class="core-satellite sat-c"></span>
-                    <button type="button" class="planetary-core activate-planet-button" id="activatePlanetButton" data-active="{{ 'true' if autonomy_active else 'false' }}" aria-pressed="{{ 'true' if autonomy_active else 'false' }}">
-                        <small id="activatePlanetLabel">{{ "Autonomous" if autonomy_active else "Orbital Core" }}</small>
-                        <h3 id="activatePlanetMain">{{ "ACTIVE" if autonomy_active else "ACTIVATE" }}</h3>
-                        <p id="activatePlanetSub">{{ status_summary.ai_confidence }} confidence{% if autonomy_active %} · sandbox only{% endif %}</p>
-                    </button>
-                </div>
             </div>
         </section>
 
-        <article class="glass-panel mission-hero">
+        <article class="glass-panel mission-hero legacy-cockpit">
             <div class="hero-space" aria-hidden="true">
                 <span class="planet planet-lg"></span>
                 <span class="planet planet-sm"></span>
@@ -154,7 +232,7 @@
             </div>
         </article>
 
-        <section class="metric-cards">
+        <section class="metric-cards legacy-cockpit">
             <article class="glass-panel metric-card">
                 <p>Portfolio Confidence</p>
                 <h3 data-count-to="{{ status_summary.ai_confidence|replace('%', '')|int }}">0%</h3>
@@ -212,7 +290,7 @@
                     <tr>
                         <td>{{ row.ticker }}</td>
                         <td>${{ row.price }}</td>
-                        <td class="{{ 'tone-positive' if change >= 0 else 'tone-caution' }}">{{ "%+.2f"|format(change) }}%</td>
+                        <td class="{{ 'tone-positive' if change >= 0 else 'tone-negative' }}">{{ "%+.2f"|format(change) }}%</td>
                         <td>{{ "%.2f"|format(row.relative_volume|float) }}x</td>
                         <td>{{ score|round|int }}</td>
                         <td><span class="status-pill status-{{ status|lower }}">{{ status }}</span></td>
@@ -267,10 +345,10 @@
         <div class="ticker-stream glass-panel">
             <div class="ticker-track">
                 {% for row in macro_ticker_rows %}
-                <span>{{ row.display_label }} <b class="{{ 'tone-positive' if row.percent_change|float >= 0 else 'tone-caution' }}">{{ "%+.2f"|format(row.percent_change|float) }}%</b></span>
+                <span>{{ row.display_label }} <b class="{{ 'tone-positive' if row.percent_change|float >= 0 else 'tone-negative' }}">{{ "%+.2f"|format(row.percent_change|float) }}%</b></span>
                 {% endfor %}
                 {% for row in macro_ticker_rows %}
-                <span>{{ row.display_label }} <b class="{{ 'tone-positive' if row.percent_change|float >= 0 else 'tone-caution' }}">{{ "%+.2f"|format(row.percent_change|float) }}%</b></span>
+                <span>{{ row.display_label }} <b class="{{ 'tone-positive' if row.percent_change|float >= 0 else 'tone-negative' }}">{{ "%+.2f"|format(row.percent_change|float) }}%</b></span>
                 {% endfor %}
             </div>
         </div>
@@ -300,7 +378,7 @@
                 {% for row in watchlist[:6] %}
                     <tr>
                         <td>{{ row.ticker }}</td>
-                        <td class="{{ 'tone-positive' if row.ai_score|int >= 70 else 'tone-caution' }}">{{ row.ai_score }}</td>
+                        <td>{{ row.ai_score }}</td>
                         <td>{{ row.status }}</td>
                     </tr>
                 {% else %}
@@ -515,15 +593,15 @@
         core.classList.toggle("orbital-core-active", active);
         button.dataset.active = active ? "true" : "false";
         button.setAttribute("aria-pressed", active ? "true" : "false");
-        label.textContent = active ? "Autonomous" : "Orbital Core";
-        main.textContent = active ? "ACTIVE" : "ACTIVATE";
+        label.textContent = "the bot is";
+        main.textContent = active ? "running" : "off";
     };
 
     button.addEventListener("click", async () => {
         const goingActive = button.dataset.active !== "true";
         button.disabled = true;
         const previousSub = sub.textContent;
-        sub.textContent = goingActive ? "Activating..." : "Deactivating...";
+        sub.textContent = goingActive ? "hang on" : "stopping";
         try {
             const response = await fetch(goingActive ? "/api/autonomy/activate" : "/api/autonomy/deactivate", {
                 method: "POST",
@@ -540,10 +618,10 @@
                 const placed = scan.placed_count ?? 0;
                 const skipped = scan.skipped_count ?? 0;
                 sub.textContent = `${placed} placed / ${skipped} skipped`;
-                showToast(`Autonomous mode activated - ${placed} order(s) placed, ${skipped} skipped.`, "success");
+                showToast(`Bot's running. ${placed} placed, ${skipped} skipped.`, "success");
             } else {
-                sub.textContent = `${"{{ status_summary.ai_confidence }}"} confidence`;
-                showToast("Autonomous mode deactivated. Everything is manual again.", "info");
+                sub.textContent = `${"{{ status_summary.ai_confidence }}"}`;
+                showToast("Bot's off. You're driving.", "info");
             }
         } catch (error) {
             sub.textContent = previousSub;

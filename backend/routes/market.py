@@ -293,6 +293,47 @@ def api_chart_history_ticker(ticker: str):
     payload = get_chart_history_for_ticker(ticker=ticker, chart_interval=chart_interval, force_refresh=force_refresh)
     return _api_success(payload, chart_history=payload, ok=True)
 
+def _chart_data_was_cached(ticker: str, chart_interval: str) -> bool:
+    """True when the shared candle cache already holds this ticker and interval.
+
+    Markers are not part of that cache. Copy the candle payload before adding
+    them so one account's entry and stop never stick to the shared bars.
+    """
+    normalized = ticker.strip().upper()
+    interval = chart_interval.strip() if chart_interval else DEFAULT_CHART_INTERVAL
+    if interval not in CHART_INTERVAL_TO_PERIOD:
+        interval = DEFAULT_CHART_INTERVAL
+    cached_item = CHART_HISTORY_CACHE.get(f"{normalized}:{interval}")
+    return bool(
+        isinstance(cached_item, dict)
+        and isinstance(cached_item.get("expires_at"), datetime)
+        and cached_item["expires_at"] > _now_utc()
+    )
+
+@_route_bp.route("/api/chart-data/<ticker>", methods=["GET"])
+@api_guard
+def api_chart_data(ticker: str):
+    """Candles plus entry, exit, stop, and target for one ticker.
+
+    Candles come only from the cached chart-history path, so a page of charts
+    does not multiply Alpaca calls. Marker prices are query params when the
+    page already knows them, otherwise this account's own trade records.
+    """
+    import home_status as home_status_mod
+
+    force_refresh = request.args.get("refresh", "false").lower() == "true"
+    chart_interval = request.args.get("interval", "15m")
+    cached = False if force_refresh else _chart_data_was_cached(ticker, chart_interval)
+    history = dict(get_chart_history_for_ticker(ticker=ticker, chart_interval=chart_interval, force_refresh=force_refresh))
+    overrides = {}
+    for key in ("entry", "exit", "stop", "target"):
+        if key in request.args and str(request.args.get(key, "")).strip() != "":
+            overrides[key] = request.args.get(key)
+    levels = home_status_mod.resolve_chart_markers(_current_user_id(), history.get("ticker") or ticker, overrides)
+    history["levels"] = levels
+    history["cached"] = cached
+    return _api_success(history, chart_data=history, ok=True)
+
 @_route_bp.route("/api/reversal-map", methods=["GET"])
 def api_reversal_map():
     # Only reads reversal_rows/trend_errors below - include_opportunities=False

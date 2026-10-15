@@ -4,9 +4,12 @@
 <section class="panel">
     <div class="panel-head"><h3>Platform Settings</h3><span>Enterprise controls</span></div>
     <form id="platformSettingsForm" class="grid-form">
-        <select name="theme">
+        {% set theme_labels = {"Neon": "Neon space", "Icy": "Icy", "Gold": "Gold", "Light": "Light"} %}
+        {% set current_theme = settings_payload.theme if settings_payload.theme in settings_themes else "Neon" %}
+        <label for="themeSelect">Palette</label>
+        <select id="themeSelect" name="theme">
             {% for theme in settings_themes %}
-            <option value="{{ theme }}" {% if settings_payload.theme == theme %}selected{% endif %}>{{ theme }}</option>
+            <option value="{{ theme }}" {% if current_theme == theme %}selected{% endif %}>{{ theme_labels.get(theme, theme) }}</option>
             {% endfor %}
         </select>
         <input type="number" name="ai_confidence_threshold" min="0" max="99" value="{{ settings_payload.ai_confidence_threshold }}">

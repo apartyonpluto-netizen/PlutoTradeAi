@@ -23,7 +23,7 @@ def _settings_file(user_id: str) -> Path:
 
 def _default_settings() -> Dict[str, object]:
     return {
-        "theme": "Midnight",
+        "theme": "Neon",
         "notifications_enabled": True,
         "ai_confidence_threshold": get_global_settings()["default_ai_confidence_threshold"],
         "scanner_frequency_seconds": 20,
@@ -34,10 +34,24 @@ def _default_settings() -> Dict[str, object]:
         "mission_brief_last_viewed_date": "",
         "api_status": "Operational",
         "trusted_news_sources": ["Official X API", "Yahoo Finance News", "MarketWatch RSS"],
-        # Savings goal. Amount unset (None) until the owner sets one.
+        # Private per-user goal. Amount stays unset until the owner names one.
+        # Visible can be turned off to hide the meter and the recap mention.
         "savings_goal_name": "",
         "savings_goal_amount": None,
+        "savings_goal_visible": True,
     }
+
+
+_THEME_CANONICAL = {
+    "neon": "Neon",
+    "icy": "Icy",
+    "gold": "Gold",
+    "light": "Light",
+    # Older palette names resolve to the default so a saved setting still loads.
+    "midnight": "Neon",
+    "onyx": "Neon",
+    "nebula": "Neon",
+}
 
 
 def _ensure_file(user_id: str) -> Path:
@@ -75,8 +89,18 @@ def update_settings(user_id: str, payload: Dict[str, object]) -> Dict[str, objec
         "trusted_news_sources",
         "savings_goal_name",
         "savings_goal_amount",
+        "savings_goal_visible",
     ]:
         if key not in payload:
+            continue
+        if key == "theme":
+            canonical = _THEME_CANONICAL.get(str(payload[key] or "").strip().lower())
+            if canonical is None:
+                raise ValueError("Unknown palette.")
+            safe_updates[key] = canonical
+            continue
+        if key == "savings_goal_visible":
+            safe_updates[key] = bool(payload[key])
             continue
         if key == "savings_goal_name":
             safe_updates[key] = str(payload[key] or "")[:80]
@@ -100,4 +124,4 @@ def update_settings(user_id: str, payload: Dict[str, object]) -> Dict[str, objec
 
 
 def available_themes() -> List[str]:
-    return ["Midnight", "Onyx", "Nebula"]
+    return ["Neon", "Icy", "Gold", "Light"]

@@ -1,9 +1,16 @@
 {% extends "base.html" %}
 {% block title %}PlutoTrade AI · Market Scanner{% endblock %}
 {% block content %}
+<div data-chart-scope>
+<section class="panel">
+    <div class="panel-head"><h3>chart</h3><span>tap a name</span></div>
+    <div class="pluto-chart" id="scannerChart" data-pluto-chart data-interval="15m" aria-label="Scanner candlestick chart"></div>
+    <p class="pluto-chart-note">Real candles, saved for a couple minutes so we don't hammer the data feed. Entry, exit, stop, and target show if this account has them.</p>
+</section>
+
 <section class="panel panel-table">
     <div class="panel-head">
-        <h3>Market Scanner</h3>
+        <h3>scanner</h3>
         <div class="inline-actions">
             <span id="scannerUpdatedAt">{{ scanner_last_updated or 'n/a' }}</span>
             <button id="refreshScannerButton" type="button">Refresh</button>
@@ -17,7 +24,7 @@
         Showing the top {{ scanner_summary.shown_count or scanner_rows|length }}.
         Strategy and charting still deep-analyze up to 6 of these per cycle (watchlist first, then this rank).
         {% else %}
-        Each cycle screens the Nasdaq list, then shows the top qualifying names and why they qualified.
+        The list refreshes on its own. Tap a row for the chart.
         {% endif %}
     </p>
     <p class="muted" id="scannerLiveBadge">Live updates every 20s</p>
@@ -43,10 +50,10 @@
         </thead>
         <tbody>
         {% for row in scanner_rows %}
-        <tr>
+        <tr class="chart-pick" data-ticker="{{ row.ticker }}">
             <td>{{ row.ticker }}</td>
             <td>${{ row.price }}</td>
-            <td class="{{ 'tone-positive' if row.percent_change >= 0 else 'tone-caution' }}">{{ row.percent_change }}%</td>
+            <td class="{{ 'tone-positive' if row.percent_change >= 0 else 'tone-negative' }}">{{ row.percent_change }}%</td>
             <td>{{ row.relative_volume }}x</td>
             <td>{{ row.volume }}</td>
             <td>{{ row.scanner_score }}</td>
@@ -70,4 +77,5 @@
         <p class="muted">Loading options suggestions...</p>
     </div>
 </section>
+</div>
 {% endblock %}

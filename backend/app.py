@@ -1876,11 +1876,13 @@ def _build_page_context(
 
         context["home_status"] = home_status_mod.build_home_status(user_id)
         context["savings_goal"] = home_status_mod.build_savings_goal(user_id)
+        context["daily_recap"] = home_status_mod.build_daily_recap(user_id)
         context["go_live"] = evaluate_go_live(user_id)
         context["trade_cards"] = home_status_mod.build_trade_cards(user_id)
     except Exception:
         context.setdefault("home_status", None)
         context.setdefault("savings_goal", None)
+        context.setdefault("daily_recap", None)
         context.setdefault("go_live", None)
         context.setdefault("trade_cards", [])
     if include_trusted_accounts:

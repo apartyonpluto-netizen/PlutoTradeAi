@@ -1,20 +1,26 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="{{ (settings_payload.theme if settings_payload else 'midnight')|lower }}">
+{% set raw_theme = (settings_payload.theme if settings_payload else 'Neon')|lower %}
+{% set theme_name = raw_theme if raw_theme in ['neon', 'icy', 'gold', 'light'] else 'neon' %}
+<html lang="en" data-theme="{{ theme_name }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}PlutoTrade AI{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
     <link rel="stylesheet" href="/static/css/style.css">
     <link rel="stylesheet" href="/static/css/pluto-space.css">
     <link rel="manifest" href="/static/manifest.json">
     <link rel="icon" href="/static/icons/favicon-32.png" sizes="32x32">
     <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
-    <meta name="theme-color" content="#020105">
+    <meta name="theme-color" content="#141618">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="PlutoTrade">
     {% block head_extras %}{% endblock %}
+    <link rel="stylesheet" href="/static/css/pluto-theme.css">
 </head>
 <body class="{% block body_class %}{% endblock %}" data-scanner-frequency="{{ settings_payload.scanner_frequency_seconds if settings_payload else 20 }}">
 <div class="bg-space" aria-hidden="true"></div>
@@ -31,7 +37,7 @@
                 <div class="brand-mark" aria-hidden="true"></div>
                 <div class="brand-text">
                     <h1>PlutoTrade AI</h1>
-                    <span>{{ 'Captain ' ~ current_user.username if current_user else 'Mission Control' }}</span>
+                    <span>{{ current_user.username if current_user else 'signed out' }}</span>
                 </div>
                 <button class="sidebar-close" id="sidebarClose" type="button" aria-label="Close menu">✕</button>
             </div>
@@ -275,6 +281,7 @@
     </div>
 </div>
 <script src="/static/js/app.js"></script>
+<script src="/static/js/pluto-charts.js"></script>
 <script>
 if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {
