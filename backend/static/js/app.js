@@ -528,9 +528,23 @@ const bindAiChartMarks = () => {
     container.innerHTML = rows.map((item) => renderChartMarksCard(item)).join("");
   };
 
-  refresh(null).catch((error) => {
-    container.innerHTML = `<p class="error">${escapeHtml(error.message)}</p>`;
-  });
+  const start = () => {
+    refresh(null).catch((error) => {
+      container.innerHTML = `<p class="error">${escapeHtml(error.message)}</p>`;
+    });
+  };
+  if (!("IntersectionObserver" in window)) {
+    start();
+  } else {
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        observer.disconnect();
+        start();
+      });
+    }, { rootMargin: "240px" });
+    observer.observe(container);
+  }
   document.addEventListener("watchlist:changed", (event) => {
     const tickers = Array.isArray(event?.detail?.tickers) ? event.detail.tickers : [];
     container.dataset.tickers = tickers.join(",");
@@ -597,8 +611,9 @@ const bindOptionsSuggestions = () => {
   const containers = Array.from(document.querySelectorAll("[data-options-suggestions]"));
   if (!containers.length) return;
 
-  containers.forEach(async (container) => {
-    if (!(container instanceof HTMLElement)) return;
+  const loadContainer = async (container) => {
+    if (!(container instanceof HTMLElement) || container.dataset.optionsLoaded === "1") return;
+    container.dataset.optionsLoaded = "1";
     const tickers = parseTickerList(container.dataset.tickers || "");
     if (!tickers.length) {
       container.innerHTML = '<p class="muted">No tickers available for options suggestions yet.</p>';
@@ -606,39 +621,59 @@ const bindOptionsSuggestions = () => {
     }
 
     container.innerHTML = '<p class="muted">Loading options suggestions...</p>';
-    const suggestions = await Promise.all(
-      tickers.map(async (ticker) => {
-        try {
-          const payload = await requestJson(`/api/options/${encodeURIComponent(ticker)}`);
-          return payload.options || null;
-        } catch (error) {
-          return {
-            ticker,
-            suggested_direction: "WAIT",
-            confidence_score: 0,
-            reason_for_direction:
-              "AI favors WAIT because options chain data is unavailable. Watch for a possible setup and wait for confirmation.",
-            current_stock_price: "Data unavailable",
-            expected_move: "Data unavailable",
-            key_support: "Data unavailable",
-            key_resistance: "Data unavailable",
-            breakout_price: "Data unavailable",
-            breakdown_price: "Data unavailable",
-            risk_level: "Data unavailable",
-            expirations: [],
-            disclaimer: "For research only. Not financial advice.",
-          };
-        }
-      })
-    );
-
-    const readySuggestions = suggestions.filter(Boolean);
-    if (!readySuggestions.length) {
+    const cards = [];
+    const fetchOne = async (ticker) => {
+      try {
+        const payload = await requestJson(`/api/options/${encodeURIComponent(ticker)}`);
+        return payload.options || null;
+      } catch (error) {
+        return {
+          ticker,
+          suggested_direction: "WAIT",
+          confidence_score: 0,
+          reason_for_direction:
+            "AI favors WAIT because options chain data is unavailable. Watch for a possible setup and wait for confirmation.",
+          current_stock_price: "Data unavailable",
+          expected_move: "Data unavailable",
+          key_support: "Data unavailable",
+          key_resistance: "Data unavailable",
+          breakout_price: "Data unavailable",
+          breakdown_price: "Data unavailable",
+          risk_level: "Data unavailable",
+          expirations: [],
+          disclaimer: "For research only. Not financial advice.",
+        };
+      }
+    };
+    // Four at a time. The old all-at-once fan-out opened one /api/options
+    // call per scanner row and pinned every gunicorn thread.
+    for (let index = 0; index < tickers.length; index += 4) {
+      const batch = await Promise.all(tickers.slice(index, index + 4).map(fetchOne));
+      cards.push(...batch.filter(Boolean));
+      container.innerHTML = cards.map((item) => renderOptionsCard(item)).join("");
+    }
+    if (!cards.length) {
       container.innerHTML = '<p class="muted">Data unavailable.</p>';
+    }
+  };
+
+  const start = (container) => {
+    if (!(container instanceof HTMLElement)) return;
+    if (!("IntersectionObserver" in window)) {
+      loadContainer(container).catch(() => {});
       return;
     }
-    container.innerHTML = readySuggestions.map((item) => renderOptionsCard(item)).join("");
-  });
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        observer.disconnect();
+        loadContainer(container).catch(() => {});
+      });
+    }, { rootMargin: "240px" });
+    observer.observe(container);
+  };
+
+  containers.forEach(start);
 };
 
 const bindSettingsPage = () => {

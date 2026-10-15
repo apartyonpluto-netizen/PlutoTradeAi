@@ -158,9 +158,22 @@
   };
 
   const start = () => {
-    document.querySelectorAll("[data-pluto-chart]").forEach((mount) => {
+    const mounts = Array.from(document.querySelectorAll("[data-pluto-chart]"));
+    const bind = (mount) => {
       bindMount(mount).catch(() => {});
-    });
+    };
+    if (!("IntersectionObserver" in window)) {
+      mounts.forEach(bind);
+      return;
+    }
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        observer.unobserve(entry.target);
+        bind(entry.target);
+      });
+    }, { rootMargin: "240px" });
+    mounts.forEach((mount) => observer.observe(mount));
   };
 
   if (document.readyState === "loading") {

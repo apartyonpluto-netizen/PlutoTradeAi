@@ -36,14 +36,26 @@ def _stamp_environment(entry: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def list_overnight_orders(user_id: str) -> List[Dict[str, Any]]:
+    """A shallow copy, so a later insert in record_overnight_order cannot
+    change the cached parse. The cache drops when the file's mtime changes."""
+    try:
+        from .. import read_cache
+    except ImportError:  # pragma: no cover
+        import read_cache
+
     orders_file = _orders_file(user_id)
     if not orders_file.exists():
         return []
-    try:
-        payload = json.loads(orders_file.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return []
-    return payload if isinstance(payload, list) else []
+
+    def _read() -> List[Dict[str, Any]]:
+        try:
+            payload = json.loads(orders_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+        return payload if isinstance(payload, list) else []
+
+    payload = read_cache.load(orders_file, _read)
+    return list(payload) if isinstance(payload, list) else []
 
 
 def _atomic_write(path: Path, orders: List[Dict[str, Any]]) -> None:

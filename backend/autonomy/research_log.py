@@ -158,7 +158,20 @@ def record_research_decision(user_id: str, record: Dict[str, Any]) -> Dict[str, 
 
 def list_research_decisions(user_id: str) -> List[Dict[str, Any]]:
     """Oldest-first (append order). Reads either JSONL or a legacy JSON
-    array so a file written before the JSONL change still loads."""
+    array so a file written before the JSONL change still loads.
+
+    The daily recap and the trade cards both read this log on every page.
+    Repeat reads skip the lock and the parse until an append changes the file."""
+    try:
+        from .. import read_cache
+    except ImportError:  # pragma: no cover
+        import read_cache
+
     path = _log_file(user_id)
-    with _locked(path):
-        return _parse_records(_read_text(path))
+
+    def _read() -> List[Dict[str, Any]]:
+        with _locked(path):
+            return _parse_records(_read_text(path))
+
+    records = read_cache.load(path, _read)
+    return list(records) if isinstance(records, list) else []

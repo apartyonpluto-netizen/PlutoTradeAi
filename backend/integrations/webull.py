@@ -6,6 +6,7 @@ import re
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Any, Dict, List, Optional, Tuple
 
 # Hoisted to module level (2026-08-19) - these four were previously
@@ -247,6 +248,14 @@ def _record_call(seconds: float, rate_limited: bool = False, backoff_seconds: fl
         data["rate_limited"] += 1
 
 
+# Read calls (accounts, balances, positions, snapshots) used to wait with no
+# socket timeout. A stalled broker connection held the page, and the gunicorn
+# worker, until the platform killed it. Order placement does not use this
+# helper; a short read timeout must not turn a slow fill into a false reject.
+_READ_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="webull-read")
+READ_TIMEOUT_SECONDS = 8
+
+
 def _call_with_429_retry(action_label: str, call):
     """Retries a read-only Webull API call up to 3 times on a 429
     (rate-limited) response, matching the backoff _place_order_with_retry
@@ -265,7 +274,13 @@ def _call_with_429_retry(action_label: str, call):
     for attempt in range(3):
         started = time.perf_counter()
         try:
-            result = call()
+            future = _READ_EXECUTOR.submit(call)
+            try:
+                result = future.result(timeout=READ_TIMEOUT_SECONDS)
+            except FuturesTimeoutError as error:
+                raise ValueError(
+                    f"Webull API error ({action_label}): no response within {READ_TIMEOUT_SECONDS}s"
+                ) from error
             _record_call(time.perf_counter() - started)
             return result
         except ServerException as error:

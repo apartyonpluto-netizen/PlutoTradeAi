@@ -7,8 +7,10 @@ from typing import Dict, List
 
 if __package__:
     from .global_settings import get_global_settings
+    from . import read_cache
 else:
     from global_settings import get_global_settings
+    import read_cache
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("PLUTO_DATA_DIR", str(BASE_DIR / "data"))).resolve()
@@ -63,14 +65,28 @@ def _ensure_file(user_id: str) -> Path:
 
 
 def get_settings(user_id: str) -> Dict[str, object]:
+    """Read settings. Rewrite the file only when a new default key is missing.
+
+    The old read path wrote the merged document on every call. A page render
+    calls this several times, so every logged-in click rewrote settings.json
+    and global_settings.json on the persistent disk.
+    """
     settings_file = _ensure_file(user_id)
-    try:
-        payload = json.loads(settings_file.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        payload = _default_settings()
-    merged = {**_default_settings(), **payload}
-    settings_file.write_text(json.dumps(merged, indent=2), encoding="utf-8")
-    return merged
+
+    def _read() -> Dict[str, object]:
+        try:
+            payload = json.loads(settings_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        merged = {**_default_settings(), **payload}
+        if merged != payload:
+            settings_file.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+            read_cache.forget(settings_file)
+        return merged
+
+    return dict(read_cache.load(settings_file, _read))
 
 
 def update_settings(user_id: str, payload: Dict[str, object]) -> Dict[str, object]:

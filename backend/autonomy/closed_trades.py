@@ -61,8 +61,23 @@ def _atomic_write(path: Path, records: List[Dict[str, Any]]) -> None:
 
 def list_closed_trades(user_id: str) -> List[Dict[str, Any]]:
     """Newest-first - every durably closed trade for this user. Read-only;
-    see record_closed_trade for the only way to write one."""
-    return list(reversed(_read(user_id)))
+    see record_closed_trade for the only way to write one.
+
+    Home, the savings goal, the daily recap, and the go-live check each
+    call this during one page render. The parsed list is reused until the
+    file changes."""
+    try:
+        from .. import read_cache
+    except ImportError:  # pragma: no cover
+        import read_cache
+
+    path = _store_file(user_id)
+    if not path.exists():
+        return []
+    records = read_cache.load(path, lambda: _read(user_id))
+    if not isinstance(records, list):
+        return []
+    return list(reversed(records))
 
 
 def get_closed_trade(user_id: str, trade_id: str) -> Optional[Dict[str, Any]]:
