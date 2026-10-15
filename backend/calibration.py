@@ -87,6 +87,14 @@ def _run_calibration_sync(tickers: List[str], lookback_months: int, hold_days: i
         }
     )
     write_calibration(current)
+    try:
+        try:
+            from .evidence_gates import publish_from_trades
+        except ImportError:
+            from evidence_gates import publish_from_trades
+        publish_from_trades(trade for rows in per_strategy.values() for trade in rows)
+    except Exception:
+        pass
     _calibration_lock.release()
 
 

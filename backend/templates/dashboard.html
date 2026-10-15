@@ -158,7 +158,7 @@
         </label>
         <div class="goal-body" {% if not savings_goal.visible %}hidden{% endif %}>
             {% if savings_goal.unset %}
-            <p class="muted">Give it a name and a number. It stays on your account. Paper trades don't fill it.</p>
+            <p class="muted">Give it a name and a number. It stays on your account. Exit alerts mention it while it is shown. Paper trades don't fill it.</p>
             {% else %}
             <p><b>{{ savings_goal.name or "Goal" }}</b> · ${{ "%.2f"|format(savings_goal.banked) }} of ${{ "%.2f"|format(savings_goal.amount) }} realized live profit</p>
             <span class="home-status-meter savings-meter" aria-hidden="true"><i style="width: {{ savings_goal.progress_percent or 0 }}%;"></i></span>

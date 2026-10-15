@@ -59,7 +59,7 @@ def classify(alert_type: str, priority: str = "normal") -> Optional[str]:
     return None
 
 
-def notify(event: str, title: str, message: str, *, opener=None) -> bool:
+def notify(event: str, title: str, message: str, *, opener=None, actions: Optional[str] = None) -> bool:
     """Sends one alert. Returns False when unconfigured or the send fails.
     Failures are swallowed: a phone outage must not change trading."""
     kind = channel()
@@ -83,7 +83,11 @@ def notify(event: str, title: str, message: str, *, opener=None) -> bool:
             _post_bytes(
                 os.environ.get("PLUTO_ALERT_WEBHOOK_URL", "").strip(),
                 message[:1024].encode("utf-8"),
-                {"Title": title[:250], "Priority": "high" if event in ("halt", "error") else "default"},
+                {
+                    "Title": title[:250],
+                    "Priority": "high" if event in ("halt", "error") else "default",
+                    **({"Actions": actions} if actions else {}),
+                },
                 opener,
             )
         else:
@@ -100,6 +104,9 @@ def notify(event: str, title: str, message: str, *, opener=None) -> bool:
 
 
 def notify_alert(alert: Dict[str, Any], *, opener=None) -> bool:
+    # Exit phones are the richer message from exit_alerts, once per close.
+    if "position_closed" in str(alert.get("type") or "").lower():
+        return False
     event = classify(str(alert.get("type") or ""), str(alert.get("priority") or "normal"))
     if event is None:
         return False

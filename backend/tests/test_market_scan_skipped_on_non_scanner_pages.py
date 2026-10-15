@@ -119,3 +119,11 @@ def test_pattern_brain_page_never_triggers_the_market_scan(user_id):
         with client.session_transaction() as sess:
             sess["user_id"] = registered_user_id
         _assert_page_never_scans(client, "/pattern-brain")
+
+
+def test_suggestion_ledger_page_never_triggers_the_market_scan(user_id):
+    registered_user_id = _registered_user(user_id[:8] + "ledger")
+    with pluto_app.app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["user_id"] = registered_user_id
+        _assert_page_never_scans(client, "/suggestion-ledger")

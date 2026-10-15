@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}PlutoTrade AI · Suggestion ledger{% endblock %}
+{% block content %}
+<section class="panel">
+    <div class="panel-head">
+        <h3>Suggestion ledger</h3>
+        <span>Hit rate by confidence</span>
+    </div>
+    <p class="muted">Every suggestion the scan logged, taken or skipped. Grading waits about five trading days, then records the forward result. This page does not place an order.</p>
+    <table>
+        <thead><tr><th>Confidence</th><th>Graded</th><th>Hit rate</th><th>Positive</th></tr></thead>
+        <tbody>
+        {% for bucket in hit_rates %}
+        <tr>
+            <td>{{ bucket.bucket }}</td>
+            <td>{{ bucket.n }}</td>
+            <td>{{ bucket.hit_rate if bucket.hit_rate is not none else "—" }}</td>
+            <td>{{ bucket.hits }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="muted">No graded suggestions yet.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<section class="panel panel-table">
+    <div class="panel-head"><h3>Recent suggestions</h3><span>{{ ledger_rows|length }}</span></div>
+    <table>
+        <thead><tr><th>Day</th><th>Ticker</th><th>Strategy</th><th>Confidence</th><th>Decision</th><th>Why</th></tr></thead>
+        <tbody>
+        {% for row in ledger_rows %}
+        <tr>
+            <td>{{ row.trading_day }}</td>
+            <td>{{ row.ticker }}</td>
+            <td>{{ row.strategy }}</td>
+            <td>{{ row.confidence }}</td>
+            <td>{{ row.decision }}</td>
+            <td>{{ row.reason or row.skip_category or "" }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="muted">Nothing logged yet.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endblock %}

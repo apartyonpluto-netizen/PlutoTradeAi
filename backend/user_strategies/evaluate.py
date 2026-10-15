@@ -350,7 +350,17 @@ def run_strategy_backtest(
         "trades": trades[:300],
         "trade_count_truncated": len(trades) > 300,
         "errors": errors,
+        "oos_gate": _strategy_oos_gate(trades, strategy),
     }
+
+
+def _strategy_oos_gate(trades: List[Dict[str, Any]], strategy: Dict[str, Any]) -> Dict[str, Any]:
+    """Preview only. User strategies still do not place orders."""
+    try:
+        from evidence_gates import evaluate_fixed_rules
+    except ImportError:  # pragma: no cover
+        from ..evidence_gates import evaluate_fixed_rules  # type: ignore
+    return evaluate_fixed_rules(trades, str(strategy.get("name") or ""))
 
 
 def load_daily_bars(ticker: str, lookback_months: int) -> pd.DataFrame:

@@ -216,6 +216,10 @@
                     <div><small>Backtest max drawdown</small><b>{{ backtest.combined.max_drawdown_percent }}%</b></div>
                 </div>
                 {% for error in backtest.errors %}<p class="muted">{{ error }}</p>{% endfor %}
+                {% if backtest.oos_gate %}
+                <p><b>{{ "Pass" if backtest.oos_gate.passed else "Fail" }}</b> — {{ backtest.oos_gate.reason }}</p>
+                <p class="muted">This page shows the walk-forward result. It does not place an order.</p>
+                {% endif %}
             </div>
             {% else %}
             <p class="muted">No backtest stored yet. Running one uses daily bars and labels the result as a backtest.</p>

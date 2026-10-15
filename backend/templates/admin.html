@@ -177,6 +177,8 @@
     <button id="runCalibrationButton" type="button" {{ "disabled" if calibration.status == "running" else "" }}>
         {{ "Running..." if calibration.status == "running" else "Run Calibration" }}
     </button>
+    <button id="trainConfidenceButton" type="button">Train confidence model</button>
+    <p class="muted" id="trainConfidenceNote">Offline training only. The 10-second monitor does not run this.</p>
     <table id="calibrationStatsTable" style="margin-top: 16px;">
         <thead><tr><th>Strategy</th><th>Trades</th><th>Win Rate</th><th>Avg Return</th><th>Trusted</th></tr></thead>
         <tbody id="calibrationStatsBody">
@@ -582,6 +584,24 @@
         if (statusBadge.textContent.trim() === "running") {
             setTimeout(pollCalibrationStatus, 3000);
         }
+    }
+
+    const trainConfidenceButton = document.getElementById("trainConfidenceButton");
+    if (trainConfidenceButton) {
+        trainConfidenceButton.addEventListener("click", async () => {
+            trainConfidenceButton.disabled = true;
+            trainConfidenceButton.textContent = "Starting...";
+            try {
+                const result = await callAdminApi("/api/admin/train-confidence", {});
+                const note = document.getElementById("trainConfidenceNote");
+                if (note) note.textContent = (result.data && result.data.message) || "Training started. It does not place trades.";
+                showToast("Confidence-model training started.", "success");
+            } catch (error) {
+                showToast(error.message, "error");
+            }
+            trainConfidenceButton.disabled = false;
+            trainConfidenceButton.textContent = "Train confidence model";
+        });
     }
 
     const globalSettingsForm = document.getElementById("globalSettingsForm");

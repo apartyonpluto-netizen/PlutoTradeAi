@@ -178,6 +178,15 @@ def run_backtest(
     per_ticker = [run_ticker_backtest(ticker, lookback_months, hold_days, min_confidence) for ticker in clean_tickers]
     all_trades = [trade for result in per_ticker for trade in result["trades"]]
     all_trades.sort(key=lambda trade: trade["entry_date"])
+    oos_gate = {}
+    try:
+        from evidence_gates import evaluate_trades
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        for trade in all_trades:
+            grouped.setdefault(str(trade.get("strategy") or ""), []).append(trade)
+        oos_gate = {name: evaluate_trades(rows, name) for name, rows in grouped.items() if name}
+    except Exception:
+        oos_gate = {}
 
     return {
         "tickers": clean_tickers,
@@ -187,6 +196,7 @@ def run_backtest(
         "per_ticker": per_ticker,
         "combined": _summarize(all_trades),
         "trades": all_trades,
+        "oos_gate": oos_gate,
         "methodology_note": (
             "Daily-bar strategies only (Breakout, Pullback, Reversal, Trend Continuation, "
             "Support Bounce, Resistance Rejection, Mean Reversion, Momentum) - VWAP/gap/extended-hours "
