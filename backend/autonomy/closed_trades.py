@@ -57,6 +57,11 @@ def _atomic_write(path: Path, records: List[Dict[str, Any]]) -> None:
     tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}")
     tmp_path.write_text(json.dumps(records, indent=2), encoding="utf-8")
     os.replace(tmp_path, path)
+    try:
+        from .. import read_cache
+    except ImportError:  # pragma: no cover
+        import read_cache
+    read_cache.forget(path)
 
 
 def list_closed_trades(user_id: str) -> List[Dict[str, Any]]:
@@ -77,7 +82,7 @@ def list_closed_trades(user_id: str) -> List[Dict[str, Any]]:
     records = read_cache.load(path, lambda: _read(user_id))
     if not isinstance(records, list):
         return []
-    return list(reversed(records))
+    return [dict(row) if isinstance(row, dict) else row for row in reversed(records)]
 
 
 def get_closed_trade(user_id: str, trade_id: str) -> Optional[Dict[str, Any]]:

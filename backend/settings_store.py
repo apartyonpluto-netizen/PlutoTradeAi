@@ -136,7 +136,9 @@ def update_settings(user_id: str, payload: Dict[str, object]) -> Dict[str, objec
     if bool(safe_updates.get("show_mission_brief_again")):
         safe_updates["mission_brief_last_viewed_date"] = ""
     settings.update(safe_updates)
-    _settings_file(user_id).write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    settings_file = _settings_file(user_id)
+    settings_file.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    read_cache.forget(settings_file)
     return settings
 
 

@@ -84,4 +84,9 @@ def update_global_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
         settings["default_max_positions"] = value
 
     GLOBAL_SETTINGS_FILE.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    if __package__:
+        from . import read_cache
+    else:
+        import read_cache
+    read_cache.forget(GLOBAL_SETTINGS_FILE)
     return settings
