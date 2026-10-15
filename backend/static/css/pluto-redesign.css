@@ -1,0 +1,455 @@
+/* PlutoTrade visual system. Tokens live in base.html.
+   Loaded last so cards, type, and spacing stay consistent. Green and red
+   stay on profit and loss (and the Stop button). Everything else uses
+   the Pluto purple accent or neutral text. */
+
+html {
+    font-family: var(--font-sans);
+}
+
+body {
+    font-family: var(--font-sans);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1;
+    background: var(--bg-base);
+    color: var(--text-primary);
+    letter-spacing: -0.011em;
+}
+
+button,
+input,
+select,
+textarea {
+    font-family: inherit;
+    font-variant-numeric: tabular-nums;
+}
+
+h1, h2, h3, h4, .pluto-hero-number, .account-summary-value {
+    font-family: var(--font-sans);
+    letter-spacing: -0.03em;
+}
+
+.brand h1 {
+    font-size: var(--text-md);
+    letter-spacing: -0.02em;
+}
+
+/* ---- surfaces: padding and radius, not borders ---- */
+.sidebar,
+.panel,
+.glass-panel,
+.metric-card,
+.trade-card,
+.account-card,
+.auth-card,
+.alert-drawer,
+.home-status-bar,
+.stop-confirm-card,
+.mini-panel,
+.module-card {
+    border: none;
+    border-radius: var(--radius-xl);
+    background: var(--bg-elevated);
+    box-shadow: none;
+}
+
+.panel,
+.glass-panel,
+.metric-card,
+.account-card,
+.auth-card {
+    padding: var(--space-6);
+}
+
+.panel:hover,
+.card:hover {
+    border-color: transparent;
+}
+
+.sidebar {
+    padding: var(--space-5);
+}
+
+.main {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    min-width: 0;
+}
+
+.topbar,
+.topbar-with-alerts {
+    border: none;
+    border-radius: var(--radius-xl);
+    background: var(--bg-elevated);
+    padding: var(--space-3) var(--space-4);
+}
+
+input,
+select,
+textarea,
+.top-chip {
+    border: none;
+    background: var(--bg-base);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
+button,
+.alert-button,
+.button-link {
+    border: none;
+    border-radius: var(--radius-md);
+    background: var(--bg-base);
+    color: var(--text-primary);
+}
+
+.panel button:not(.ghost-button):not(.stop-everything-button):not(.market-overview-toggle-btn),
+.stack-form button:not(.ghost-button),
+.grid-form button:not(.ghost-button),
+.savings-goal-form button,
+.primary-link-button,
+button.primary,
+.button-primary {
+    background: var(--accent);
+    color: var(--accent-ink);
+    font-weight: 600;
+}
+
+.primary-link-button:hover,
+button.primary:hover,
+.panel button:not(.ghost-button):not(.stop-everything-button):hover {
+    filter: brightness(1.06);
+}
+
+.ghost-button,
+.sidebar-logout-button {
+    background: transparent;
+    color: var(--text-secondary);
+}
+
+.nav-menu a,
+.nav-group-toggle {
+    border-radius: var(--radius-md);
+    color: var(--text-secondary);
+}
+
+.nav-menu a.active,
+.nav-group-toggle.active {
+    background: var(--accent-soft);
+    color: var(--text-primary);
+    box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* Connection state is not profit or loss. */
+.status-light {
+    box-shadow: none;
+}
+
+.status-green {
+    color: var(--accent);
+    background: var(--accent);
+}
+
+.status-yellow {
+    color: var(--text-secondary);
+    background: var(--text-secondary);
+}
+
+.status-red {
+    color: transparent;
+    background: transparent;
+    box-shadow: inset 0 0 0 2px var(--text-muted);
+}
+
+.home-status-meter,
+.savings-meter {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.home-status-meter i,
+.savings-meter i {
+    background: var(--accent);
+}
+
+.go-live-checks .is-passed b::before,
+.planetary-core h3,
+.orbital-core-active .planetary-core h3 {
+    color: var(--accent);
+}
+
+.orbital-core-active .planetary-core {
+    background: var(--accent-soft);
+    border-color: transparent;
+}
+
+.risk-gauge-fill,
+.risk-gauge-fill.tone-positive-stroke,
+.risk-gauge-fill.tone-caution-stroke,
+.risk-gauge-fill.tone-negative-stroke {
+    stroke: var(--accent);
+}
+
+.plan-trade,
+.plan-watch,
+.plan-reject,
+.ticket-submitted .ticket-status,
+.ticket-recheck_failed .ticket-status,
+.ticket-declined .ticket-status {
+    background: var(--accent-soft);
+    color: var(--text-primary);
+}
+
+.ambiguous-freeze-banner,
+.ambiguous-freeze-banner.admin-wide-freeze-banner {
+    background: var(--bg-elevated);
+    border: none;
+    border-radius: var(--radius-lg);
+    box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.ambiguous-freeze-banner strong {
+    color: var(--text-primary);
+}
+
+.row-saved td,
+.toast-success,
+.toast-error,
+.toast-info {
+    border-color: transparent;
+}
+
+.toast {
+    border: none;
+    background: var(--bg-elevated);
+    border-radius: var(--radius-md);
+}
+
+.row-saved td {
+    background: var(--accent-soft);
+}
+
+/* The Stop control stays red. It is the kill switch, not a P&L color. */
+.stop-everything-button,
+.home-status-bar .stop-everything-button,
+.stop-confirm-card .stop-everything-button {
+    background: var(--stop);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius-md);
+    font-weight: 700;
+}
+
+.mode-live b,
+.mode-paper b,
+.is-halted b,
+.home-status-halt {
+    color: var(--text-primary);
+}
+
+/* ---- big numbers, then cards ---- */
+.pluto-hero {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-4);
+}
+
+.pluto-hero-stat {
+    background: var(--bg-elevated);
+    border-radius: var(--radius-xl);
+    padding: var(--space-6);
+}
+
+.pluto-kicker {
+    margin: 0 0 var(--space-2);
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.pluto-hero-number,
+.account-summary-card .account-summary-value {
+    margin: 0;
+    font-size: var(--text-2xl);
+    font-weight: 600;
+    line-height: 1.05;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-primary);
+}
+
+.account-summary-card .account-summary-pnl {
+    margin-top: var(--space-2);
+    font-size: var(--text-lg);
+    font-variant-numeric: tabular-nums;
+}
+
+.price-map-grid,
+.metric-cards,
+.account-meta-grid {
+    gap: var(--space-4);
+}
+
+.price-map-grid b,
+td,
+th {
+    font-variant-numeric: tabular-nums;
+}
+
+.panel table,
+.glass-panel table {
+    border-collapse: separate;
+    border-spacing: 0;
+}
+
+.panel th,
+.glass-panel th {
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    border: none;
+}
+
+.panel td,
+.glass-panel td {
+    border: none;
+    padding-top: 12px;
+    padding-bottom: 12px;
+}
+
+.panel tbody tr:nth-child(even) td,
+.glass-panel tbody tr:nth-child(even) td {
+    background: rgba(255, 255, 255, 0.025);
+}
+
+#scannerTable tbody tr,
+[data-trade-detail-row] {
+    cursor: pointer;
+}
+
+#scannerTable tbody tr.is-selected td,
+[data-trade-detail-row].is-selected td,
+.trade-card.is-selected {
+    background: var(--accent-soft);
+}
+
+.account-hub-hero {
+    min-height: 0;
+}
+
+.hero-glow,
+.bg-nebula,
+.bg-planets,
+.bg-warp {
+    display: none;
+}
+
+.strategy-callout {
+    border: none;
+    border-radius: var(--radius-md);
+    background: var(--accent-soft);
+    padding: var(--space-3) var(--space-4);
+}
+
+.trade-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: var(--space-4);
+}
+
+.trade-card {
+    padding: var(--space-5);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+}
+
+.trade-card p {
+    margin: 0;
+}
+
+.pluto-chart {
+    width: 100%;
+    height: 360px;
+}
+
+.pluto-chart-card {
+    height: 180px;
+    border-radius: var(--radius-md);
+    background: var(--bg-base);
+}
+
+.pluto-chart-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    margin: var(--space-3) 0 0;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.pluto-chart-legend .mark-entry { color: var(--accent); }
+.pluto-chart-legend .mark-exit { color: var(--text-primary); }
+.pluto-chart-legend .mark-stop { color: var(--negative); }
+.pluto-chart-legend .mark-target { color: var(--positive); }
+
+.chart-interval-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+}
+
+.panel button[data-chart-interval] {
+    background: var(--bg-base);
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.panel button[data-chart-interval].is-active,
+.chart-interval-row button.is-active {
+    background: var(--accent);
+    color: var(--accent-ink);
+}
+
+.market-overview-chart-canvas {
+    height: 360px;
+}
+
+@media (max-width: 900px) {
+    .pluto-hero {
+        grid-template-columns: 1fr;
+    }
+
+    .pluto-hero-number,
+    .account-summary-card .account-summary-value {
+        font-size: 2.25rem;
+    }
+
+    .panel,
+    .glass-panel,
+    .metric-card,
+    .account-card {
+        padding: var(--space-4);
+    }
+
+    .pluto-chart {
+        height: 260px;
+    }
+
+    .account-hub-grid,
+    .trade-cards {
+        grid-template-columns: 1fr;
+    }
+}

@@ -412,10 +412,10 @@ const bindScannerPage = () => {
       tbody.innerHTML = (payload.rows || [])
         .map(
           (row) => `
-          <tr>
+          <tr data-ticker="${escapeHtml(row.ticker)}">
             <td>${escapeHtml(row.ticker)}</td>
             <td>$${escapeHtml(row.price)}</td>
-            <td class="${row.percent_change >= 0 ? "tone-positive" : "tone-caution"}">${escapeHtml(row.percent_change)}%</td>
+            <td class="${row.percent_change >= 0 ? "tone-positive" : "tone-negative"}">${escapeHtml(row.percent_change)}%</td>
             <td>${escapeHtml(row.relative_volume)}x</td>
             <td>${escapeHtml(row.volume)}</td>
             <td>${escapeHtml(row.scanner_score)}</td>
@@ -540,12 +540,7 @@ const bindAiChartMarks = () => {
 
 const renderOptionsCard = (suggestion) => {
   const expirations = Array.isArray(suggestion.expirations) ? suggestion.expirations : [];
-  const directionClass =
-    suggestion.suggested_direction === "CALL"
-      ? "tone-positive"
-      : suggestion.suggested_direction === "PUT"
-        ? "tone-caution"
-        : "";
+  const directionClass = "";
 
   const expirationMarkup = expirations.length
     ? expirations

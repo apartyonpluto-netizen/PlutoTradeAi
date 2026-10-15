@@ -7,12 +7,17 @@
             {% if card.score is not none %}<span class="status-pill">Score {{ card.score }}</span>{% endif %}
         </header>
         <p>{{ card.why }}</p>
+        {% if card.ticker and card.ticker != "—" %}
+        <div class="pluto-chart pluto-chart-card" data-pluto-chart data-ticker="{{ card.ticker }}" role="img" aria-label="Candlestick chart for {{ card.ticker }}"></div>
+        <p class="pluto-chart-legend">
+            <span class="mark-entry">Entry</span>
+            <span class="mark-exit">Exit</span>
+            <span class="mark-stop">Stop</span>
+            <span class="mark-target">Target</span>
+        </p>
+        <p class="muted" data-chart-note></p>
+        {% endif %}
         {% if card.chart %}
-        <svg class="trade-spark" viewBox="0 0 160 64" role="img" aria-label="Entry to exit">
-            <line x1="12" y1="{{ card.chart.y1 }}" x2="148" y2="{{ card.chart.y2 }}" class="{{ 'spark-up' if card.chart.up else 'spark-down' }}"/>
-            <circle cx="12" cy="{{ card.chart.y1 }}" r="3.5" class="spark-entry"/>
-            <circle cx="148" cy="{{ card.chart.y2 }}" r="3.5" class="{{ 'spark-up' if card.chart.up else 'spark-down' }}"/>
-        </svg>
         <p class="trade-card-prices">
             <span>Entry {{ "%.2f"|format(card.entry) }}</span>
             <span>Exit {{ "%.2f"|format(card.exit) }}</span>
