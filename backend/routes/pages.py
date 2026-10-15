@@ -8,16 +8,25 @@ def mission_briefing_page() -> str:
         include_trend=True,
         include_news=True,
         include_trusted_accounts=True,
+        block_on_market_data=False,
+        allow_stale=True,
     )
     if not context.get("mission_brief_should_show") and request.args.get("show_brief") != "1":
-        context["macro_ticker_rows"] = get_macro_ticker_tape()
+        context["macro_ticker_rows"] = get_macro_ticker_tape(block=False)
         context["webull_balance"] = _get_live_webull_balance(_current_user_id())
         return render_template("dashboard.html", **context)
     return render_template("mission_briefing.html", **context)
 
 @_route_bp.route("/mission-brief")
 def mission_brief_manual_page() -> str:
-    context = _build_page_context(include_suggestions=True, include_reversal=True, include_trend=True, include_news=True)
+    context = _build_page_context(
+        include_suggestions=True,
+        include_reversal=True,
+        include_trend=True,
+        include_news=True,
+        block_on_market_data=False,
+        allow_stale=True,
+    )
     return render_template("mission_briefing.html", **context)
 
 @_route_bp.route("/dashboard")
@@ -29,15 +38,22 @@ def dashboard_page() -> str:
         include_trend=True,
         include_news=True,
         include_trusted_accounts=True,
+        block_on_market_data=False,
+        allow_stale=True,
     )
-    context["macro_ticker_rows"] = get_macro_ticker_tape()
+    context["macro_ticker_rows"] = get_macro_ticker_tape(block=False)
     context["accounts"] = get_accounts(_current_user_id())
     context["webull_balance"] = _get_live_webull_balance(_current_user_id())
     return render_template("dashboard.html", **context)
 
 @_route_bp.route("/news-intelligence")
 def news_intelligence_page() -> str:
-    return render_template("news_intelligence.html", **_build_page_context(include_news=True))
+    # The template only renders news_rows. The default scan and the
+    # per-ticker strategy/options pipeline were running on every open.
+    return render_template(
+        "news_intelligence.html",
+        **_build_page_context(include_news=True, include_market_scan=False, include_opportunities=False, allow_stale=True),
+    )
 
 @_route_bp.route("/trade-journal")
 def trade_journal_page() -> str:
@@ -212,12 +228,20 @@ def suggestion_ledger_page() -> str:
 
 @_route_bp.route("/api/suggestions", methods=["GET"])
 def api_suggestions():
-    context = _build_page_context(include_suggestions=True)
+    context = _build_page_context(
+        include_suggestions=True, include_opportunities=False, include_options=False, block_on_market_data=False, allow_stale=True
+    )
     return jsonify({"suggestions": context["suggestions"], "scanner_errors": context["scanner_errors"]})
 
 @_route_bp.route("/api/news/x", methods=["GET"])
 def api_news_x():
-    context = _build_page_context(include_news=True, include_trusted_accounts=True)
+    context = _build_page_context(
+        include_news=True,
+        include_trusted_accounts=True,
+        include_market_scan=False,
+        include_opportunities=False,
+        allow_stale=True,
+    )
     return jsonify(
         {
             "news": context["news_rows"],
@@ -314,7 +338,12 @@ def api_tradingview_webhook():
 @_route_bp.route("/api/status", methods=["GET"])
 @api_guard
 def api_status():
-    context = _build_page_context(include_news=True)
+    context = _build_page_context(
+        include_news=True,
+        block_on_market_data=False,
+        allow_stale=True,
+        reuse_opportunity_snapshot=True,
+    )
     tradingview = get_tradingview_status(_current_user_id())
     neural = context["status_summary"]["neural_status"]
     broker_statuses = _broker_framework_status()

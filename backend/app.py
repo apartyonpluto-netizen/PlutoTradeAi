@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import hmac
 import json
 import math
@@ -166,7 +167,7 @@ if __package__:
         start_calibration,
     )
     from . import confirm_entry, evidence_gates, ml_confidence, suggestion_ledger, trailing_stop
-    from .market_scanner import scan_market
+    from .market_scanner import load_saved_scan, scan_cache_is_fresh, scan_market
     from .news.future_news import get_future_news_roadmap
     from .news.news_service import fetch_news_bundle
     from .news.x_news import (
@@ -344,7 +345,7 @@ else:
     import ml_confidence
     import suggestion_ledger
     import trailing_stop
-    from market_scanner import scan_market
+    from market_scanner import load_saved_scan, scan_cache_is_fresh, scan_market
     from news.future_news import get_future_news_roadmap
     from news.news_service import fetch_news_bundle
     from news.x_news import (
@@ -648,8 +649,102 @@ def _log_request() -> None:
     logger.info("Request: %s %s", request.method, request.path)
 
 
+_COMPRESSIBLE_TYPES = {
+    "text/html",
+    "text/css",
+    "text/plain",
+    "text/javascript",
+    "application/javascript",
+    "application/json",
+    "application/xml",
+    "image/svg+xml",
+}
+# Static files are identical across requests. Remember the gzipped bytes so
+# three.js (~670KB) is not recompressed on every hit.
+_STATIC_GZIP_CACHE: Dict[Tuple[str, str, int], bytes] = {}
+_STATIC_GZIP_CACHE_LIMIT = 48
+
+
+def _static_cache_header(path: str) -> Optional[str]:
+    if not path.startswith("/static/"):
+        return None
+    if path.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".ico", ".woff", ".woff2")):
+        return "public, max-age=86400"
+    if path.endswith((".css", ".js", ".svg", ".map")):
+        return "public, max-age=3600"
+    return None
+
+
+def _response_body_bytes(response) -> bytes:
+    """Buffer the body, including files send_file left in passthrough mode.
+
+    Werkzeug's send_file sets direct_passthrough, and Response.get_data()
+    refuses to read that. Swallowing the error used to skip gzip, so
+    app.js and three.js left the server uncompressed.
+    """
+    if getattr(response, "direct_passthrough", False):
+        response.direct_passthrough = False
+    data = response.get_data()
+    return data if isinstance(data, bytes) else data.encode()
+
+
+def _apply_static_cache_and_compression(response):
+    """Cache static files in the browser and gzip text responses.
+
+    Render's edge may compress too, but the app was sending style.css
+    (~75KB), app.js (~140KB), and three.js (~670KB) with Cache-Control:
+    no-cache and no Content-Encoding. Repeat page views re-downloaded
+    all of it.
+    """
+    path = request.path or ""
+    cache_header = _static_cache_header(path)
+    if cache_header:
+        # send_file sets "no-cache". Assigning the header replaces it.
+        # Mutating response.cache_control only adds flags beside no-cache.
+        response.headers["Cache-Control"] = cache_header
+    accept = request.headers.get("Accept-Encoding", "")
+    if "gzip" not in accept.lower() or response.status_code != 200:
+        return response
+    if response.headers.get("Content-Encoding") or response.headers.get("Content-Range"):
+        return response
+    mimetype = (response.mimetype or "").split(";")[0].strip().lower()
+    if mimetype not in _COMPRESSIBLE_TYPES:
+        return response
+    try:
+        raw = _response_body_bytes(response)
+    except Exception:
+        return response
+    if not raw or len(raw) < 1024:
+        return response
+    cache_key = None
+    compressed = None
+    if path.startswith("/static/"):
+        cache_key = (path, response.headers.get("Last-Modified", ""), len(raw))
+        compressed = _STATIC_GZIP_CACHE.get(cache_key)
+    if compressed is None:
+        compressed = gzip.compress(raw, compresslevel=5)
+        if cache_key is not None and len(compressed) < len(raw):
+            if len(_STATIC_GZIP_CACHE) >= _STATIC_GZIP_CACHE_LIMIT:
+                _STATIC_GZIP_CACHE.clear()
+            _STATIC_GZIP_CACHE[cache_key] = compressed
+    if len(compressed) >= len(raw):
+        return response
+    response.set_data(compressed)
+    response.headers["Content-Encoding"] = "gzip"
+    response.headers["Content-Length"] = str(len(compressed))
+    vary = response.headers.get("Vary")
+    if not vary:
+        response.headers["Vary"] = "Accept-Encoding"
+    elif "accept-encoding" not in vary.lower():
+        response.headers["Vary"] = f"{vary}, Accept-Encoding"
+    # The file ETag describes the uncompressed bytes.
+    response.headers.pop("ETag", None)
+    return response
+
+
 @app.after_request
 def _log_response(response):
+    response = _apply_static_cache_and_compression(response)
     logger.info("Response: %s %s -> %s", request.method, request.path, response.status_code)
     return response
 
@@ -939,11 +1034,60 @@ MACRO_TICKER_CACHE: Dict[str, object] = {"rows": [], "expires_at": None}
 MACRO_TICKER_CACHE_SECONDS = 60
 
 
-def get_macro_ticker_tape(force_refresh: bool = False) -> List[Dict[str, object]]:
+# How long a page may keep showing the previous payload after its TTL,
+# while a refresh runs off the request. The autonomous scan does not use
+# this window: it still recomputes when the TTL has passed.
+STALE_SERVE_SECONDS = 15 * 60
+# Last opportunities built for each user. The alert drawer polls every 30s
+# and reuses this instead of running the strategy/chart/options pipeline again.
+OPPORTUNITY_SNAPSHOTS: Dict[str, Dict[str, object]] = {}
+_refresh_inflight: set = set()
+_refresh_lock = threading.Lock()
+
+
+def _spawn_refresh(key: str, fn) -> None:
+    """Run fn on the shared fetch pool, once per key.
+
+    Skipped under pytest so a request cannot leave a thread that reaches
+    the network after the test's socket guard is gone.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    with _refresh_lock:
+        if key in _refresh_inflight:
+            return
+        _refresh_inflight.add(key)
+
+    def _run() -> None:
+        try:
+            fn()
+        except Exception:
+            logger.warning("Background refresh %s failed", key, exc_info=True)
+        finally:
+            with _refresh_lock:
+                _refresh_inflight.discard(key)
+
+    _BACKGROUND_FETCH_EXECUTOR.submit(_run)
+
+
+def _within_stale_window(expires_at: object, stale_seconds: int = STALE_SERVE_SECONDS) -> bool:
+    return isinstance(expires_at, datetime) and expires_at + timedelta(seconds=stale_seconds) > _now_utc()
+
+
+def get_macro_ticker_tape(force_refresh: bool = False, block: bool = True) -> List[Dict[str, object]]:
     if not force_refresh and MACRO_TICKER_CACHE.get("rows") and _cache_is_fresh(MACRO_TICKER_CACHE):
         return MACRO_TICKER_CACHE["rows"]
+    if not force_refresh and not block and MACRO_TICKER_CACHE.get("rows"):
+        _spawn_refresh("macro-tape", lambda: get_macro_ticker_tape(force_refresh=True, block=True))
+        return MACRO_TICKER_CACHE["rows"]
 
-    rows, _errors, _last_updated = scan_market(tickers=list(MACRO_TICKER_LABELS.keys()))
+    # Display tape only. Bound it so a slow data call cannot hold the dashboard.
+    rows, _errors, _last_updated = _run_with_hard_deadline(
+        scan_market,
+        kwargs={"tickers": list(MACRO_TICKER_LABELS.keys())},
+        deadline_seconds=8,
+        default=([], [], ""),
+    )
     for row in rows:
         row["display_label"] = MACRO_TICKER_LABELS.get(row["ticker"], row["ticker"])
     if rows:
@@ -954,9 +1098,71 @@ def get_macro_ticker_tape(force_refresh: bool = False) -> List[Dict[str, object]
     return MACRO_TICKER_CACHE.get("rows", [])
 
 
-def get_market_data(force_refresh: bool = False) -> Tuple[List[Dict[str, object]], List[str], str]:
+def _store_market_cache(rows, errors, last_updated) -> None:
+    MARKET_CACHE.update(
+        {
+            "rows": rows,
+            "errors": errors,
+            "last_updated": last_updated,
+            "summary": getattr(rows, "summary", None) or {},
+            "expires_at": _now_utc() + timedelta(seconds=CACHE_SECONDS),
+        }
+    )
+
+
+def _refresh_saved_market_scan() -> None:
+    """Recompute the shared Nasdaq screen off the request path.
+
+    scan_market writes the disk cache under its own lock. The next page
+    read applies that user's watchlist. This does not touch MARKET_CACHE,
+    which is per-process and already carries one viewer's watchlist flags.
+    """
+    _run_with_hard_deadline(
+        scan_market,
+        kwargs={
+            "tickers": None,
+            "watchlist_tickers": None,
+            "universe_fallback": list(CORE_SCAN_UNIVERSE),
+            "force_refresh": False,
+        },
+        deadline_seconds=SCAN_MARKET_DEADLINE_SECONDS,
+        default=None,
+    )
+
+
+def get_market_data(force_refresh: bool = False, block: bool = True) -> Tuple[List[Dict[str, object]], List[str], str]:
+    """Scanner rows for pages and for the autonomous scan.
+
+    block=False never starts a Nasdaq screen on this request. It returns
+    the in-memory list, or the list saved on disk, and refreshes in the
+    background when that copy is past its TTL. The scan calls the default
+    block=True and still waits for a fresh screen when the disk copy is old.
+    """
     if not force_refresh and MARKET_CACHE.get("rows") and _cache_is_fresh(MARKET_CACHE):
         return MARKET_CACHE["rows"], MARKET_CACHE["errors"], MARKET_CACHE["last_updated"]
+
+    if not force_refresh:
+        try:
+            saved = load_saved_scan(get_watchlist_tickers(_current_user_id()))
+        except Exception:
+            saved = None
+        if saved is not None:
+            rows, errors, stamp, age = saved
+            if scan_cache_is_fresh(age):
+                _store_market_cache(rows, errors, stamp)
+                return rows, errors, stamp
+            if not block:
+                _spawn_refresh("market-scan", _refresh_saved_market_scan)
+                return rows, errors, stamp
+        elif not block:
+            _spawn_refresh("market-scan", _refresh_saved_market_scan)
+            if MARKET_CACHE.get("rows"):
+                return MARKET_CACHE["rows"], MARKET_CACHE["errors"], MARKET_CACHE["last_updated"]
+            return (
+                [],
+                ["Scanner is refreshing. The last saved list will show here when it is ready."],
+                "",
+            )
 
     watchlist_tickers = get_watchlist_tickers(_current_user_id())
     rows, errors, last_updated = _run_with_hard_deadline(
@@ -997,6 +1203,7 @@ def get_reversal_and_trend_data(
     watchlist_tickers: List[str],
     force_refresh: bool = False,
     focus_ticker: str = "",
+    allow_stale: bool = False,
 ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]], List[str]]:
     analysis_tickers = [ticker for ticker in watchlist_tickers if ticker in CORE_SCAN_UNIVERSE] or [
         row["ticker"] for row in scanner_rows[:8]
@@ -1010,6 +1217,20 @@ def get_reversal_and_trend_data(
         and ANALYTICS_CACHE.get("reversal_rows")
         and _cache_is_fresh(ANALYTICS_CACHE)
     ):
+        return ANALYTICS_CACHE["reversal_rows"], ANALYTICS_CACHE["trend_rows"], ANALYTICS_CACHE["errors"]
+    if (
+        not force_refresh
+        and allow_stale
+        and ticker_key == ANALYTICS_CACHE.get("ticker_key")
+        and ANALYTICS_CACHE.get("reversal_rows")
+        and _within_stale_window(ANALYTICS_CACHE.get("expires_at"))
+    ):
+        _spawn_refresh(
+            f"reversal:{ticker_key}",
+            lambda: get_reversal_and_trend_data(
+                scanner_rows, watchlist_tickers, force_refresh=True, focus_ticker=focus_ticker
+            ),
+        )
         return ANALYTICS_CACHE["reversal_rows"], ANALYTICS_CACHE["trend_rows"], ANALYTICS_CACHE["errors"]
 
     reversal_rows, trend_rows, errors = build_reversal_and_trend_payload(tickers=analysis_tickers, scanner_rows=scanner_rows)
@@ -1025,7 +1246,9 @@ def get_reversal_and_trend_data(
     return reversal_rows, trend_rows, errors
 
 
-def get_news_data(watchlist_tickers: List[str], force_refresh: bool = False, user_id: str = "") -> Tuple[List[Dict[str, object]], List[str]]:
+def get_news_data(
+    watchlist_tickers: List[str], force_refresh: bool = False, user_id: str = "", allow_stale: bool = False
+) -> Tuple[List[Dict[str, object]], List[str]]:
     # Cache key includes user_id - the X provider's results depend on this
     # user's own trusted-accounts list, so without it two users with the same
     # watchlist could be served each other's cached news, including posts
@@ -1038,6 +1261,19 @@ def get_news_data(watchlist_tickers: List[str], force_refresh: bool = False, use
         and NEWS_CACHE.get("rows")
         and _cache_is_fresh(NEWS_CACHE)
     ):
+        return NEWS_CACHE["rows"], NEWS_CACHE["errors"]
+    if (
+        not force_refresh
+        and allow_stale
+        and ticker_key == NEWS_CACHE.get("ticker_key")
+        and user_id == NEWS_CACHE.get("user_id")
+        and NEWS_CACHE.get("rows")
+        and _within_stale_window(NEWS_CACHE.get("expires_at"))
+    ):
+        _spawn_refresh(
+            f"news:{user_id}:{ticker_key}",
+            lambda: get_news_data(watchlist_tickers, force_refresh=True, user_id=user_id),
+        )
         return NEWS_CACHE["rows"], NEWS_CACHE["errors"]
 
     bundle = fetch_news_bundle(tickers=watchlist_tickers, limit=30, user_id=user_id)
@@ -1055,7 +1291,7 @@ def get_news_data(watchlist_tickers: List[str], force_refresh: bool = False, use
     return rows, errors
 
 
-def get_options_data_for_ticker(ticker: str, force_refresh: bool = False) -> Dict[str, object]:
+def get_options_data_for_ticker(ticker: str, force_refresh: bool = False, allow_stale: bool = False) -> Dict[str, object]:
     normalized_ticker = ticker.strip().upper()
     if not normalized_ticker:
         raise ValueError("Ticker is required.")
@@ -1067,6 +1303,24 @@ def get_options_data_for_ticker(ticker: str, force_refresh: bool = False) -> Dic
         and isinstance(cached_item.get("expires_at"), datetime)
         and cached_item["expires_at"] > _now_utc()
     ):
+        return cached_item["payload"]
+    cached_payload = cached_item.get("payload") if isinstance(cached_item, dict) else None
+    unavailable = (
+        isinstance(cached_payload, dict)
+        and cached_payload.get("confidence") == 0
+        and "unavailable" in str(cached_payload.get("reason", "")).lower()
+    )
+    if (
+        not force_refresh
+        and allow_stale
+        and isinstance(cached_payload, dict)
+        and not unavailable
+        and _within_stale_window(cached_item.get("expires_at"))
+    ):
+        _spawn_refresh(
+            f"options:{normalized_ticker}",
+            lambda ticker=normalized_ticker: get_options_data_for_ticker(ticker, force_refresh=True),
+        )
         return cached_item["payload"]
 
     payload = build_options_research(normalized_ticker)
@@ -1084,7 +1338,10 @@ def get_options_data_for_ticker(ticker: str, force_refresh: bool = False) -> Dic
 
 
 def get_strategy_data_for_ticker(
-    ticker: str, force_refresh: bool = False, extended_hours: Dict[str, object] | None = None
+    ticker: str,
+    force_refresh: bool = False,
+    extended_hours: Dict[str, object] | None = None,
+    allow_stale: bool = False,
 ) -> Dict[str, object]:
     normalized_ticker = ticker.strip().upper()
     if not normalized_ticker:
@@ -1098,6 +1355,17 @@ def get_strategy_data_for_ticker(
         and cached_item["expires_at"] > _now_utc()
     ):
         return cached_item["payload"]
+    if (
+        not force_refresh
+        and allow_stale
+        and isinstance(cached_item, dict)
+        and _within_stale_window(cached_item.get("expires_at"))
+    ):
+        _spawn_refresh(
+            f"strategy:{normalized_ticker}",
+            lambda ticker=normalized_ticker: get_strategy_data_for_ticker(ticker, force_refresh=True),
+        )
+        return cached_item["payload"]
 
     payload = build_strategy_intelligence(normalized_ticker, extended_hours=extended_hours)
     STRATEGY_CACHE[normalized_ticker] = {
@@ -1108,7 +1376,10 @@ def get_strategy_data_for_ticker(
 
 
 def get_chart_levels_for_ticker(
-    ticker: str, force_refresh: bool = False, extended_hours: Dict[str, object] | None = None
+    ticker: str,
+    force_refresh: bool = False,
+    extended_hours: Dict[str, object] | None = None,
+    allow_stale: bool = False,
 ) -> Dict[str, object]:
     normalized_ticker = ticker.strip().upper()
     if not normalized_ticker:
@@ -1121,6 +1392,17 @@ def get_chart_levels_for_ticker(
         and isinstance(cached_item.get("expires_at"), datetime)
         and cached_item["expires_at"] > _now_utc()
     ):
+        return cached_item["payload"]
+    if (
+        not force_refresh
+        and allow_stale
+        and isinstance(cached_item, dict)
+        and _within_stale_window(cached_item.get("expires_at"))
+    ):
+        _spawn_refresh(
+            f"chart:{normalized_ticker}",
+            lambda ticker=normalized_ticker: get_chart_levels_for_ticker(ticker, force_refresh=True),
+        )
         return cached_item["payload"]
 
     payload = build_chart_levels(normalized_ticker, extended_hours=extended_hours)
@@ -1326,7 +1608,7 @@ def _build_section_payload(user_id: str, section: str, focus_ticker: str = "") -
     else:
         tickers = get_section_tickers(user_id, section, default_tickers)
 
-    scanner_rows, _, _ = get_market_data(force_refresh=False)
+    scanner_rows, _, _ = get_market_data(force_refresh=False, block=False)
     scanner_price_lookup = {
         str(row.get("ticker", "")).upper(): float(row.get("price", 0) or 0) for row in scanner_rows if row.get("ticker")
     }
@@ -1390,18 +1672,20 @@ def _build_neural_snapshot(
     scanner_rows: List[Dict[str, object]],
     watchlist_rows: List[Dict[str, str]],
     news_rows: List[Dict[str, object]],
+    fetch_options: bool = True,
+    allow_stale: bool = False,
 ) -> Dict[str, object]:
     tickers = [str(row.get("ticker", "")).strip().upper() for row in scanner_rows[:3]]
     tickers = [ticker for ticker in tickers if ticker]
 
     def _fetch_options(ticker: str) -> Dict[str, object] | None:
         try:
-            return get_options_data_for_ticker(ticker)
+            return get_options_data_for_ticker(ticker, allow_stale=allow_stale)
         except ValueError:
             return None
 
     option_inputs: List[Dict[str, object]] = []
-    if tickers:
+    if fetch_options and tickers:
         with ThreadPoolExecutor(max_workers=len(tickers)) as executor:
             option_inputs = [payload for payload in executor.map(_fetch_options, tickers) if payload is not None]
     return build_neural_status(
@@ -1432,10 +1716,13 @@ def _compute_status(scanner_rows: List[Dict[str, object]], scanner_errors: List[
     paper_connected = any(item.get("platform") == "webull" and item.get("status") != "Not Connected" for item in accounts)
     tradingview_status = get_tradingview_status(user_id)
     broker_statuses = _broker_framework_status()
-    neural_status = _build_neural_snapshot(
+    # Options chains are display-only here and the caller replaces this
+    # snapshot with one that includes news. Don't hit the options feed twice.
+    neural_status = build_neural_status(
         scanner_rows=scanner_rows,
         watchlist_rows=get_watchlist(user_id),
-        news_rows=[],
+        news_items=[],
+        options_payloads=[],
     )
 
     phase = _market_phase()
@@ -1481,6 +1768,9 @@ def _build_page_context(
     include_market_scan: bool = True,
     force_refresh: bool = False,
     focus_ticker: str = "",
+    block_on_market_data: bool = True,
+    allow_stale: bool = False,
+    reuse_opportunity_snapshot: bool = False,
 ) -> Dict[str, object]:
     focus_ticker = focus_ticker.strip().upper()
     user_id = _current_user_id()
@@ -1489,7 +1779,10 @@ def _build_page_context(
     watchlist_tickers = [row["ticker"] for row in watchlist]
     scanner_summary: Dict[str, object] = {}
     if include_market_scan:
-        scanner_rows, scanner_errors, scanner_last_updated = get_market_data(force_refresh=force_refresh)
+        scanner_rows, scanner_errors, scanner_last_updated = get_market_data(
+            force_refresh=force_refresh,
+            block=block_on_market_data or force_refresh,
+        )
         scanner_summary = MARKET_CACHE.get("summary") or {}
     else:
         scanner_rows, scanner_errors, scanner_last_updated = [], [], ""
@@ -1513,12 +1806,18 @@ def _build_page_context(
             watchlist_tickers=watchlist_tickers,
             force_refresh=force_refresh,
             focus_ticker=focus_ticker,
+            allow_stale=allow_stale and not force_refresh,
         )
 
     news_rows: List[Dict[str, object]] = []
     news_errors: List[str] = []
     if include_news:
-        news_rows, news_errors = get_news_data(watchlist_tickers=watchlist_tickers, force_refresh=force_refresh, user_id=user_id)
+        news_rows, news_errors = get_news_data(
+            watchlist_tickers=watchlist_tickers,
+            force_refresh=force_refresh,
+            user_id=user_id,
+            allow_stale=allow_stale and not force_refresh,
+        )
 
     candle_rows: List[Dict[str, object]] = []
     pattern_rows: List[Dict[str, object]] = []
@@ -1594,10 +1893,16 @@ def _build_page_context(
     intelligence_tickers = _resolve_analysis_tickers(watchlist_tickers, scanner_rows, limit=6) if include_opportunities else []
     scanner_map = {str(row.get("ticker", "")).upper(): row for row in scanner_rows}
 
+    serve_stale = allow_stale and not force_refresh
+
     def _fetch_ticker_intelligence(ticker: str) -> Tuple[str, Dict[str, object], Dict[str, object], Dict[str, object]]:
         extended_hours = build_extended_hours_intelligence(ticker)
-        strategy = get_strategy_data_for_ticker(ticker=ticker, force_refresh=force_refresh, extended_hours=extended_hours)
-        chart = get_chart_levels_for_ticker(ticker=ticker, force_refresh=force_refresh, extended_hours=extended_hours)
+        strategy = get_strategy_data_for_ticker(
+            ticker=ticker, force_refresh=force_refresh, extended_hours=extended_hours, allow_stale=serve_stale
+        )
+        chart = get_chart_levels_for_ticker(
+            ticker=ticker, force_refresh=force_refresh, extended_hours=extended_hours, allow_stale=serve_stale
+        )
         return ticker, extended_hours, strategy, chart
 
     extended_hours_map: Dict[str, Dict[str, object]] = {}
@@ -1650,7 +1955,9 @@ def _build_page_context(
             # same abandoned-thread-leak reasoning as the intelligence pool
             # above, this time for the options fetch specifically.
             options_future_to_ticker = {
-                _BACKGROUND_FETCH_EXECUTOR.submit(get_options_data_for_ticker, t, force_refresh=force_refresh): t
+                _BACKGROUND_FETCH_EXECUTOR.submit(
+                    get_options_data_for_ticker, t, force_refresh=force_refresh, allow_stale=serve_stale
+                ): t
                 for t in intelligence_tickers
             }
             options_done, _options_not_done = futures_wait(options_future_to_ticker, timeout=OPTIONS_FETCH_DEADLINE_SECONDS)
@@ -1808,6 +2115,17 @@ def _build_page_context(
         )
     upcoming_opportunities.sort(key=lambda item: int(item.get("confidence", 0)), reverse=True)
     mission_queue.sort(key=lambda item: int(item.get("confidence", 0)), reverse=True)
+    if include_opportunities and upcoming_opportunities:
+        OPPORTUNITY_SNAPSHOTS[user_id] = {
+            "rows": upcoming_opportunities,
+            "queue": mission_queue,
+            "expires_at": _now_utc() + timedelta(seconds=STALE_SERVE_SECONDS),
+        }
+    elif not include_opportunities and reuse_opportunity_snapshot:
+        snapshot = OPPORTUNITY_SNAPSHOTS.get(user_id) or {}
+        if _cache_is_fresh({"expires_at": snapshot.get("expires_at")}):
+            upcoming_opportunities = list(snapshot.get("rows") or [])
+            mission_queue = list(snapshot.get("queue") or [])
     for idx, queue_item in enumerate(mission_queue[:3], start=1):
         queue_item["priority"] = f"Priority {idx}"
 
@@ -1832,6 +2150,8 @@ def _build_page_context(
         scanner_rows=scanner_rows,
         watchlist_rows=watchlist,
         news_rows=cached_news,
+        fetch_options=include_options,
+        allow_stale=allow_stale and not force_refresh,
     )
     status_summary["tradingview_status"] = get_tradingview_status(user_id)
     status_summary["tradingview_latest_alert"] = status_summary["tradingview_status"].get("latest_alert", {})
@@ -2432,20 +2752,46 @@ BALANCE_CACHE: Dict[str, Dict[str, object]] = {}
 BALANCE_CACHE_SECONDS = 30
 
 
+BROKER_SNAPSHOT_STALE_SECONDS = 120
+
+
+def _fresh_broker_payload(cache: Dict[str, Dict[str, object]], user_id: str) -> Optional[Dict[str, object]]:
+    cached = cache.get(user_id)
+    if (
+        isinstance(cached, dict)
+        and isinstance(cached.get("expires_at"), datetime)
+        and cached["expires_at"] > _now_utc()
+        and isinstance(cached.get("payload"), dict)
+    ):
+        return cached["payload"]
+    return None
+
+
+def _stale_broker_payload(cache: Dict[str, Dict[str, object]], user_id: str) -> Optional[Dict[str, object]]:
+    cached = cache.get(user_id)
+    if (
+        isinstance(cached, dict)
+        and isinstance(cached.get("payload"), dict)
+        and _within_stale_window(cached.get("expires_at"), BROKER_SNAPSHOT_STALE_SECONDS)
+    ):
+        return cached["payload"]
+    return None
+
+
 def _get_live_webull_balance(user_id: str, force_refresh: bool = False) -> Dict[str, object]:
     """accounts.json only stores a balance snapshot from whenever the user last
     hit Connect/Test in Account Hub - it does not update after trades place, so
     anything reading it directly can show a stale net liq / cash / buying power.
     This fetches the current balance fresh (short-cached to avoid hammering
-    Webull on every request)."""
-    cached = BALANCE_CACHE.get(user_id)
-    if (
-        not force_refresh
-        and isinstance(cached, dict)
-        and isinstance(cached.get("expires_at"), datetime)
-        and cached["expires_at"] > _now_utc()
-    ):
-        return cached["payload"]
+    Webull on every request). A page render keeps the previous snapshot for
+    up to two minutes and refreshes it off the request."""
+    fresh = _fresh_broker_payload(BALANCE_CACHE, user_id)
+    if not force_refresh and fresh is not None:
+        return fresh
+    stale = _stale_broker_payload(BALANCE_CACHE, user_id)
+    if not force_refresh and stale is not None:
+        _spawn_refresh(f"balance:{user_id}", lambda: _get_live_webull_balance(user_id, force_refresh=True))
+        return stale
 
     accounts = get_accounts(user_id)
     webull_account = next((a for a in accounts if a.get("platform") == "webull"), None)
@@ -2498,6 +2844,8 @@ def _get_live_webull_balance(user_id: str, force_refresh: bool = False) -> Dict[
                 },
             }
         except Exception as error:  # noqa: BLE001 - a flaky Webull call shouldn't break the page
+            if stale is not None:
+                return stale
             payload = {"connected": True, "balance": None, "error": str(error)}
 
     BALANCE_CACHE[user_id] = {"payload": payload, "expires_at": _now_utc() + timedelta(seconds=BALANCE_CACHE_SECONDS)}
@@ -2508,14 +2856,13 @@ def _get_live_webull_positions(user_id: str, force_refresh: bool = False) -> Dic
     """Real (sandbox) open positions from Webull, distinct from the local
     simulated paper_trader.py trades - the two are separate systems and only
     this one reflects orders actually placed through the autonomy pipeline."""
-    cached = POSITIONS_CACHE.get(user_id)
-    if (
-        not force_refresh
-        and isinstance(cached, dict)
-        and isinstance(cached.get("expires_at"), datetime)
-        and cached["expires_at"] > _now_utc()
-    ):
-        return cached["payload"]
+    fresh = _fresh_broker_payload(POSITIONS_CACHE, user_id)
+    if not force_refresh and fresh is not None:
+        return fresh
+    stale = _stale_broker_payload(POSITIONS_CACHE, user_id)
+    if not force_refresh and stale is not None:
+        _spawn_refresh(f"positions:{user_id}", lambda: _get_live_webull_positions(user_id, force_refresh=True))
+        return stale
 
     accounts = get_accounts(user_id)
     webull_account = next((a for a in accounts if a.get("platform") == "webull"), None)
@@ -2535,6 +2882,8 @@ def _get_live_webull_positions(user_id: str, force_refresh: bool = False) -> Dic
                 position["pnl_display"] = f"{'-' if pnl < 0 else ''}${abs(pnl):.2f} ({rate * 100:.2f}%)"
             payload = {"connected": True, "positions": positions, "error": ""}
         except Exception as error:  # noqa: BLE001 - a flaky Webull call shouldn't break the page
+            if stale is not None:
+                return stale
             payload = {"connected": True, "positions": [], "error": str(error)}
 
     POSITIONS_CACHE[user_id] = {"payload": payload, "expires_at": _now_utc() + timedelta(seconds=POSITIONS_CACHE_SECONDS)}

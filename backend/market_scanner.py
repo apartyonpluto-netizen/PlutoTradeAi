@@ -5,7 +5,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -265,6 +265,39 @@ def _write_disk_cache(rows: _ScanResult, errors: List[str], last_updated: str) -
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(body), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def scan_cache_is_fresh(payload_age_seconds: float) -> bool:
+    return _cache_is_fresh(payload_age_seconds)
+
+
+def load_saved_scan(
+    watchlist_tickers: Sequence[str] | None = None,
+) -> Optional[Tuple[_ScanResult, List[str], str, float]]:
+    """The last screen written to disk, including when it is past the TTL.
+
+    Pages read this instead of starting another Nasdaq screen. The cron and
+    the autonomous scan are what refresh it. Rows are copied so one user's
+    watchlist flags are not written back into the saved file.
+    """
+    path = _cache_file()
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        age = time.time() - float(payload.get("cached_at") or 0)
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("rows"), list):
+        return None
+    if int(payload.get("top_n") or 0) != scanner_top_n():
+        return None
+    cached = _read_disk_cache()
+    if not cached:
+        return None
+    rows, errors, stamp = cached
+    _apply_watchlist(rows, watchlist_tickers)
+    return rows, errors, stamp, age
 
 
 def _cache_is_fresh(payload_age_seconds: float) -> bool:

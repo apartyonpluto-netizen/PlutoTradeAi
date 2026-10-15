@@ -113,11 +113,20 @@ def _read(user_id: str) -> List[Dict[str, Any]]:
     return _parse_records(_read_text(_log_file(user_id)))
 
 
+def _forget_cached_log(path: Path) -> None:
+    try:
+        from .. import read_cache
+    except ImportError:  # pragma: no cover
+        import read_cache
+    read_cache.forget(path)
+
+
 def _atomic_write_jsonl(path: Path, records: List[Dict[str, Any]]) -> None:
     tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}")
     body = "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in records)
     tmp_path.write_text(body, encoding="utf-8")
     os.replace(tmp_path, path)
+    _forget_cached_log(path)
 
 
 def _fits(records: List[Dict[str, Any]]) -> bool:
@@ -153,12 +162,28 @@ def record_research_decision(user_id: str, record: Dict[str, Any]) -> Dict[str, 
         else:
             with open(path, "a", encoding="utf-8") as handle:
                 handle.write(line)
+        _forget_cached_log(path)
     return stamped
 
 
 def list_research_decisions(user_id: str) -> List[Dict[str, Any]]:
     """Oldest-first (append order). Reads either JSONL or a legacy JSON
-    array so a file written before the JSONL change still loads."""
+    array so a file written before the JSONL change still loads.
+
+    The daily recap and the trade cards both read this log on every page.
+    Repeat reads skip the lock and the parse until an append changes the file."""
+    try:
+        from .. import read_cache
+    except ImportError:  # pragma: no cover
+        import read_cache
+
     path = _log_file(user_id)
-    with _locked(path):
-        return _parse_records(_read_text(path))
+
+    def _read() -> List[Dict[str, Any]]:
+        with _locked(path):
+            return _parse_records(_read_text(path))
+
+    records = read_cache.load(path, _read)
+    if not isinstance(records, list):
+        return []
+    return [dict(row) if isinstance(row, dict) else row for row in records]

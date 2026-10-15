@@ -2,7 +2,16 @@
 
 @_route_bp.route("/watchlist")
 def watchlist_page() -> str:
-    return render_template("watchlist.html", **_build_page_context(include_suggestions=True))
+    return render_template(
+        "watchlist.html",
+        **_build_page_context(
+            include_suggestions=True,
+            include_opportunities=False,
+            include_options=False,
+            block_on_market_data=False,
+            allow_stale=True,
+        ),
+    )
 
 @_route_bp.route("/settings")
 def settings_page() -> str:
@@ -178,7 +187,20 @@ def api_paper_trade_close():
 @_route_bp.route("/api/alerts", methods=["GET", "POST"])
 @api_guard
 def api_alerts():
-    context = _build_page_context(include_suggestions=True, include_news=True, include_reversal=True, include_trend=True)
+    # The drawer polls this every 30s from every open page. It needs alert
+    # inputs, not a fresh 6-ticker strategy/options pass. Mission alerts
+    # come from the last snapshot the dashboard or the scan already built.
+    context = _build_page_context(
+        include_suggestions=True,
+        include_news=True,
+        include_reversal=True,
+        include_trend=True,
+        include_opportunities=False,
+        include_options=False,
+        block_on_market_data=False,
+        allow_stale=True,
+        reuse_opportunity_snapshot=True,
+    )
     alerts = context["alerts"]
     if request.method == "POST":
         payload = request.get_json(silent=True) or {}
@@ -188,7 +210,10 @@ def api_alerts():
                 dismiss_alert(_current_user_id(), payload.get("id", ""))
             except ValueError as error:
                 raise ValidationError(str(error)) from error
-            context = _build_page_context(include_suggestions=True, include_news=True)
+            context = _build_page_context(
+                include_suggestions=True, include_news=True, include_opportunities=False, include_options=False,
+                block_on_market_data=False, allow_stale=True, reuse_opportunity_snapshot=True,
+            )
             return _api_success(
                 {"alerts": context["alerts"], "unread_count": context["unread_alert_count"]},
                 alerts=context["alerts"],
@@ -200,7 +225,10 @@ def api_alerts():
                 mark_alert_read(_current_user_id(), payload.get("id", ""))
             except ValueError as error:
                 raise ValidationError(str(error)) from error
-            context = _build_page_context(include_suggestions=True, include_news=True)
+            context = _build_page_context(
+                include_suggestions=True, include_news=True, include_opportunities=False, include_options=False,
+                block_on_market_data=False, allow_stale=True, reuse_opportunity_snapshot=True,
+            )
             return _api_success(
                 {"alerts": context["alerts"], "unread_count": context["unread_alert_count"]},
                 alerts=context["alerts"],
@@ -209,7 +237,10 @@ def api_alerts():
             )
         if action == "mark_all_read":
             mark_all_read(_current_user_id(), alerts)
-            context = _build_page_context(include_suggestions=True, include_news=True)
+            context = _build_page_context(
+                include_suggestions=True, include_news=True, include_opportunities=False, include_options=False,
+                block_on_market_data=False, allow_stale=True, reuse_opportunity_snapshot=True,
+            )
             return _api_success(
                 {"alerts": context["alerts"], "unread_count": context["unread_alert_count"]},
                 alerts=context["alerts"],
@@ -220,7 +251,10 @@ def api_alerts():
             alert = add_manual_alert(_current_user_id(), payload)
         except ValueError as error:
             raise ValidationError(str(error)) from error
-        context = _build_page_context(include_suggestions=True, include_news=True)
+        context = _build_page_context(
+            include_suggestions=True, include_news=True, include_opportunities=False, include_options=False,
+            block_on_market_data=False, allow_stale=True, reuse_opportunity_snapshot=True,
+        )
         return _api_success(
             {"alert": alert, "alerts": context["alerts"], "unread_count": context["unread_alert_count"]},
             alert=alert,

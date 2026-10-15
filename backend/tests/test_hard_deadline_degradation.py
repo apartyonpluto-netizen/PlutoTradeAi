@@ -86,7 +86,7 @@ def test_options_fetch_deadline_drops_a_stuck_ticker_but_keeps_a_fast_one(user_i
     add_stock(user_id, {"ticker": "AAPL"})
     add_stock(user_id, {"ticker": "MSFT"})
 
-    def _options(ticker, force_refresh=False):
+    def _options(ticker, force_refresh=False, **_kwargs):
         if ticker == "MSFT":
             time.sleep(2)
             return {"expiration_suggestions": ["2099-01-01"], "expected_move": "±5%"}

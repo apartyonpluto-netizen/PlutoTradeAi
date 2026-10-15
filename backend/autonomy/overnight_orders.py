@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import uuid
@@ -36,14 +37,34 @@ def _stamp_environment(entry: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def list_overnight_orders(user_id: str) -> List[Dict[str, Any]]:
+    """A deep copy of the cached parse.
+
+    Callers update lifecycle fields on the returned dicts and write them
+    back. The copy keeps a failed write from changing what the next read
+    sees. The cache drops when the file's mtime changes."""
+    try:
+        from .. import read_cache
+    except ImportError:  # pragma: no cover
+        import read_cache
+
     orders_file = _orders_file(user_id)
     if not orders_file.exists():
         return []
-    try:
-        payload = json.loads(orders_file.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+
+    def _read() -> List[Dict[str, Any]]:
+        try:
+            payload = json.loads(orders_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+        return payload if isinstance(payload, list) else []
+
+    payload = read_cache.load(orders_file, _read)
+    # Callers mutate these records in place and only then write. A shallow
+    # list copy still shared the cached dicts, so a write that failed left
+    # the next read showing a lifecycle state that never reached disk.
+    if not isinstance(payload, list):
         return []
-    return payload if isinstance(payload, list) else []
+    return copy.deepcopy(payload)
 
 
 def _atomic_write(path: Path, orders: List[Dict[str, Any]]) -> None:
@@ -62,6 +83,11 @@ def _atomic_write(path: Path, orders: List[Dict[str, Any]]) -> None:
     tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}")
     tmp_path.write_text(json.dumps(orders, indent=2), encoding="utf-8")
     os.replace(tmp_path, path)
+    try:
+        from .. import read_cache
+    except ImportError:  # pragma: no cover
+        import read_cache
+    read_cache.forget(path)
 
 
 def record_overnight_order(user_id: str, entry: Dict[str, Any]) -> Dict[str, Any]:

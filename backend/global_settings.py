@@ -23,19 +23,34 @@ def _defaults() -> Dict[str, Any]:
 def get_global_settings() -> Dict[str, Any]:
     """Admin-configured defaults applied to brand-new accounts only - changing
     these never retroactively touches a settings file that already exists,
-    same as every other per-user settings store in this app."""
+    same as every other per-user settings store in this app.
+
+    The file is rewritten only when a default key is missing. Reading it
+    (which every settings and autonomy lookup does) must not rewrite the
+    persistent disk."""
+    if __package__:
+        from . import read_cache
+    else:
+        import read_cache
+
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if not GLOBAL_SETTINGS_FILE.exists():
         GLOBAL_SETTINGS_FILE.write_text(json.dumps(_defaults(), indent=2), encoding="utf-8")
-    try:
-        payload = json.loads(GLOBAL_SETTINGS_FILE.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-    merged = {**_defaults(), **payload}
-    GLOBAL_SETTINGS_FILE.write_text(json.dumps(merged, indent=2), encoding="utf-8")
-    return merged
+
+    def _read() -> Dict[str, Any]:
+        try:
+            payload = json.loads(GLOBAL_SETTINGS_FILE.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        merged = {**_defaults(), **payload}
+        if merged != payload:
+            GLOBAL_SETTINGS_FILE.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+            read_cache.forget(GLOBAL_SETTINGS_FILE)
+        return merged
+
+    return dict(read_cache.load(GLOBAL_SETTINGS_FILE, _read))
 
 
 def update_global_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
@@ -69,4 +84,9 @@ def update_global_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
         settings["default_max_positions"] = value
 
     GLOBAL_SETTINGS_FILE.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    if __package__:
+        from . import read_cache
+    else:
+        import read_cache
+    read_cache.forget(GLOBAL_SETTINGS_FILE)
     return settings

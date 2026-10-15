@@ -5,13 +5,21 @@ import live_market_stream
 @_route_bp.route("/market-scanner")
 @_route_bp.route("/scanner")
 def scanner_page() -> str:
-    return render_template("scanner.html", **_build_page_context())
+    # Rows come from the saved scan. Options cards load in the browser.
+    # The strategy/chart pipeline is the autonomous scan's job, not this page's.
+    return render_template(
+        "scanner.html",
+        **_build_page_context(include_opportunities=False, include_options=False, block_on_market_data=False),
+    )
 
 @_route_bp.route("/reversal-map")
 @_route_bp.route("/support-resistance")
 def reversal_map_page() -> str:
     focus_ticker = request.args.get("ticker", "").strip().upper()
-    context = _build_page_context(focus_ticker=focus_ticker)
+    # Rows load from /api/analysis. The HTML does not render the scan.
+    context = _build_page_context(
+        focus_ticker=focus_ticker, include_market_scan=False, include_opportunities=False, include_options=False
+    )
     context["analysis_section"] = "support_resistance"
     return render_template("reversal_map.html", **context)
 
@@ -19,7 +27,9 @@ def reversal_map_page() -> str:
 @_route_bp.route("/volume-scanner")
 def trend_detection_page() -> str:
     focus_ticker = request.args.get("ticker", "").strip().upper()
-    context = _build_page_context(focus_ticker=focus_ticker)
+    context = _build_page_context(
+        focus_ticker=focus_ticker, include_market_scan=False, include_opportunities=False, include_options=False
+    )
     context["analysis_section"] = "volume_intelligence"
     return render_template("trend_detection.html", **context)
 
@@ -27,7 +37,11 @@ def trend_detection_page() -> str:
 @_route_bp.route("/lookup/<ticker>")
 def ticker_lookup_page(ticker: str = "") -> str:
     symbol = (ticker or request.args.get("ticker", "")).strip().upper()
-    context = _build_page_context(focus_ticker=symbol)
+    # This page fetches the one typed ticker below. It does not render the
+    # Nasdaq screen or the six-ticker opportunity pipeline.
+    context = _build_page_context(
+        focus_ticker=symbol, include_market_scan=False, include_opportunities=False, include_options=False
+    )
     context["searched_ticker"] = symbol
     if not symbol:
         return render_template("ticker_lookup.html", **context)
@@ -60,7 +74,12 @@ def ticker_lookup_page(ticker: str = "") -> str:
 @_route_bp.route("/options")
 def options_page() -> str:
     searched_ticker = request.args.get("ticker", "").strip().upper()
-    context = _build_page_context(focus_ticker=searched_ticker)
+    context = _build_page_context(
+        focus_ticker=searched_ticker,
+        include_opportunities=False,
+        include_options=False,
+        block_on_market_data=False,
+    )
     if searched_ticker:
         context["searched_ticker"] = searched_ticker
     return render_template("options.html", **context)
@@ -169,7 +188,7 @@ def api_ticker_search():
 @api_guard
 def api_scanner():
     force_refresh = request.args.get("refresh", "false").lower() == "true"
-    scanner_rows, scanner_errors, last_updated = get_market_data(force_refresh=force_refresh)
+    scanner_rows, scanner_errors, last_updated = get_market_data(force_refresh=force_refresh, block=force_refresh)
     summary = MARKET_CACHE.get("summary") or {}
     return _api_success(
         {"rows": scanner_rows, "errors": scanner_errors, "last_updated": last_updated, "summary": summary},
@@ -217,7 +236,7 @@ def api_analysis_section_remove(section: str, ticker: str):
 @api_guard
 def api_live_data_status():
     force_refresh = request.args.get("refresh", "false").lower() == "true"
-    scanner_rows, scanner_errors, last_updated = get_market_data(force_refresh=force_refresh)
+    scanner_rows, scanner_errors, last_updated = get_market_data(force_refresh=force_refresh, block=force_refresh)
     connected = bool(scanner_rows)
     payload = {
         "provider": "Yahoo Finance",
@@ -267,8 +286,25 @@ def api_strategy_ticker(ticker: str):
 def api_chart_levels_watchlist():
     force_refresh = request.args.get("refresh", "false").lower() == "true"
     query_tickers = [item.strip().upper() for item in request.args.get("tickers", "").split(",") if item.strip()]
-    tickers = query_tickers or get_watchlist_tickers(_current_user_id()) or [row["ticker"] for row in get_market_data(force_refresh=False)[0][:6]]
-    rows = [get_chart_levels_for_ticker(ticker=ticker, force_refresh=force_refresh) for ticker in tickers]
+    tickers = query_tickers or get_watchlist_tickers(_current_user_id()) or [row["ticker"] for row in get_market_data(force_refresh=False, block=False)[0][:6]]
+    # One ticker used to block the next. Fetch together and keep whatever
+    # finishes inside the same deadline the rest of the page uses.
+    rows_by_ticker: Dict[str, Dict[str, object]] = {}
+    if tickers:
+        level_futures = {
+            _BACKGROUND_FETCH_EXECUTOR.submit(
+                get_chart_levels_for_ticker, ticker=ticker, force_refresh=force_refresh, allow_stale=not force_refresh
+            ): ticker
+            for ticker in tickers
+        }
+        done, _pending = futures_wait(level_futures, timeout=8)
+        for future in done:
+            ticker = level_futures[future]
+            try:
+                rows_by_ticker[ticker] = future.result()
+            except Exception:
+                continue
+    rows = [rows_by_ticker[ticker] for ticker in tickers if ticker in rows_by_ticker]
     return _api_success({"rows": rows, "count": len(rows)}, rows=rows, count=len(rows), ok=True)
 
 @_route_bp.route("/api/chart-levels/<ticker>", methods=["GET"])
@@ -344,19 +380,25 @@ def api_reversal_map():
     # Only reads reversal_rows/trend_errors below - include_opportunities=False
     # skips the entire strategy+chart+options pipeline this route was
     # previously paying for on every poll without ever touching its output.
-    context = _build_page_context(include_reversal=True, include_trend=True, include_opportunities=False)
+    context = _build_page_context(
+        include_reversal=True, include_trend=True, include_opportunities=False, include_options=False,
+        block_on_market_data=False, allow_stale=True,
+    )
     return jsonify({"rows": context["reversal_rows"], "errors": context["trend_errors"]})
 
 @_route_bp.route("/api/trend-detection", methods=["GET"])
 def api_trend_detection():
     # Same reasoning as api_reversal_map just above - only reads
     # trend_rows/trend_errors, never upcoming_opportunities.
-    context = _build_page_context(include_reversal=True, include_trend=True, include_opportunities=False)
+    context = _build_page_context(
+        include_reversal=True, include_trend=True, include_opportunities=False, include_options=False,
+        block_on_market_data=False, allow_stale=True,
+    )
     return jsonify({"rows": context["trend_rows"], "errors": context["trend_errors"]})
 
 @_route_bp.route("/api/patterns", methods=["GET"])
 def api_patterns():
-    context = _build_page_context(include_patterns=True)
+    context = _build_page_context(include_patterns=True, include_market_scan=False, include_opportunities=False, include_options=False)
     return jsonify({"candles": context["candle_rows"], "patterns": context["pattern_rows"], "errors": context["pattern_errors"]})
 
 @_route_bp.route("/api/setups/coverage", methods=["GET"])
@@ -395,7 +437,7 @@ def api_market_intel_summary():
 @api_guard
 def api_neural_status():
     watchlist = get_watchlist(_current_user_id())
-    scanner_rows, _, _ = get_market_data(force_refresh=False)
+    scanner_rows, _, _ = get_market_data(force_refresh=False, block=False)
     news_bundle = fetch_news_bundle(tickers=[item["ticker"] for item in watchlist], limit=10)
     option_inputs = [get_options_data_for_ticker(row["ticker"], force_refresh=False) for row in scanner_rows[:3]]
     neural = build_neural_status(
