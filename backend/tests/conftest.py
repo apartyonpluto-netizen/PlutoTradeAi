@@ -25,6 +25,10 @@ os.environ.setdefault("FLASK_DEBUG", "0")
 # entering. Existing scan tests expect the historical auto-place path.
 os.environ.setdefault("PLUTO_EVIDENCE_GATES", "0")
 os.environ.setdefault("PLUTO_CONFIRM_TO_ENTER", "0")
+# The Alpaca data stream stays off during tests even if the shell enabled it.
+os.environ["PLUTO_ENABLE_MARKET_STREAM"] = "0"
+os.environ["PLUTO_MARKET_PROVIDER"] = "rest"
+os.environ.pop("PLUTO_DISABLE_MARKET_STREAM", None)
 
 
 @pytest.fixture
