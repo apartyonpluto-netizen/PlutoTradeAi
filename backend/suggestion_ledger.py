@@ -133,6 +133,7 @@ def append(record: Dict[str, Any]) -> Dict[str, Any]:
         "skip_category": record.get("skip_category"),
         "reason": record.get("reason"),
         "features": record.get("features") if isinstance(record.get("features"), dict) else {},
+        "market_intel": record.get("market_intel") if isinstance(record.get("market_intel"), dict) else None,
         "entry": record.get("entry"),
         "stop": record.get("stop"),
         "target": record.get("target"),
@@ -316,6 +317,12 @@ def grade_due(
             if outcome is None:
                 continue
             row.update(outcome)
+            try:
+                import market_intel
+
+                market_intel.stamp_grades(row)
+            except Exception:
+                pass
             graded.append(dict(row))
             dirty = True
         if dirty:

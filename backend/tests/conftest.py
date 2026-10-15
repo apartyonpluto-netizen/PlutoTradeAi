@@ -31,6 +31,16 @@ os.environ["PLUTO_MARKET_PROVIDER"] = "rest"
 os.environ.pop("PLUTO_DISABLE_MARKET_STREAM", None)
 
 
+@pytest.fixture(autouse=True)
+def _reset_market_intel_state():
+    """Intel caches are process-wide. Each test starts from an empty cache."""
+    import market_intel
+
+    market_intel.clear_state()
+    yield
+    market_intel.clear_state()
+
+
 @pytest.fixture
 def user_id() -> str:
     """A fresh random user id per test - every backend data module keys

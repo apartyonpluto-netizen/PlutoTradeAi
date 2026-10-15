@@ -381,6 +381,16 @@ def api_setups_scan():
     return _api_success({"results": results, "timeframes": timeframes,
                          "qualifying": [r["trade_candidate"]["symbol"] for r in results if r.get("trade_candidate")]})
 
+@_route_bp.route("/api/market-intel/summary", methods=["GET"])
+@api_guard
+def api_market_intel_summary():
+    """Per-signal hit rates from the suggestion ledger. Read-only. Places no orders."""
+    import market_intel
+
+    payload = market_intel.summary(_current_user_id())
+    return _api_success(payload, **payload)
+
+
 @_route_bp.route("/api/neural/status", methods=["GET"])
 @api_guard
 def api_neural_status():

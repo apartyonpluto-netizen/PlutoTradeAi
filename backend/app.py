@@ -1712,6 +1712,25 @@ def _build_page_context(
                 levels_unavailable = True
                 bias = "WAIT"
 
+        # Market-intel votes nudge a score the strategy gate already accepted.
+        # They cannot add a ticker the floor rejected (that check already
+        # happened), and score() itself refuses to lift a below-floor number
+        # up to the floor. A dead source leaves its vote missing.
+        base_confidence = confidence
+        market_intel_record = None
+        try:
+            import market_intel
+
+            market_intel_record = market_intel.score(
+                ticker,
+                recommendation=bias,
+                base_confidence=base_confidence,
+                threshold=confidence_floor,
+            )
+            confidence = int(market_intel_record["adjusted_confidence"])
+        except Exception:
+            market_intel_record = None
+
         trade_quality = "A" if confidence >= 85 else "B" if confidence >= 72 else "C"
         expiration_suggestions = options_payload.get("expiration_suggestions", ["Data unavailable"] * 3)
         upcoming_opportunities.append(
@@ -1720,6 +1739,7 @@ def _build_page_context(
                 "current_price": current_price,
                 "recommendation": bias,
                 "confidence": confidence,
+                "market_intel": market_intel_record,
                 "trade_quality": trade_quality,
                 "ideal_entry": ideal_entry,
                 "support": support,
@@ -9845,6 +9865,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         return {
             "market_context": opp.get("market_context"),
             "strategies_evaluated": opp.get("strategies_evaluated"),
+            "market_intel": opp.get("market_intel"),
         }
 
     def _log_research_decision(
@@ -9953,6 +9974,9 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                     mapped = "proposed"
                 else:
                     mapped = "skipped"
+            intel_record = None
+            if isinstance(signal_snapshot, dict) and isinstance(signal_snapshot.get("market_intel"), dict):
+                intel_record = signal_snapshot.get("market_intel")
             suggestion_ledger.append({
                 "id": suggestion_id,
                 "user_id": user_id,
@@ -9965,6 +9989,7 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 "skip_category": skip_category,
                 "reason": reason_skipped,
                 "features": suggestion_ledger.features_from(signal_snapshot, raw_confidence),
+                "market_intel": intel_record,
                 "entry": ledger_entry,
                 "stop": ledger_stop,
                 "target": ledger_target,

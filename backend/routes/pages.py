@@ -202,6 +202,12 @@ def suggestion_ledger_page() -> str:
     user_id = _current_user_id()
     context["hit_rates"] = suggestion_ledger.hit_rates(user_id)
     context["ledger_rows"] = list(reversed(suggestion_ledger.list_rows(user_id)[-100:]))
+    try:
+        import market_intel
+
+        context["intel_summary"] = market_intel.summary(user_id)
+    except Exception:
+        context["intel_summary"] = None
     return render_template("suggestion_ledger.html", **context)
 
 @_route_bp.route("/api/suggestions", methods=["GET"])

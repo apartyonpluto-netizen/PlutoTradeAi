@@ -921,8 +921,15 @@ def api_autonomy_cron_trigger():
             setup_validation = setups_service.start_validation(list(CORE_SCAN_UNIVERSE), reason="weekly refresh (cron)")
     except Exception as error:  # noqa: BLE001 - research refresh must never affect trading
         logger.warning("setup validation refresh not started: %s", error)
+    intel_summary = None
+    try:
+        import market_intel
+
+        intel_summary = market_intel.summary()
+    except Exception as error:  # noqa: BLE001 - the weekly read must never affect trading
+        logger.warning("market intel summary failed: %s", error)
     return _api_success({"ran_for_users": len(results), "results": results, "setup_validation": setup_validation,
-                         "data_backup": data_backup, "setup_forward": setup_forward},
+                         "data_backup": data_backup, "setup_forward": setup_forward, "market_intel": intel_summary},
                         ok=True, ran_for_users=len(results))
 
 @_route_bp.route("/api/autonomy/fast-monitor-trigger", methods=["POST"])

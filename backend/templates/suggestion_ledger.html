@@ -24,10 +24,34 @@
     </table>
 </section>
 
+<section class="panel">
+    <div class="panel-head">
+        <h3>Market intel votes</h3>
+        <span>Same five-day grade</span>
+    </div>
+    <p class="muted">These votes sit on top of a suggestion the strategy scan already made. They can nudge confidence. None of them can open a trade on its own, and a source that is down simply leaves its vote out.</p>
+    <table>
+        <thead><tr><th>Signal</th><th>Graded</th><th>Hit rate</th><th>Fired</th><th>Missing</th></tr></thead>
+        <tbody>
+        {% for signal in (intel_summary.signals if intel_summary else []) %}
+        <tr>
+            <td>{{ signal.label }}</td>
+            <td>{{ signal.graded }}</td>
+            <td>{{ signal.hit_rate if signal.hit_rate is not none else "—" }}</td>
+            <td>{{ signal.fires }}</td>
+            <td>{{ signal.missing }}{% if signal.disabled %} (off {{ signal.disabled }}){% endif %}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="muted">No market-intel votes yet.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
 <section class="panel panel-table">
     <div class="panel-head"><h3>Recent suggestions</h3><span>{{ ledger_rows|length }}</span></div>
     <table>
-        <thead><tr><th>Day</th><th>Ticker</th><th>Strategy</th><th>Confidence</th><th>Decision</th><th>Why</th></tr></thead>
+        <thead><tr><th>Day</th><th>Ticker</th><th>Strategy</th><th>Confidence</th><th>Intel</th><th>Decision</th><th>Why</th></tr></thead>
         <tbody>
         {% for row in ledger_rows %}
         <tr>
@@ -35,11 +59,12 @@
             <td>{{ row.ticker }}</td>
             <td>{{ row.strategy }}</td>
             <td>{{ row.confidence }}</td>
+            <td>{% if row.market_intel %}{{ "%+d"|format(row.market_intel.adjustment or 0) }}{% else %}—{% endif %}</td>
             <td>{{ row.decision }}</td>
             <td>{{ row.reason or row.skip_category or "" }}</td>
         </tr>
         {% else %}
-        <tr><td colspan="6" class="muted">Nothing logged yet.</td></tr>
+        <tr><td colspan="7" class="muted">Nothing logged yet.</td></tr>
         {% endfor %}
         </tbody>
     </table>
