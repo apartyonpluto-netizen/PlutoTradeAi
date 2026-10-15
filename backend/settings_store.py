@@ -35,7 +35,7 @@ def _default_settings() -> Dict[str, object]:
         "api_status": "Operational",
         "trusted_news_sources": ["Official X API", "Yahoo Finance News", "MarketWatch RSS"],
         # Private per-user goal. Amount stays unset until the owner names one.
-        # Visible can be turned off to hide the meter and the recap mention.
+        # Visible can be turned off to hide the meter, the recap, and the exit-alert line.
         "savings_goal_name": "",
         "savings_goal_amount": None,
         "savings_goal_visible": True,
@@ -100,7 +100,8 @@ def update_settings(user_id: str, payload: Dict[str, object]) -> Dict[str, objec
             safe_updates[key] = canonical
             continue
         if key == "savings_goal_visible":
-            safe_updates[key] = bool(payload[key])
+            raw = payload[key]
+            safe_updates[key] = raw is True or str(raw).strip().lower() in {"1", "true", "yes", "on"}
             continue
         if key == "savings_goal_name":
             safe_updates[key] = str(payload[key] or "")[:80]

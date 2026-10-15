@@ -21,6 +21,10 @@ os.environ.setdefault("CREDENTIAL_ENCRYPTION_KEY", "pytest-fixed-test-key-not-fo
 os.environ.setdefault("FLASK_SECRET_KEY", "pytest-fixed-flask-secret")
 os.environ.setdefault("CRON_SECRET", "pytest-fixed-cron-secret")
 os.environ.setdefault("FLASK_DEBUG", "0")
+# Paper scans in production block on the out-of-sample gate and ask before
+# entering. Existing scan tests expect the historical auto-place path.
+os.environ.setdefault("PLUTO_EVIDENCE_GATES", "0")
+os.environ.setdefault("PLUTO_CONFIRM_TO_ENTER", "0")
 
 
 @pytest.fixture

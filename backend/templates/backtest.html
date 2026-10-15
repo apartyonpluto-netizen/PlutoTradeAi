@@ -19,6 +19,38 @@
         <input type="number" name="min_confidence" placeholder="Min confidence %" value="55" min="0" max="99" step="1">
         <button type="submit" id="backtestSubmit">Run Backtest</button>
     </form>
+    <p class="muted">A stored pass is what the paper scan is allowed to offer. This page's own run is a preview of that same test. It does not place an order.</p>
+    {% if strategy_gate and strategy_gate.strategies %}
+    <table>
+        <thead><tr><th>Strategy</th><th>Out-of-sample gate</th><th>Why</th></tr></thead>
+        <tbody>
+        {% for row in strategy_gate.strategies %}
+        <tr>
+            <td>{{ row.strategy }}</td>
+            <td>{{ "Pass" if row.passed else "Fail" }}</td>
+            <td>{{ row.reason }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No stored strategy gate yet. Calibration writes it. Until a strategy passes, paper entries that require the gate are skipped.</p>
+    {% endif %}
+    {% if setup_gate %}
+    <h4>Setup evidence</h4>
+    <table>
+        <thead><tr><th>Setup</th><th>Status</th><th>Why</th></tr></thead>
+        <tbody>
+        {% for row in setup_gate %}
+        <tr>
+            <td>{{ row.key }}</td>
+            <td>{{ row.status }}</td>
+            <td>{{ row.reason }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
 </section>
 
 <section class="panel" id="backtestSummaryPanel" style="display:none;">
@@ -31,6 +63,7 @@
         <div><small>Profit Factor</small><b id="btProfitFactor">&mdash;</b></div>
         <div><small>Max Drawdown</small><b id="btMaxDrawdown">&mdash;</b></div>
     </div>
+    <p id="btRunGate" class="muted"></p>
 </section>
 
 <section class="panel panel-table" id="backtestPerTickerPanel" style="display:none;">
@@ -91,6 +124,10 @@
             document.getElementById("btTotalReturn").textContent = `${combined.total_return_percent}%`;
             document.getElementById("btProfitFactor").textContent = combined.profit_factor;
             document.getElementById("btMaxDrawdown").textContent = `${combined.max_drawdown_percent}%`;
+            const gateNode = document.getElementById("btRunGate");
+            const gates = payload.oos_gate || {};
+            const gateLines = Object.values(gates).map((row) => `${row.passed ? "Pass" : "Fail"} · ${row.strategy}: ${row.reason}`);
+            gateNode.textContent = gateLines.join(" ") || "No out-of-sample preview for this run.";
             summaryPanel.style.display = "";
 
             const perTickerBody = document.querySelector("#backtestPerTickerTable tbody");

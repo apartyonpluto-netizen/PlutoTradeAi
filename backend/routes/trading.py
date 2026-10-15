@@ -1303,3 +1303,42 @@ def api_accounts_anthropic_credentials():
     except ValueError as error:
         return jsonify({"ok": False, "error": str(error)}), 400
     return jsonify({"ok": True, "configured": True})
+
+
+@_route_bp.route("/api/confirm-entry/<token>", methods=["GET", "POST"])
+def api_confirm_entry(token: str):
+    """Phone button. The token carries Enter or Skip. No session: the signature is the credential."""
+    def _price_for(symbol):
+        try:
+            return alpaca_data.get_latest_trade_price(str(symbol or ""))
+        except Exception:
+            return None
+
+    try:
+        body = confirm_entry.redeem(token, now=_now_utc(), price_for=_price_for)
+    except confirm_entry.TokenError as error:
+        return (error.message, 400, {"Content-Type": "text/plain; charset=utf-8"})
+    if str(body.get("act")) == "skip":
+        suggestion_ledger.update(
+            str(body.get("sid") or ""),
+            decision="skipped",
+            skip_category="user_skip",
+            reason="Skip",
+        )
+        return ("Skipped. Nothing was ordered.", 200, {"Content-Type": "text/plain; charset=utf-8"})
+    try:
+        message = _execute_confirmed_entry(body)
+    except Exception as error:
+        current = next(
+            (row for row in suggestion_ledger.list_rows(str(body.get("uid") or "")) if row.get("id") == body.get("sid")),
+            None,
+        )
+        if current is None or current.get("decision") == "awaiting_confirm":
+            suggestion_ledger.update(
+                str(body.get("sid") or ""),
+                decision="skipped",
+                skip_category="confirm_failed",
+                reason=str(error),
+            )
+        return (str(error), 400, {"Content-Type": "text/plain; charset=utf-8"})
+    return (message, 200, {"Content-Type": "text/plain; charset=utf-8"})

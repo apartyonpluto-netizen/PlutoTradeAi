@@ -108,6 +108,14 @@ def record_closed_trade(user_id: str, trade_id: str, record: Dict[str, Any]) -> 
         _atomic_write(path, records)
     if previous != stamped:
         _journal_close(user_id, stamped, revised=previous is not None)
+        try:
+            try:
+                from .. import exit_alerts
+            except ImportError:  # pragma: no cover
+                import exit_alerts
+            exit_alerts.maybe_notify(user_id, stamped)
+        except Exception:
+            pass
     return stamped
 
 

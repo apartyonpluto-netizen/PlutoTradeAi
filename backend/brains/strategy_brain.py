@@ -391,6 +391,31 @@ def build_strategy_intelligence(
         "why_news_matters": "Catalysts can reprice options and invalidate technical setups quickly.",
     }
 
+    # The winner is already chosen. The model may only rescale that score,
+    # and only outside a historical replay (backtest_mode keeps the raw score).
+    if not backtest_mode:
+        try:
+            import ml_confidence
+            price = float(current_price) or 0.0
+            if price > 0:
+                features = {
+                    "day_change_percent": day_change_pct,
+                    "rsi_14": 50.0 if rsi14 is None else rsi14,
+                    "relative_volume": relative_volume,
+                    "ema9_distance": (price - float(ema9)) / price,
+                    "ema20_distance": (price - float(ema20)) / price,
+                    "ema50_distance": (price - float(ema50)) / price,
+                    "gap_percent": gap_pct,
+                }
+                winner.score = ml_confidence.adjust_confidence(
+                    winner.name,
+                    int(winner.score),
+                    features,
+                    direction_long=0.0 if str(winner.recommendation).upper() == "PUT" else 1.0,
+                )
+        except Exception:
+            pass
+
     return {
         "ticker": normalized,
         "status": "ok",

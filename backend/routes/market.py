@@ -116,7 +116,10 @@ def neural_engine_page() -> str:
 def backtest_page() -> str:
     # backtest.html is fully client-side/JS-driven - it renders no
     # server-side scanner/opportunities context at all.
-    return render_template("backtest.html", **_build_page_context(include_market_scan=False, include_opportunities=False))
+    context = _build_page_context(include_market_scan=False, include_opportunities=False)
+    context["strategy_gate"] = evidence_gates.public_summary()
+    context["setup_gate"] = evidence_gates.setup_summary()
+    return render_template("backtest.html", **context)
 
 @_route_bp.route("/api/backtest/run", methods=["POST"])
 @api_guard

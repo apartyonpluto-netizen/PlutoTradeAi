@@ -94,4 +94,15 @@
         </tbody>
     </table>
 </section>
+
+{% if digest.what_if %}
+<section class="panel">
+    <div class="panel-head"><h3>What the skipped setups did</h3><span>Graded</span></div>
+    <ul class="mode-explainer">
+        {% for line in digest.what_if %}
+        <li>{{ line }}</li>
+        {% endfor %}
+    </ul>
+</section>
+{% endif %}
 {% endblock %}

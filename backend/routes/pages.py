@@ -188,8 +188,21 @@ def daily_digest_page() -> str:
     real request to this page took ~21s for exactly that reason before
     this fix."""
     context = _build_page_context(include_opportunities=False, include_market_scan=False)
-    context["daily_digest"] = build_daily_digest(_current_user_id(), monitor_heartbeat=_monitor_heartbeat_snapshot_for_scan_run())
+    digest = build_daily_digest(_current_user_id(), monitor_heartbeat=_monitor_heartbeat_snapshot_for_scan_run())
+    what_ifs = suggestion_ledger.pending_what_ifs(_current_user_id())
+    digest["what_if"] = [item["text"] for item in what_ifs]
+    suggestion_ledger.mark_what_ifs_sent(item["id"] for item in what_ifs)
+    context["daily_digest"] = digest
     return render_template("daily_digest.html", **context)
+
+@_route_bp.route("/suggestion-ledger")
+def suggestion_ledger_page() -> str:
+    """Hit rate of logged suggestions. No market scan: this page only reads the ledger."""
+    context = _build_page_context(include_opportunities=False, include_market_scan=False)
+    user_id = _current_user_id()
+    context["hit_rates"] = suggestion_ledger.hit_rates(user_id)
+    context["ledger_rows"] = list(reversed(suggestion_ledger.list_rows(user_id)[-100:]))
+    return render_template("suggestion_ledger.html", **context)
 
 @_route_bp.route("/api/suggestions", methods=["GET"])
 def api_suggestions():

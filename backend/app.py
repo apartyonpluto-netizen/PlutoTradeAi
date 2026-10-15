@@ -165,6 +165,7 @@ if __package__:
         recalibrate_from_real_outcomes,
         start_calibration,
     )
+    from . import confirm_entry, evidence_gates, ml_confidence, suggestion_ledger, trailing_stop
     from .market_scanner import scan_market
     from .news.future_news import get_future_news_roadmap
     from .news.news_service import fetch_news_bundle
@@ -338,6 +339,11 @@ else:
         recalibrate_from_real_outcomes,
         start_calibration,
     )
+    import confirm_entry
+    import evidence_gates
+    import ml_confidence
+    import suggestion_ledger
+    import trailing_stop
     from market_scanner import scan_market
     from news.future_news import get_future_news_roadmap
     from news.news_service import fetch_news_bundle
@@ -673,6 +679,8 @@ def _reject_cross_site_writes():
     authenticate with their own secret."""
     if request.method not in _STATE_CHANGING_METHODS or request.path in _TOKEN_AUTH_PATHS:
         return None
+    if request.path.startswith("/api/confirm-entry/"):
+        return None
     from urllib.parse import urlsplit
 
     source = request.headers.get("Origin") or request.headers.get("Referer")
@@ -690,7 +698,7 @@ def _reject_cross_site_writes():
 @app.before_request
 def _require_login():
     path = request.path
-    if path in _PUBLIC_PATHS or path in _TOKEN_AUTH_PATHS:
+    if path in _PUBLIC_PATHS or path in _TOKEN_AUTH_PATHS or path.startswith("/api/confirm-entry/"):
         return None
     if any(path.startswith(prefix) for prefix in _PUBLIC_PATH_PREFIXES):
         return None
@@ -3576,7 +3584,8 @@ def _refresh_stop_confidence(user_id: str, creds: Dict[str, str], account_id: st
             current_recommendation != "CALL"
             or (entry_confidence - current_confidence) >= CONFIDENCE_DEGRADATION_THRESHOLD
         )
-        if not degraded:
+        trailing_on = trailing_stop.configured_percent() is not None
+        if not degraded and not trailing_on:
             continue
 
         current_price = float(position.get("last_price", 0) or 0)
@@ -3584,9 +3593,25 @@ def _refresh_stop_confidence(user_id: str, creds: Dict[str, str], account_id: st
         if current_price <= 0 or quantity <= 0:
             continue
 
-        tightened_stop = _compute_tightened_stop(current_stop, current_price)
-        if tightened_stop <= current_stop:
+        choices = []
+        if degraded:
+            tightened_stop = _compute_tightened_stop(current_stop, current_price)
+            if tightened_stop > current_stop:
+                choices.append((
+                    tightened_stop,
+                    (
+                        f"confidence dropped {entry_confidence}->{current_confidence}"
+                        if current_recommendation == "CALL"
+                        else f"recommendation flipped to {current_recommendation} (was {entry_confidence}% CALL at entry)"
+                    ),
+                ))
+        if str(tracked_entry.get("side") or "BUY").upper() == "BUY":
+            trailed = trailing_stop.maybe_tighten(current_stop, current_price, "long")
+            if trailed is not None:
+                choices.append((trailed, "trailing stop"))
+        if not choices:
             continue
+        tightened_stop, refresh_reason = max(choices, key=lambda item: item[0])
 
         stale_legs = pop_exit_orders_by_type(user_id, ticker, "stop")
         for exit_order in stale_legs:
@@ -3608,11 +3633,7 @@ def _refresh_stop_confidence(user_id: str, creds: Dict[str, str], account_id: st
             record_exit_order(user_id, ticker, stop_result["client_order_id"], "stop")
             tracked_entry["stop"] = tightened_stop
             tracked_entry["stop_refreshed_at"] = _now_utc().isoformat()
-            tracked_entry["stop_refresh_reason"] = (
-                f"confidence dropped {entry_confidence}->{current_confidence}"
-                if current_recommendation == "CALL"
-                else f"recommendation flipped to {current_recommendation} (was {entry_confidence}% CALL at entry)"
-            )
+            tracked_entry["stop_refresh_reason"] = refresh_reason
             changed = True
         except Exception as stop_error:  # noqa: BLE001 - the old stop is already cancelled; flag it unprotected so _reconcile_exit_orders retries next tick
             tracked_entry["stop_order_placed"] = False
@@ -4056,6 +4077,128 @@ def _persist_entry_before_submission(user_id: str, account_id: str, entry: Dict[
         )
         return False
     return True
+
+
+def _ledger_bars_for(ticker: str) -> List[Dict[str, object]]:
+    """Daily bars for grading a suggestion. Failures stay empty so a scan never blocks on them."""
+    frame = alpaca_data.get_bars_single(ticker, "1mo", "1d")
+    if frame is None or getattr(frame, "empty", True):
+        return []
+    rows = []
+    for idx, bar in frame.iterrows():
+        stamp = idx.date().isoformat() if hasattr(idx, "date") else str(idx)[:10]
+        rows.append({
+            "date": stamp,
+            "open": float(bar["Open"]),
+            "high": float(bar["High"]),
+            "low": float(bar["Low"]),
+            "close": float(bar["Close"]),
+        })
+    return rows
+
+
+def _execute_confirmed_entry(body: Dict[str, object]) -> str:
+    """Enter from a signed phone button. Uses the same protected order path as the scan."""
+    user_id = str(body.get("uid") or "")
+    if not user_id:
+        raise ValidationError("This confirm link has no account.")
+    try:
+        import go_live_gate
+        go_live_gate.bind(user_id)
+        go_live_gate.refuse_if_not_ready()
+    except Exception as error:
+        if error.__class__.__name__ == "GoLiveNotReady":
+            raise ValidationError(str(error)) from error
+        if error.__class__.__name__ == "ValidationError":
+            raise
+    if _new_entries_disabled_by_deployment_kill_switch():
+        raise ValidationError("New entries are disabled.")
+    if not _new_entries_allowed(_current_webull_trading_session()):
+        raise ValidationError("Outside CORE hours, so a protected entry cannot be placed.")
+    if get_autonomy_status(user_id).get("emergency_stop_enabled"):
+        raise ValidationError("Emergency stop is on.")
+    ticker = str(body.get("sym") or "").upper()
+    direction = "short" if body.get("dir") == "short" else "long"
+    blocked = evidence_gates.block_reason({
+        "strategy": body.get("strat"),
+        "recommendation": "PUT" if direction == "short" else "CALL",
+        "confidence": body.get("conf"),
+        "market_context": {},
+    })
+    if blocked:
+        why, category = blocked
+        suggestion_ledger.update(str(body.get("sid") or ""), decision="skipped", skip_category=category, reason=why)
+        raise ValidationError(why)
+    if not is_webull_configured(user_id):
+        raise ValidationError("Webull is not configured for this account.")
+    creds = get_webull_credentials(user_id)
+    paper_accounts = webull_api.get_paper_accounts(creds["app_key"], creds["app_secret"])
+    allowed = set()
+    for finder in (webull_api.find_individual_cash_account, webull_api.find_individual_margin_account):
+        found = finder(paper_accounts)
+        if found and found.get("account_id"):
+            allowed.add(str(found["account_id"]))
+    account_id = str(body.get("acct") or "")
+    if account_id not in allowed:
+        raise ValidationError("This confirm link is not for an account on this login.")
+    quantity = int(float(body.get("qty") or 0))
+    limit_price = float(body.get("lim") or 0)
+    stop_price = float(body.get("stop") or 0)
+    target_price = float(body.get("tgt") or 0)
+    if quantity < 1 or limit_price <= 0 or stop_price <= 0 or target_price <= 0:
+        raise ValidationError("This confirm link is missing a size or a protective price.")
+    trading_day = str(body.get("day") or _trading_day_key())
+    entry: Dict[str, object] = {
+        "ticker": ticker,
+        "direction": direction,
+        "side": "SELL" if direction == "short" else "BUY",
+        "quantity": quantity,
+        "limit_price": limit_price,
+        "confidence": body.get("conf"),
+        "strategy": body.get("strat"),
+        "target": target_price,
+        "stop": stop_price,
+        "account_id": account_id,
+        "status": "pending",
+        "trading_day": trading_day,
+        "instrument_type": "EQUITY",
+        "correlation_id": event_journal.new_correlation_id(),
+        "planned_risk_dollars": round(quantity * abs(limit_price - stop_price), 2),
+    }
+    _submit_and_protect_entry(
+        user_id=user_id,
+        creds=creds,
+        account_id=account_id,
+        ticker=ticker,
+        requested_quantity=quantity,
+        limit_price=limit_price,
+        stop_price=stop_price,
+        target_price=target_price,
+        trading_day=trading_day,
+        entry=entry,
+    )
+    lifecycle_state = entry.get("lifecycle_state")
+    if lifecycle_state == ol.ENTRY_FAILED:
+        entry["status"] = "failed"
+        record_overnight_order(user_id, entry)
+        suggestion_ledger.update(
+            str(body.get("sid") or ""),
+            decision="skipped",
+            skip_category="entry_failed",
+            reason=str(entry.get("error") or "entry order failed"),
+        )
+        raise ValidationError(str(entry.get("error") or "The order did not go through."))
+    entry["status"] = "unknown_submission_state" if lifecycle_state == ol.UNKNOWN_SUBMISSION_STATE else "placed"
+    record_overnight_order(user_id, entry)
+    suggestion_ledger.update(
+        str(body.get("sid") or ""),
+        decision="taken" if entry["status"] == "placed" else "skipped",
+        skip_category=None if entry["status"] == "placed" else "unknown_submission_state",
+        reason=None if entry["status"] == "placed" else "order submission result could not be confirmed",
+    )
+    if entry["status"] != "placed":
+        return f"{ticker}: the broker response was ambiguous, so the order is being reconciled. It was not treated as a clean fill."
+    return f"Entered {ticker}. Stop ${stop_price:.2f}, target ${target_price:.2f}."
 
 
 def _submit_and_protect_entry(
@@ -9505,6 +9648,16 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         for order in broker_env.only_current(list_overnight_orders(user_id))
         if order.get("status") == "placed" and _order_trading_day(order) == today_key
     }
+    reentry_ready = set()
+    if confirm_entry.confirm_enabled():
+        try:
+            reentry_ready = confirm_entry.reentry_tickers(
+                broker_env.only_current(list_overnight_orders(user_id)),
+                today_key,
+                _order_trading_day,
+            )
+        except Exception:
+            reentry_ready = set()
 
     # A ticker whose entry is still anywhere short of CLOSED - opened
     # today or on an earlier day, equity or option - must never receive a
@@ -9534,7 +9687,10 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         for opp in opportunities
         if str(opp.get("recommendation", "")).upper() in ("CALL", "PUT")
         and int(opp.get("confidence", 0) or 0) >= OVERNIGHT_MIN_CONFIDENCE
-        and str(opp.get("ticker", "")).upper() not in already_placed_today
+        and (
+            str(opp.get("ticker", "")).upper() not in already_placed_today
+            or str(opp.get("ticker", "")).upper() in reentry_ready
+        )
         and str(opp.get("ticker", "")).upper() not in tickers_with_open_positions
         and str(opp.get("ticker", "")).upper() not in declined_today
     ]
@@ -9695,7 +9851,9 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         *, ticker, recommendation, strategy, raw_confidence, decision, reason_skipped,
         quantity, entry_client_order_id, regime_shadow=None, skip_category=None, signal_snapshot=None,
         trade_plan=None, correlation_id=None, evaluated_at=None,
-    ) -> None:
+        suggestion_id=None, ledger_decision=None, ledger_entry=None, ledger_stop=None,
+        ledger_target=None, ledger_regime=None, ledger_reentry=False, confirm_expires_at=None,
+    ):
         """Durably records ONE evaluated candidate to the append-only
         research log (autonomy/research_log.py) - called for EVERY
         opportunity this scan touches, whether it was ultimately placed,
@@ -9786,6 +9944,37 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 },
             ))
         event_journal.emit_many(user_id, events)
+        try:
+            mapped = ledger_decision
+            if not mapped:
+                if decision == "placed":
+                    mapped = "taken"
+                elif decision == "proposed":
+                    mapped = "proposed"
+                else:
+                    mapped = "skipped"
+            suggestion_ledger.append({
+                "id": suggestion_id,
+                "user_id": user_id,
+                "trading_day": today_key,
+                "ticker": ticker,
+                "strategy": strategy,
+                "recommendation": recommendation,
+                "confidence": raw_confidence,
+                "decision": mapped,
+                "skip_category": skip_category,
+                "reason": reason_skipped,
+                "features": suggestion_ledger.features_from(signal_snapshot, raw_confidence),
+                "entry": ledger_entry,
+                "stop": ledger_stop,
+                "target": ledger_target,
+                "quantity": quantity,
+                "regime": ledger_regime,
+                "reentry": bool(ledger_reentry),
+                "confirm_expires_at": confirm_expires_at,
+            })
+        except Exception:
+            pass
 
     for opp in opportunities:
         if opp in candidates:
@@ -9844,6 +10033,32 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
         )
 
     for candidate_index, opp in enumerate(candidates):
+        blocked = None
+        try:
+            blocked = evidence_gates.block_reason(opp)
+        except Exception:
+            blocked = None
+        if blocked:
+            why, category = blocked
+            blocked_ticker = str(opp.get("ticker", ""))
+            skipped.append({
+                "ticker": blocked_ticker,
+                "recommendation": opp.get("recommendation"),
+                "confidence": opp.get("confidence"),
+                "reason_skipped": why,
+                "was_qualifying": True,
+                "skip_category": category,
+            })
+            _log_research_decision(
+                ticker=blocked_ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
+                raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped", reason_skipped=why,
+                quantity=None, entry_client_order_id=None, skip_category=category,
+                signal_snapshot=_signal_snapshot_from(opp),
+                ledger_regime=evidence_gates.regime_from_context(
+                    opp.get("market_context") if isinstance(opp.get("market_context"), dict) else None
+                ),
+            )
+            continue
         if candidate_index > 0:
             time.sleep(1.0)  # spread order placements out to avoid tripping Webull's rate limiter
         ticker = str(opp.get("ticker", ""))
@@ -10425,6 +10640,82 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
                 )
                 continue
 
+            if confirm_entry.confirm_enabled():
+                regime_name = evidence_gates.regime_from_context(
+                    opp.get("market_context") if isinstance(opp.get("market_context"), dict) else None
+                )
+                why_line = " ".join(str(opp.get("why_ai_likes_it") or opp.get("strategy") or "qualifying setup").split())
+                if len(why_line) > 160:
+                    why_line = why_line[:157].rstrip() + "..."
+                is_reentry = ticker.upper() in reentry_ready
+                base = confirm_entry.public_base_url()
+                if not base:
+                    choice = {
+                        "send": False,
+                        "skip_category": "confirm_unconfigured",
+                        "ledger_decision": "skipped",
+                        "reason": "confirm-to-enter is on but no public address is set, so nothing was ordered",
+                    }
+                else:
+                    choice = confirm_entry.delivery(user_id, today_key, _now_utc())
+                suggestion_id = uuid.uuid4().hex
+                expires_at = None
+                if choice.get("send"):
+                    common = {
+                        "uid": user_id,
+                        "sid": suggestion_id,
+                        "px": fresh_price if fresh_price else limit_price,
+                        "sym": ticker,
+                        "qty": quantity,
+                        "lim": limit_price,
+                        "stop": stop_price,
+                        "tgt": target_price,
+                        "dir": direction,
+                        "day": today_key,
+                        "acct": candidate_account_id,
+                        "strat": opp.get("strategy"),
+                        "conf": opp.get("confidence"),
+                    }
+                    now_token = _now_utc()
+                    enter_token = confirm_entry.issue_token({**common, "act": "enter"}, now=now_token)
+                    skip_token = confirm_entry.issue_token({**common, "act": "skip"}, now=now_token)
+                    expires_at = (now_token + timedelta(seconds=confirm_entry.ttl_seconds())).isoformat()
+                    message = confirm_entry.setup_message(
+                        ticker=ticker,
+                        why=why_line,
+                        confidence=opp.get("confidence"),
+                        regime=regime_name,
+                        entry=limit_price,
+                        stop=stop_price,
+                        target=target_price,
+                        quantity=float(quantity),
+                        direction=direction,
+                        reentry=is_reentry,
+                    )
+                    confirm_entry.send_setup_alert(
+                        message,
+                        confirm_entry.ntfy_actions(base, enter_token, skip_token),
+                    )
+                entry["status"] = "skipped"
+                entry["reason_skipped"] = choice.get("reason")
+                entry["was_qualifying"] = True
+                entry["skip_category"] = choice.get("skip_category")
+                skipped.append(entry)
+                record_overnight_order(user_id, entry)
+                _log_research_decision(
+                    correlation_id=correlation_id, evaluated_at=evaluated_at,
+                    ticker=ticker, recommendation=opp.get("recommendation"), strategy=opp.get("strategy"),
+                    raw_confidence=int(opp.get("confidence", 0) or 0), decision="skipped",
+                    reason_skipped=choice.get("reason"),
+                    quantity=quantity, entry_client_order_id=None,
+                    regime_shadow=entry.get("regime_shadow"), skip_category=choice.get("skip_category"),
+                    signal_snapshot=_signal_snapshot_from(opp), trade_plan=entry.get("trade_plan"),
+                    suggestion_id=suggestion_id, ledger_decision=choice.get("ledger_decision"),
+                    ledger_entry=limit_price, ledger_stop=stop_price, ledger_target=target_price,
+                    ledger_regime=regime_name, ledger_reentry=is_reentry, confirm_expires_at=expires_at,
+                )
+                continue
+
             _submit_and_protect_entry(
                 user_id=user_id,
                 creds=creds,
@@ -10528,6 +10819,21 @@ def _run_autonomous_trade_scan_locked(user_id: str, dry_run: bool = False) -> Di
             # unconditionally before this loop, so already-open positions
             # remain protected either way.
             break
+
+    if not dry_run:
+        try:
+            graded = suggestion_ledger.grade_due(_ledger_bars_for)
+            immediate = os.environ.get("PLUTO_WHATIF_IMMEDIATE", "").strip().lower() in {"1", "true", "yes", "on"}
+            if immediate and graded and not confirm_entry.in_quiet_hours(_now_utc()):
+                import phone_alerts
+                sent_ids = []
+                for item in suggestion_ledger.pending_what_ifs(user_id):
+                    if phone_alerts.notify("setup", "What-if", item["text"]):
+                        sent_ids.append(item["id"])
+                if sent_ids:
+                    suggestion_ledger.mark_what_ifs_sent(sent_ids)
+        except Exception:
+            pass
 
     return {
         "ok": True,

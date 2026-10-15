@@ -252,6 +252,21 @@ def api_admin_recalibrate_strategies():
         pass
     return _api_success(result, ok=True)
 
+@_route_bp.route("/api/admin/train-confidence", methods=["POST"])
+def api_admin_train_confidence():
+    """Starts offline confidence-model training. It does not run inside the monitor loop
+    and it does not choose trades."""
+    guard = _require_admin()
+    if guard:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    symbols = payload.get("symbols") or list(CORE_SCAN_UNIVERSE)[:12]
+    try:
+        result = ml_confidence.start_training(symbols, lookback_months=int(payload.get("lookback_months", 18)))
+    except ValueError as error:
+        return _api_failure(str(error), status_code=400, error_code="invalid_request", ok=False)
+    return _api_success(result, ok=True)
+
 @_route_bp.route("/api/admin/calibration-status", methods=["GET"])
 def api_admin_calibration_status():
     guard = _require_admin()
