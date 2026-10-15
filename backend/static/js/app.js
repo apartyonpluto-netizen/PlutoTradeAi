@@ -412,10 +412,10 @@ const bindScannerPage = () => {
       tbody.innerHTML = (payload.rows || [])
         .map(
           (row) => `
-          <tr>
+          <tr class="chart-pick" data-ticker="${escapeHtml(row.ticker)}">
             <td>${escapeHtml(row.ticker)}</td>
             <td>$${escapeHtml(row.price)}</td>
-            <td class="${row.percent_change >= 0 ? "tone-positive" : "tone-caution"}">${escapeHtml(row.percent_change)}%</td>
+            <td class="${row.percent_change >= 0 ? "tone-positive" : "tone-negative"}">${escapeHtml(row.percent_change)}%</td>
             <td>${escapeHtml(row.relative_volume)}x</td>
             <td>${escapeHtml(row.volume)}</td>
             <td>${escapeHtml(row.scanner_score)}</td>
@@ -434,7 +434,7 @@ const bindScannerPage = () => {
       const summary = payload.summary || {};
       const summaryNode = document.getElementById("scannerSummary");
       if (summaryNode && summary.universe_count) {
-        summaryNode.textContent = `Scanned ${summary.universe_count} symbols (${summary.universe_source || "list"}). ${summary.liquid_count || 0} passed the liquidity screen. Showing the top ${summary.shown_count || (payload.rows || []).length}. Strategy and charting still deep-analyze up to 6 of these per cycle (watchlist first, then this rank).`;
+        summaryNode.textContent = `Looked at ${summary.universe_count} names. ${summary.liquid_count || 0} were liquid enough. Showing the top ${summary.shown_count || (payload.rows || []).length}.`;
       }
       const liveBadge = document.getElementById("scannerLiveBadge");
       if (liveBadge) liveBadge.textContent = `Live updates every ${frequencySeconds}s · ${new Date().toLocaleTimeString()}`;
@@ -573,8 +573,11 @@ const renderOptionsCard = (suggestion) => {
         <h3>${escapeHtml(suggestion.ticker || "")}</h3>
         <span class="${directionClass}">AI favors: ${escapeHtml(suggestion.suggested_direction || "WAIT")}</span>
       </div>
-      <p><b>Confidence:</b> ${escapeHtml(suggestion.confidence_score ?? "0")}%</p>
-      <p><b>Reason:</b> ${escapeHtml(suggestion.reason_for_direction || "Data unavailable")}</p>
+      <p class="trade-why">${escapeHtml(suggestion.reason_for_direction || "Data unavailable")}</p>
+      <div class="confidence" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Number(suggestion.confidence_score) || 0}" aria-label="Confidence">
+        <i style="width: ${Math.max(0, Math.min(100, Number(suggestion.confidence_score) || 0))}%"></i>
+      </div>
+      <span class="confidence-word">${(Number(suggestion.confidence_score) || 0) >= 70 ? "strong" : (Number(suggestion.confidence_score) || 0) >= 40 ? "building" : "weak"}</span>
       <div class="options-field-grid">
         <div><small>Current stock price</small><span>${escapeHtml(suggestion.current_stock_price || "Data unavailable")}</span></div>
         <div><small>Expected move</small><span>${escapeHtml(suggestion.expected_move || "Data unavailable")}</span></div>
@@ -3141,9 +3144,10 @@ const bindSafetyControls = () => {
           body: JSON.stringify({
             savings_goal_name: String(data.get("savings_goal_name") || ""),
             savings_goal_amount: amount === "" ? null : Number(amount),
+            savings_goal_visible: data.get("savings_goal_visible") === "on",
           }),
         });
-        showToast("Savings goal saved.", "success");
+        showToast("Goal saved.", "success");
         window.setTimeout(() => window.location.reload(), 400);
       } catch (err) {
         showToast(err.message, "error");

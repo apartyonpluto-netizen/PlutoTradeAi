@@ -3,32 +3,9 @@
    one violet accent, teal for "good". No glow, no starfield, no display
    fonts. Only applies to the default theme; onyx / nebula are untouched. */
 
-:root:not([data-theme="onyx"]):not([data-theme="nebula"]) {
-    --bg-base: #0f1020;
-    --bg-elevated: #161832;
-    --bg-elevated-soft: #1b1d3a;
-    --bg-surface: #151730;
-    --text-primary: #eeeefa;
-    --text-secondary: #b3b4d2;
-    --text-muted: #8082a8;
-    --accent: #a394ff;
-    --accent-soft: rgba(163, 148, 255, 0.14);
-    --accent-primary: #a394ff;
-    --accent-primary-soft: rgba(163, 148, 255, 0.16);
-    --accent-magenta: #a394ff;
-    --accent-gold: #d2b47a;
-    --positive: #5fd4b8;
-    --caution: #e0bb6a;
-    --negative: #f08a94;
-    --border: rgba(163, 148, 255, 0.13);
-    --border-strong: rgba(163, 148, 255, 0.26);
-    --shadow-1: none;
-    --shadow-2: 0 8px 24px rgba(4, 4, 16, 0.4);
-    color-scheme: dark;
-}
-
 :root:not([data-theme="onyx"]):not([data-theme="nebula"]) body {
-    background: linear-gradient(180deg, #12132a 0%, #0f1020 320px) fixed;
+    background: var(--bg-base);
+    background-image: none;
 }
 
 /* ---- calm the chrome ---- */

@@ -1,18 +1,13 @@
 <div class="trade-cards">
     {% for card in trade_cards %}
-    <article class="trade-card">
+    <article class="trade-card chart-pick" data-ticker="{{ card.ticker }}" data-entry="{{ card.entry if card.entry is not none else '' }}" data-exit="{{ card.exit if card.exit is not none else '' }}" data-stop="{{ card.stop if card.stop is not none else '' }}" data-target="{{ card.target if card.target is not none else '' }}">
         <header>
             <b>{{ card.ticker }}</b>
             <span>{{ card.strategy }}</span>
             {% if card.score is not none %}<span class="status-pill">Score {{ card.score }}</span>{% endif %}
         </header>
-        <p>{{ card.why }}</p>
+        <p class="trade-why">{{ card.why }}</p>
         {% if card.chart %}
-        <svg class="trade-spark" viewBox="0 0 160 64" role="img" aria-label="Entry to exit">
-            <line x1="12" y1="{{ card.chart.y1 }}" x2="148" y2="{{ card.chart.y2 }}" class="{{ 'spark-up' if card.chart.up else 'spark-down' }}"/>
-            <circle cx="12" cy="{{ card.chart.y1 }}" r="3.5" class="spark-entry"/>
-            <circle cx="148" cy="{{ card.chart.y2 }}" r="3.5" class="{{ 'spark-up' if card.chart.up else 'spark-down' }}"/>
-        </svg>
         <p class="trade-card-prices">
             <span>Entry {{ "%.2f"|format(card.entry) }}</span>
             <span>Exit {{ "%.2f"|format(card.exit) }}</span>

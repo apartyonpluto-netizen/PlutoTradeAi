@@ -15,13 +15,18 @@
 <section class="hero account-hub-hero">
     <div class="hero-glow" aria-hidden="true"></div>
     <div class="hero-content">
-        <p class="eyebrow">Account Hub</p>
-        <h2>Connected Brokerage + Signal Infrastructure</h2>
-        <p class="hero-copy">Manage real execution, paper insurance lanes, and webhook analytics from one secure command center.</p>
+        <p class="eyebrow">account hub</p>
+        <h2>accounts.</h2>
+        {% if webull_balance is defined and webull_balance.connected and webull_balance.balance %}
+        <p class="account-value-inline">${{ webull_balance.balance.net_liquidation_value }}</p>
+        <p class="hero-copy">That's the paper balance. Cash and buying power are on the card.</p>
+        {% else %}
+        <p class="hero-copy">Hook up the paper account if you want a balance here. Live stays off.</p>
+        {% endif %}
     </div>
     <div class="mission-box">
-        <small>Safety Guardrails</small>
-        <b>Live trading defaults to OFF · Approval mode required</b>
+        <small>heads up</small>
+        <b>Live stays off until you turn it on.</b>
     </div>
 </section>
 
